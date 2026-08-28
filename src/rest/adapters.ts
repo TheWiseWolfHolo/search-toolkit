@@ -362,7 +362,12 @@ export class ParallelAdapter implements RestAdapter {
           items: { type: "string", maxLength: 200 },
           description: "Concise 3-6 word keyword searches; the main query is used if omitted",
         },
-        mode: { type: "string", enum: ["turbo", "fast", "basic", "advanced"], default: "advanced" },
+        mode: {
+          type: "string",
+          enum: ["turbo", "fast", "basic", "advanced"],
+          default: "basic",
+          description: "Basic is the recommended default for general agents; use turbo for lowest latency/cost and advanced explicitly for highest-quality multi-hop retrieval",
+        },
         maxCharsTotal: { type: "integer", minimum: 1 },
         maxResults: { type: "integer", minimum: 1, maximum: 20 },
         maxCharsPerResult: { type: "integer", minimum: 1 },
@@ -382,9 +387,9 @@ export class ParallelAdapter implements RestAdapter {
     const body: Record<string, unknown> = {
       objective: query,
       search_queries: searches.length ? searches : [query],
+      mode: stringArg(args, "mode", "basic"),
     };
     for (const [source, target] of [
-      ["mode", "mode"],
       ["maxCharsTotal", "max_chars_total"],
       ["sessionId", "session_id"],
       ["clientModel", "client_model"],

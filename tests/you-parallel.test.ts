@@ -86,6 +86,8 @@ test("Parallel uses the v1 semantic Search contract and advanced settings", asyn
     const tool = adapter.tools()[0];
     assert.equal(tool?.name, "parallel_search");
     assert.equal(tool?.annotations?.readOnlyHint, true);
+    const schema = tool?.inputSchema as { properties?: Record<string, Record<string, unknown>> };
+    assert.equal(schema.properties?.mode?.default, "basic");
     const output = await adapter.call("parallel_search", {
       query: "Find current official web retrieval API changes",
       searchQueries: ["web retrieval API changes", "official search API changelog"],
@@ -168,6 +170,60 @@ test("search_auto context mode falls back to Parallel when Brave is unavailable"
       upstreamTool: "parallel_search",
     });
     assert.equal((requestBody.advanced_settings as Record<string, unknown>).max_results, 4);
+    assert.equal(requestBody.mode, "basic");
+  } finally {
+    await toolkit.close();
+    globalThis.fetch = originalFetch;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("search_auto honors automatic and manualOnly provider policy", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-auto-policy-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 1,
+    statePath: join(directory, "state.db"),
+    providers: {
+      brave: {
+        enabled: true,
+        automatic: false,
+        keys: ["test-key"],
+        integration: { kind: "rest", adapter: "brave" },
+      },
+      parallel: {
+        enabled: true,
+        automatic: true,
+        manualOnly: true,
+        keys: ["test-key"],
+        integration: { kind: "rest", adapter: "parallel" },
+      },
+      you: {
+        enabled: true,
+        automatic: true,
+        keys: ["test-key"],
+        integration: { kind: "rest", adapter: "you" },
+      },
+    },
+  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ results: { web: [], news: [] } }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    const output = await toolkit.callTool("search_auto", {
+      query: "respect automatic policy",
+      mode: "context",
+      limit: 2,
+    }) as Record<string, unknown>;
+    assert.deepEqual((output.structuredContent as Record<string, unknown>).route, {
+      provider: "you",
+      tool: "you_search",
+      upstreamTool: "you_search",
+    });
   } finally {
     await toolkit.close();
     globalThis.fetch = originalFetch;

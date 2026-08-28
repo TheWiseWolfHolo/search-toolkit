@@ -89,7 +89,7 @@ The MCP server exposes:
 
 - Provider-prefixed official upstream tools selected by the provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its entire management catalog.
 - Every configured REST adapter tool.
-- `search_auto` for capability-aware default routing.
+- `search_auto` for capability-aware default routing. It considers only providers with `automatic: true` and always excludes `manualOnly` providers.
 - `search_pool_status` for masked key-pool diagnostics.
 - `search_rotation_probe` for a live, quota-consuming rotation proof.
 

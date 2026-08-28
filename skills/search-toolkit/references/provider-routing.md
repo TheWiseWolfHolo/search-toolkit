@@ -34,7 +34,7 @@ Use `you_search` when one current query should return both Web and News sections
 
 ### Parallel — semantic objectives and dense excerpts
 
-Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
+Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Keep the default `mode: basic` for routine agent work, select `turbo` for the lowest latency and cost, and use `advanced` explicitly for higher-latency multi-hop retrieval. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
 
 ### Serper — concise Google-style SERP
 

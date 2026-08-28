@@ -138,7 +138,12 @@ export class SearchToolkit {
         : mode === "official"
           ? ["serper_search", "querit_search", "exa_web_search_exa"]
           : ["querit_search", "parallel_search", "you_search", "brave_web_search", "serper_search", "tavily_tavily_search"];
-    const selectedName = candidates.find((name) => this.bindings.has(name));
+    const selectedName = candidates.find((name) => {
+      const candidate = this.bindings.get(name);
+      if (!candidate) return false;
+      const provider = this.config.providers[candidate.provider];
+      return provider?.automatic === true && provider.manualOnly !== true;
+    });
     if (!selectedName) throw new Error(`No automatic provider is available for mode ${mode}`);
     const selected = this.bindings.get(selectedName);
     if (!selected) throw new Error(`Automatic provider disappeared: ${selectedName}`);
