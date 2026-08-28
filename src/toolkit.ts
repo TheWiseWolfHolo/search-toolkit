@@ -97,6 +97,13 @@ export class SearchToolkit {
           query: { type: "string", minLength: 1 },
           mode: { type: "string", enum: ["general", "exact", "current", "official", "context"], default: "general" },
           limit: { type: "integer", minimum: 1, maximum: 20, default: 6 },
+          maximumNumberOfTokens: {
+            type: "integer",
+            minimum: 1024,
+            maximum: 32768,
+            default: 4096,
+            description: "Brave LLM Context token budget when context mode selects Brave; other fallback providers ignore this field",
+          },
         },
         required: ["query"],
         additionalProperties: false,
@@ -147,7 +154,13 @@ export class SearchToolkit {
     if (!selectedName) throw new Error(`No automatic provider is available for mode ${mode}`);
     const selected = this.bindings.get(selectedName);
     if (!selected) throw new Error(`Automatic provider disappeared: ${selectedName}`);
-    const output = await selected.call(toolArguments(selected.exposed, String(args.query ?? ""), Number(args.limit ?? 6)));
+    const selectedArguments = toolArguments(selected.exposed, String(args.query ?? ""), Number(args.limit ?? 6));
+    if (mode === "context" && selected.exposed.name === "brave_llm_context") {
+      selectedArguments.maximumNumberOfTokens = typeof args.maximumNumberOfTokens === "number"
+        ? args.maximumNumberOfTokens
+        : 4096;
+    }
+    const output = await selected.call(selectedArguments);
     return attachRouteMetadata(selected, output);
   }
 

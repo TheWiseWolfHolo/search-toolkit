@@ -18,6 +18,7 @@ test("Brave exposes Web, News, and LLM Context as distinct tools", () => {
   const schema = context.inputSchema as { properties?: Record<string, Record<string, unknown>> };
   assert.equal(schema.properties?.maximumNumberOfTokens?.minimum, 1024);
   assert.equal(schema.properties?.maximumNumberOfTokens?.maximum, 32768);
+  assert.equal(schema.properties?.maximumNumberOfTokens?.default, 4096);
   assert.deepEqual(schema.properties?.contextThresholdMode?.enum, ["disabled", "strict", "balanced", "lenient"]);
   assert.equal(context.annotations?.readOnlyHint, true);
 });
@@ -50,7 +51,6 @@ test("Brave LLM Context uses the official POST contract", async () => {
       searchLang: "en",
       count: 12,
       maximumNumberOfUrls: 6,
-      maximumNumberOfTokens: 4096,
       maximumNumberOfSnippets: 24,
       contextThresholdMode: "strict",
       maximumNumberOfTokensPerUrl: 1024,
@@ -126,6 +126,8 @@ test("search_auto context mode routes to Brave LLM Context", async () => {
     const auto = toolkit.listTools().find((tool) => tool.name === "search_auto");
     const mode = (auto?.inputSchema as { properties?: Record<string, { enum?: string[] }> }).properties?.mode;
     assert.ok(mode?.enum?.includes("context"));
+    const tokenBudget = (auto?.inputSchema as { properties?: Record<string, Record<string, unknown>> }).properties?.maximumNumberOfTokens;
+    assert.equal(tokenBudget?.default, 4096);
     const output = await toolkit.callTool("search_auto", {
       query: "ground this answer",
       mode: "context",
@@ -133,6 +135,7 @@ test("search_auto context mode routes to Brave LLM Context", async () => {
     }) as Record<string, unknown>;
     assert.equal(requestBody.q, "ground this answer");
     assert.equal(requestBody.count, 4);
+    assert.equal(requestBody.maximum_number_of_tokens, 4096);
     assert.deepEqual((output.structuredContent as Record<string, unknown>).route, {
       provider: "brave",
       tool: "brave_llm_context",

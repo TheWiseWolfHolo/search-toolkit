@@ -26,7 +26,7 @@ Use for exact error messages, identifiers, configuration keys, code strings, obs
 
 Use Brave Web for structured independent-index results and Brave News for current or breaking news. Prefer Brave when a consequential claim needs a second retrieval perspective.
 
-Use Brave LLM Context when an agent needs pre-extracted text, tables, code, or discussion chunks from several search results without separately fetching each page. Control the response with URL, token, per-URL, snippet, freshness, threshold, Goggles, and optional local-recall parameters. Start around 4096 tokens for ordinary grounding and increase only when the task justifies more context. It returns `grounding` plus `sources`, not a generated final answer. Keep ordinary URL discovery on Brave Web, known-URL reading on a fetch/scrape tool, and deep multi-step synthesis on Tavily or LinkUp research.
+Use Brave LLM Context when an agent needs pre-extracted text, tables, code, or discussion chunks from several search results without separately fetching each page. Control the response with URL, token, per-URL, snippet, freshness, threshold, Goggles, and optional local-recall parameters. Direct calls and `search_auto` requests routed to Brave send 4096 tokens by default; increase `maximumNumberOfTokens` only when the task justifies more context. Parallel and You.com fallbacks use their own controls, so this Brave-specific parameter does not apply to those routes. It returns `grounding` plus `sources`, not a generated final answer. Keep ordinary URL discovery on Brave Web, known-URL reading on a fetch/scrape tool, and deep multi-step synthesis on Tavily or LinkUp research.
 
 ### You.com — unified Web and News with query-aware highlights
 

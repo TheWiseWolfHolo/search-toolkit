@@ -180,7 +180,7 @@ export class BraveAdapter implements RestAdapter {
           searchLang: { type: "string", minLength: 2 },
           count: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Search results considered before context extraction" },
           maximumNumberOfUrls: { type: "integer", minimum: 1, maximum: 50, default: 20 },
-          maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 8192 },
+          maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 4096 },
           maximumNumberOfSnippets: { type: "integer", minimum: 1, maximum: 256, default: 50 },
           contextThresholdMode: { type: "string", enum: ["disabled", "strict", "balanced", "lenient"] },
           maximumNumberOfTokensPerUrl: { type: "integer", minimum: 512, maximum: 8192, default: 4096 },
@@ -230,13 +230,15 @@ export class BraveAdapter implements RestAdapter {
   }
 
   private async callLlmContext(args: Record<string, unknown>, key: string): Promise<unknown> {
-    const body: Record<string, unknown> = { q: stringArg(args, "query") };
+    const body: Record<string, unknown> = {
+      q: stringArg(args, "query"),
+      maximum_number_of_tokens: numberArg(args, "maximumNumberOfTokens", 4096),
+    };
     for (const [source, target] of [
       ["country", "country"],
       ["searchLang", "search_lang"],
       ["count", "count"],
       ["maximumNumberOfUrls", "maximum_number_of_urls"],
-      ["maximumNumberOfTokens", "maximum_number_of_tokens"],
       ["maximumNumberOfSnippets", "maximum_number_of_snippets"],
       ["contextThresholdMode", "context_threshold_mode"],
       ["maximumNumberOfTokensPerUrl", "maximum_number_of_tokens_per_url"],
