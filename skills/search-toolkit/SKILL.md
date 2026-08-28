@@ -32,7 +32,7 @@ Use the cheapest, narrowest provider that reliably fits the task. Escalate from 
 
 Search results discover sources; they do not automatically prove every snippet claim. For important or time-sensitive claims, fetch or read the most relevant source page before answering. Keep citations adjacent to the claims they support.
 
-End every Search Toolkit-backed answer with one compact `搜索路由：provider/tool` line so the provider decision remains auditable. Copy the values from returned provenance: prefer `structuredContent.route`, otherwise use the leading `searchToolkitRoute` content block, and use `_meta.searchToolkit.route` only when the client exposes it. Do not infer or fabricate missing route values.
+For source-backed web research, current-fact answers, exact-source tracing, and audit-oriented work, end with one compact route line so the provider decision remains auditable. Match the answer language, for example `Search route: provider/tool` or `搜索路由：provider/tool`. Copy the values from returned provenance: prefer `structuredContent.route`, otherwise use the leading `searchToolkitRoute` content block, and use `_meta.searchToolkit.route` only when the client exposes it. Omit the footer for trivial utility lookups unless provenance materially helps or the user requests it; never infer or fabricate missing route values.
 
 For consequential or disputed claims, prefer primary sources and cross-check through an independent retrieval path; Brave is the preferred independent-index check. Multiple copies of one underlying report are not independent confirmation.
 
