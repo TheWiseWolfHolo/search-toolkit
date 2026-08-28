@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "statePath": "C:/Users/you/AppData/Local/search-toolkit/state.db",
+  "providers": {
+    "exa": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "remote_mcp",
+        "url": "https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa,web_search_advanced_exa",
+        "auth": { "kind": "header", "name": "x-api-key" }
+      }
+    },
+    "tavily": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "remote_mcp",
+        "url": "https://mcp.tavily.com/mcp/",
+        "auth": { "kind": "query", "name": "tavilyApiKey" }
+      }
+    },
+    "linkup": {
+      "enabled": true,
+      "automatic": false,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "remote_mcp",
+        "url": "https://mcp.linkup.so/mcp",
+        "auth": { "kind": "bearer" }
+      }
+    },
+    "firecrawl": {
+      "enabled": true,
+      "automatic": false,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "stdio_mcp",
+        "command": "npx",
+        "args": ["-y", "firecrawl-mcp@3.24.0"],
+        "envKey": "FIRECRAWL_API_KEY"
+      }
+    },
+    "querit": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "querit" }
+    },
+    "serper": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "serper" }
+    },
+    "brave": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "brave" }
+    },
+    "grok": {
+      "enabled": true,
+      "automatic": false,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "rest",
+        "adapter": "grok",
+        "baseUrl": "https://api.x.ai/v1/responses"
+      },
+      "options": {
+        "model": "grok-4.6",
+        "reasoningEffort": "low"
+      }
+    },
+    "doubao": {
+      "enabled": true,
+      "automatic": false,
+      "manualOnly": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "doubao" }
+    }
+  }
+}

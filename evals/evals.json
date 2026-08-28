@@ -1,0 +1,28 @@
+{
+  "skill_name": "search-toolkit",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "查一下这个很冷门的报错原文 `search_auto_test_on_launch_v1` 出自哪里，给我代码来源。",
+      "expected_output": "Routes to Exa exact/code discovery, cites a commit-pinned code page, and verifies repository identity or reports origin ambiguity instead of assuming the first matching fork is canonical.",
+      "files": [],
+      "expectations": [
+        "Provides a commit-pinned source URL containing the exact string.",
+        "Checks repository identity or fork/rename ambiguity before naming the original project.",
+        "Does not use Doubao unless the user explicitly requests it."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "找 Cloudflare Workers 最新的 Python 与 Node.js compatibility 官方文档，只要官方来源。",
+      "expected_output": "Routes to Serper official lookup or an official-site capable provider and filters to Cloudflare docs.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "用豆包搜索一下今天的新加坡 AI 新闻。",
+      "expected_output": "Calls Doubao because the provider was explicitly requested despite its manual-only quota policy.",
+      "files": []
+    }
+  ]
+}

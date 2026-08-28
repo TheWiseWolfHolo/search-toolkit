@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.*
+providers.json
+state.db
+state.db-*
+*-workspace/
+evals/review.html
+evals/results/
+*.tgz

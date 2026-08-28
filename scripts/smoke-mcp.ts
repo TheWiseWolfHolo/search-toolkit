@@ -1,0 +1,48 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const dir = mkdtempSync(resolve(tmpdir(), "search-toolkit-mcp-smoke-"));
+const configPath = resolve(dir, "providers.json");
+writeFileSync(configPath, JSON.stringify({
+  version: 1,
+  statePath: resolve(dir, "state.db"),
+  providers: {
+    querit: {
+      enabled: true,
+      automatic: true,
+      keys: ["smoke-key-not-used"],
+      integration: { kind: "rest", adapter: "querit" },
+    },
+    doubao: {
+      enabled: true,
+      automatic: false,
+      manualOnly: true,
+      keys: ["smoke-key-not-used"],
+      integration: { kind: "rest", adapter: "doubao" },
+    },
+  },
+}));
+
+const client = new Client({ name: "search-toolkit-smoke", version: "0.1.0" }, { capabilities: {} });
+const transport = new StdioClientTransport({
+  command: process.execPath,
+  args: [resolve(process.cwd(), "dist/src/mcp-server.js"), "--config", configPath],
+});
+
+try {
+  await client.connect(transport);
+  const listed = await client.listTools();
+  const names = listed.tools.map((tool) => tool.name);
+  for (const expected of ["querit_search", "doubao_search", "search_auto", "search_pool_status", "search_rotation_probe"]) {
+    if (!names.includes(expected)) throw new Error(`Missing MCP tool: ${expected}`);
+  }
+  const status = await client.callTool({ name: "search_pool_status", arguments: {} });
+  if (status.isError) throw new Error("search_pool_status returned an error");
+  console.log(JSON.stringify({ ok: true, toolCount: names.length, tools: names }, null, 2));
+} finally {
+  await transport.close();
+  rmSync(dir, { recursive: true, force: true });
+}
