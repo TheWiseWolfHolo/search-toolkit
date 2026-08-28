@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { DEFAULT_FIRECRAWL_TOOLS, filterUpstreamTools, safeToolAnnotations } from "../src/upstream.js";
+import {
+  appendRotationMetadata,
+  DEFAULT_FIRECRAWL_TOOLS,
+  filterUpstreamTools,
+  safeToolAnnotations,
+} from "../src/upstream.js";
 import type { ProviderConfig } from "../src/types.js";
 
 const baseConfig: ProviderConfig = {
@@ -55,4 +60,63 @@ test("corrects unsafe upstream annotations", () => {
     safeToolAnnotations(tool("firecrawl_search", false)),
     { readOnlyHint: true, destructiveHint: false },
   );
+});
+
+test("classifies hyphenated upstream tool names", () => {
+  assert.deepEqual(
+    safeToolAnnotations(tool("linkup-search")),
+    { readOnlyHint: true, destructiveHint: false },
+  );
+  assert.deepEqual(
+    safeToolAnnotations(tool("linkup-research")),
+    { readOnlyHint: false, destructiveHint: false },
+  );
+  assert.deepEqual(
+    safeToolAnnotations(tool("linkup-get-research")),
+    { readOnlyHint: true, destructiveHint: false },
+  );
+  assert.deepEqual(
+    safeToolAnnotations(tool("linkup-fetch")),
+    { readOnlyHint: true, destructiveHint: false },
+  );
+  assert.deepEqual(
+    safeToolAnnotations(tool("linkup-delete-cache")),
+    { readOnlyHint: false, destructiveHint: true },
+  );
+});
+
+test("upstream direct results expose route provenance to models", () => {
+  const output = appendRotationMetadata(
+    {
+      content: [{ type: "text", text: "result body" }],
+      _meta: { upstream: "preserved" },
+    },
+    "linkup",
+    "linkup-search",
+    "masked",
+    12,
+  ) as Record<string, unknown>;
+  const content = output.content as Array<{ type: string; text: string }>;
+  assert.deepEqual(JSON.parse(content[0]?.text ?? "{}"), {
+    searchToolkitRoute: {
+      provider: "linkup",
+      tool: "linkup_linkup_search",
+      upstreamTool: "linkup-search",
+    },
+  });
+  assert.equal(content[1]?.text, "result body");
+  assert.deepEqual(output._meta, {
+    upstream: "preserved",
+    searchToolkit: {
+      provider: "linkup",
+      upstreamTool: "linkup-search",
+      keySlot: "masked",
+      latencyMs: 12,
+      route: {
+        provider: "linkup",
+        tool: "linkup_linkup_search",
+        upstreamTool: "linkup-search",
+      },
+    },
+  });
 });

@@ -66,9 +66,11 @@ node dist/src/cli.js probe querit "轮询验证"
 
 MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 27 个工具收窄为 7 个核心检索/获取工具，完整目录需要显式 `toolPolicy.allow: ["*"]`。此外提供：
 
-- `search_auto`：按能力自动选 Provider，返回可审计的 `{provider, tool, upstreamTool}` 路由信息，绝不自动调用豆包。
+- `search_auto`：按能力自动选 Provider，绝不自动调用豆包。
 - `search_pool_status`：查看脱敏 Key 池和轮询状态。
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
+
+每次成功的 Provider 调用都会返回可审计的 `{provider, tool, upstreamTool}`：REST 直调写入结构化结果，上游 MCP 直调在 `content` 首块返回模型可见的 `searchToolkitRoute`，`search_auto` 会把两种路径归一成单个路由块而不重复。
 
 ## 安全边界
 

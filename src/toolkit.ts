@@ -183,6 +183,7 @@ export function attachRouteMetadata(binding: ToolBinding, output: unknown): unkn
   if (!output || typeof output !== "object") return result({ route, result: output });
   const record = output as Record<string, unknown>;
   const content = Array.isArray(record.content) ? record.content : [];
+  const resultContent = isRouteContentBlock(content[0]) ? content.slice(1) : content;
   const meta = record._meta && typeof record._meta === "object"
     ? record._meta as Record<string, unknown>
     : {};
@@ -191,10 +192,22 @@ export function attachRouteMetadata(binding: ToolBinding, output: unknown): unkn
     : {};
   return {
     ...record,
-    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...content],
+    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...resultContent],
     structuredContent: { route, result: record.structuredContent ?? null },
     _meta: { ...meta, searchToolkit: { ...searchToolkitMeta, route } },
   };
+}
+
+function isRouteContentBlock(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const block = value as Record<string, unknown>;
+  if (block.type !== "text" || typeof block.text !== "string") return false;
+  try {
+    const parsed = JSON.parse(block.text) as Record<string, unknown>;
+    return Boolean(parsed.searchToolkitRoute && typeof parsed.searchToolkitRoute === "object");
+  } catch {
+    return false;
+  }
 }
 
 export function filterBindings(config: ProviderConfig, bindings: ToolBinding[]): ToolBinding[] {

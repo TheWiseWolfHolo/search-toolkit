@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "查一下精确字符串 `search_auto_test_on_launch_v1` 最早出自哪个项目，给出 commit-pinned 代码链接并核验 fork/rename 关系。末尾附上本次搜索结果中的 route.provider 和 route.tool 作为验收信息。",
+      "prompt": "查一下精确字符串 `search_auto_test_on_launch_v1` 最早出自哪个项目，给出 commit-pinned 代码链接并核验 fork/rename 关系。",
       "expected_output": "Uses Exa exact/code discovery, cites commit-pinned code, resolves or explicitly reports repository-origin ambiguity, and exposes auditable route metadata.",
       "files": [],
       "expectations": [
@@ -14,7 +14,7 @@
     },
     {
       "id": 2,
-      "prompt": "查一下今天的新加坡 AI 创业新闻，最多给 5 条候选来源，不要使用豆包，也不要启动深度研究。末尾附上 route.provider 和 route.tool。",
+      "prompt": "查一下今天的新加坡 AI 创业新闻，最多给 5 条候选来源，不要使用豆包，也不要启动深度研究。",
       "expected_output": "Uses compact general/current retrieval, returns at most five sources, avoids Doubao and deep research, and exposes route metadata.",
       "files": [],
       "expectations": [
@@ -26,12 +26,13 @@
     {
       "id": 3,
       "prompt": "直接读取 https://modelcontextprotocol.io/specification/2025-11-25/server/tools 并概括 ToolAnnotations；不要重新搜索这个已知 URL，也不要调用本机不存在的 Jina Reader 或 TinyFish Browser。",
-      "expected_output": "Fetches the known URL directly through an actually exposed fetch/scrape tool, summarizes ToolAnnotations, and does not perform a redundant search or invent unavailable tools.",
+      "expected_output": "Fetches the known URL directly through an actually exposed fetch/scrape tool, summarizes ToolAnnotations, does not perform a redundant search or invent unavailable tools, and reports returned route provenance.",
       "files": [],
       "expectations": [
         "Summarizes readOnlyHint and destructiveHint from the requested page.",
         "Uses a direct fetch or scrape capability rather than a search query.",
-        "Does not claim to call Jina Reader or TinyFish Browser."
+        "Does not claim to call Jina Reader or TinyFish Browser.",
+        "Reports route.provider and route.tool from direct-fetch provenance without being prompted to do so."
       ]
     }
   ]

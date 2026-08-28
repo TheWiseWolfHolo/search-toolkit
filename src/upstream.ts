@@ -165,7 +165,7 @@ export function filterUpstreamTools(provider: string, config: ProviderConfig, to
 
 export function safeToolAnnotations(tool: Tool): Tool["annotations"] {
   const annotations = { ...tool.annotations };
-  const name = tool.name.toLowerCase();
+  const name = sanitizeName(tool.name);
   const destructive = /(?:^|_)(?:delete|remove|destroy|revoke)(?:_|$)/.test(name);
   const retrieval = /(?:^|_)(?:search|fetch|scrape|map|list|get|status|check|read|inspect|related)(?:_|$)/.test(name);
   const explicitWrite = /(?:^|_)(?:create|update|patch|set|run|start|stop|feedback|interact)(?:_|$)/.test(name);
@@ -177,7 +177,7 @@ export function safeToolAnnotations(tool: Tool): Tool["annotations"] {
   return annotations;
 }
 
-function appendRotationMetadata(
+export function appendRotationMetadata(
   result: unknown,
   provider: string,
   upstreamTool: string,
@@ -192,11 +192,18 @@ function appendRotationMetadata(
   const searchToolkitMeta = meta.searchToolkit && typeof meta.searchToolkit === "object"
     ? meta.searchToolkit as Record<string, unknown>
     : {};
+  const route = {
+    provider,
+    tool: `${provider}_${sanitizeName(upstreamTool)}`,
+    upstreamTool,
+  };
+  const content = Array.isArray(record.content) ? record.content : [];
   return {
     ...record,
+    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...content],
     _meta: {
       ...meta,
-      searchToolkit: { ...searchToolkitMeta, provider, upstreamTool, keySlot: masked, latencyMs },
+      searchToolkit: { ...searchToolkitMeta, provider, upstreamTool, keySlot: masked, latencyMs, route },
     },
   };
 }

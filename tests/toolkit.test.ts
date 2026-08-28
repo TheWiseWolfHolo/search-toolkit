@@ -12,7 +12,19 @@ const binding: ToolBinding = {
 
 test("search_auto results preserve content and expose an auditable route", () => {
   const output = attachRouteMetadata(binding, {
-    content: [{ type: "text", text: "result body" }],
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          searchToolkitRoute: {
+            provider: "exa",
+            tool: "exa_web_search_exa",
+            upstreamTool: "web_search_exa",
+          },
+        }),
+      },
+      { type: "text", text: "result body" },
+    ],
     structuredContent: { items: [1] },
     _meta: { searchToolkit: { keySlot: "masked" } },
   }) as Record<string, unknown>;
@@ -24,6 +36,7 @@ test("search_auto results preserve content and expose an auditable route", () =>
     keySlot: "masked",
     route: { provider: "exa", tool: "exa_web_search_exa", upstreamTool: "web_search_exa" },
   });
+  assert.equal((output.content as Array<{ text: string }>).length, 2);
   assert.equal((output.content as Array<{ text: string }>)[1]?.text, "result body");
 });
 

@@ -32,6 +32,8 @@ Use the cheapest, narrowest provider that reliably fits the task. Escalate from 
 
 Search results discover sources; they do not automatically prove every snippet claim. For important or time-sensitive claims, fetch or read the most relevant source page before answering. Keep citations adjacent to the claims they support.
 
+End every Search Toolkit-backed answer with one compact `搜索路由：provider/tool` line so the provider decision remains auditable. Copy the values from returned provenance: prefer `structuredContent.route`, otherwise use the leading `searchToolkitRoute` content block, and use `_meta.searchToolkit.route` only when the client exposes it. Do not infer or fabricate missing route values.
+
 For consequential or disputed claims, prefer primary sources and cross-check through an independent retrieval path; Brave is the preferred independent-index check. Multiple copies of one underlying report are not independent confirmation.
 
 For exact code or configuration-string origin questions, verify repository identity before saying "出自" or "originates from": inspect the matched file, repository name, commit date, and any fork/rename relationship visible in the source. If multiple repositories contain the same string and ancestry is unresolved, cite the candidates and say the original source is uncertain instead of promoting the first search hit to canonical origin.

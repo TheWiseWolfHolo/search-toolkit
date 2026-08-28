@@ -46,8 +46,11 @@ export class RestProvider {
       const payload = await this.adapter.call(tool, args, selection.key, this.config);
       const latencyMs = Math.round(performance.now() - started);
       this.rotation.record(selection, { ok: true, latencyMs, httpStatus: 200 });
+      const route = { provider: this.name, tool, upstreamTool: tool };
       const structuredContent = {
         provider: this.name,
+        tool,
+        route,
         keySlot: selection.masked,
         latencyMs,
         data: payload,
@@ -55,7 +58,9 @@ export class RestProvider {
       return {
         content: [{ type: "text", text: JSON.stringify(structuredContent) }],
         structuredContent,
-        _meta: { searchToolkit: { provider: this.name, upstreamTool: tool, keySlot: selection.masked, latencyMs } },
+        _meta: {
+          searchToolkit: { provider: this.name, upstreamTool: tool, keySlot: selection.masked, latencyMs, route },
+        },
       };
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
