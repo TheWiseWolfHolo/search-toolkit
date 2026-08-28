@@ -6,7 +6,7 @@
 
 - 不把所有搜索服务压成一个失去特色的通用接口。
 - Exa、Tavily、LinkUp、Firecrawl 优先透明代理官方 MCP，保留官方工具 schema。
-- Querit、Serper、Brave、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
+- Querit、Serper、Brave Web/News/LLM Context、You.com Search、Parallel Search、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
 - 每家 Provider 独立维护 Key 池；SQLite 游标可跨进程、跨重启持续轮询。
 - 真实 Key 只保存在仓库外的文本 JSON，不写进代码、Skill、README 或 Codex 配置。
 - 豆包默认 `manualOnly`，不会被 `search_auto` 或自动兜底消耗。
@@ -19,7 +19,9 @@
 | 精确字符串、代码、语义搜索、网页正文 | Exa 官方 MCP |
 | 当前信息、搜索后提取、Agent Research | Tavily 官方 MCP |
 | 官网、Google 精准结果、新闻与图片 | Serper |
-| 独立 Web / News 索引 | Brave Search |
+| 独立 Web / News 索引与 LLM-ready grounding chunks | Brave Web、News、LLM Context |
+| 一次返回 Web + News，可选 query-aware highlights | You.com Search |
+| 自然语言目标、多查询语义检索与高密度 excerpts | Parallel Search |
 | 带来源答案和研究任务 | LinkUp 官方 MCP |
 | 搜索、抓取、爬取、站点 Map、结构化提取 | Firecrawl 官方 MCP |
 | 紧凑搜索 | Jina Search |

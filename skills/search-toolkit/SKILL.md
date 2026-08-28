@@ -15,11 +15,17 @@ Use the cheapest, narrowest provider that reliably fits the task. Escalate from 
 4. Use deep research only for multi-step synthesis, gap analysis, or exhaustive comparison.
 5. Use browser/agent automation only when information requires interaction.
 
+## Interface selection
+
+Prefer the native Search Toolkit MCP tools when they are present in the live inventory. If an agent has the Skill but the MCP functions were not injected, use an installed `search-toolkit` CLI as the fallback interface to the same backend: inspect `search-toolkit tools`, then run `search-toolkit call <tool> <json-arguments>`. This is not permission to fall back to a different search engine such as smart-search. Do not open the Provider config or pass raw keys on the command line. If neither MCP nor CLI is available, report the missing interface instead of inventing a tool.
+
 ## Capability routing
 
 - General lookup: `search_auto` in general mode or Querit.
 - Exact strings, code, obscure sources, and semantic discovery: Exa. Verify repository identity and fork/rename relationships before naming an origin.
-- Independent cross-checking and current news: Brave Web/News. The current server does not expose Brave LLM Context.
+- Independent cross-checking and current news: Brave Web/News. Use `brave_llm_context` or `search_auto` in context mode when the model needs relevance-ranked content chunks from multiple pages within a controlled token budget. LLM Context returns grounding and source metadata, not a final synthesized answer; do not use it for simple URL discovery or a known URL that should be fetched directly.
+- Unified Web and News retrieval: `you_search`. Keep `contentLevel: snippets` for ordinary discovery; request `highlights` only when the model needs query-aware passages from the returned pages. Do not turn on extraction merely because it is available.
+- Semantic, multi-aspect retrieval: `parallel_search`. Give it a self-contained natural-language objective plus 1-3 concise `searchQueries` when the task is broader than one keyword query; use its ranked excerpts directly before deciding whether any page still needs fetching.
 - Official-site and concise Google-style results: Serper.
 - Search-to-extract, crawl, map, and managed research: Tavily, only when the workflow needs more than lookup.
 - Sourced synthesis and long research: LinkUp; avoid deep modes for routine questions.

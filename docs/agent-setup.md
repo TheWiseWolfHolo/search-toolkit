@@ -54,4 +54,4 @@ Add an STDIO MCP server whose command is `node` and whose only argument is the a
 
 ## Agent Skill
 
-Copy `skills/search-toolkit/` into the agent's supported skill directory. The skill is deliberately provider-aware: it routes exact/code discovery to Exa, current agent research to Tavily, general search to Querit, official/concise lookup to Serper, web/news to Brave, sourced research to LinkUp, extraction to Firecrawl, and Doubao only on explicit request.
+Copy `skills/search-toolkit/` into the agent's supported skill directory. The skill is deliberately provider-aware: it routes exact/code discovery to Exa, current agent research to Tavily, general search to Querit, official/concise lookup to Serper, independent web/news and LLM-ready grounding to Brave, unified Web/News highlights to You.com, semantic objective search to Parallel, sourced research to LinkUp, extraction to Firecrawl, and Doubao only on explicit request.

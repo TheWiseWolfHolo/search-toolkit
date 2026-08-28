@@ -72,6 +72,18 @@
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "brave" }
     },
+    "you": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "you" }
+    },
+    "parallel": {
+      "enabled": true,
+      "automatic": true,
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "parallel" }
+    },
     "grok": {
       "enabled": true,
       "automatic": false,

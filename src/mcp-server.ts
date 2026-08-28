@@ -13,7 +13,7 @@ const server = new Server(
   { name: "search-toolkit", version: "0.1.0" },
   {
     capabilities: { tools: { listChanged: false } },
-    instructions: "Use the narrowest provider that fits the task. Start with compact search, inspect results, then fetch selected URLs. Doubao is manual-only. Key rotation probes consume quota. Tools that create, update, delete, start jobs, send notifications, or submit feedback require explicit user intent; respect tool annotations and approval prompts.",
+    instructions: "Use the narrowest provider that fits the task. Start with compact search, inspect results, then fetch selected URLs. Use Brave LLM Context for token-bounded multi-source grounding, You.com for unified Web/News with optional query-aware highlights, and Parallel for semantic objectives with LLM-optimized excerpts. Doubao is manual-only. Key rotation probes consume quota. Tools that create, update, delete, start jobs, send notifications, or submit feedback require explicit user intent; respect tool annotations and approval prompts.",
   },
 );
 

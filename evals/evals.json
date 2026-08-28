@@ -34,6 +34,42 @@
         "Does not claim to call Jina Reader or TinyFish Browser.",
         "Reports route.provider and route.tool from direct-fetch provenance without being prompted to do so."
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "帮我研究一下为什么 AI Agent 的网页回答需要 grounding chunks，而不只是搜索摘要。我想让模型直接基于多来源正文回答，控制在约 4096 token；不要启动深度研究，也不要逐页抓取。",
+      "expected_output": "Uses Brave LLM Context for token-bounded multi-source grounding, avoids separate page fetches and deep research, and reports Brave route provenance.",
+      "files": [],
+      "expectations": [
+        "Uses brave_llm_context directly or search_auto context mode and reports the Brave route.",
+        "Sets the grounding budget to approximately 4096 tokens.",
+        "Does not start deep research or separately fetch each result page.",
+        "Uses returned grounding and source metadata as evidence rather than treating snippets as a final generated answer."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "快速查一下今天同一个主题的网页资料和新闻报道，希望一次调用拿到两类结果，并返回适合模型引用的相关段落；不要做深度研究。",
+      "expected_output": "Uses You.com unified Web/News search with query-aware highlights, avoids deep research, and reports route provenance.",
+      "files": [],
+      "expectations": [
+        "Uses you_search and reports the You.com route.",
+        "Requests highlights only because query-aware passages were explicitly requested.",
+        "Uses both Web and News sections when both are returned.",
+        "Does not start deep research or fetch every result separately."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "我要找一组适合 AI Agent 使用的网页检索服务，目标是比较近期官方能力、延迟取舍和给模型使用的正文片段。请把目标拆成 2 到 3 条短查询后一次检索，不要逐页抓取。",
+      "expected_output": "Uses Parallel Search with a semantic objective and concise search queries, consumes ranked excerpts, and reports route provenance.",
+      "files": [],
+      "expectations": [
+        "Uses parallel_search and reports the Parallel route.",
+        "Supplies a self-contained objective plus 2-3 concise searchQueries.",
+        "Uses returned excerpts before considering any page fetch.",
+        "Does not start deep research or fetch every result separately."
+      ]
     }
   ]
 }

@@ -90,12 +90,12 @@ export class SearchToolkit {
     const autoTool: Tool = {
       name: "search_auto",
       title: "Search with the recommended provider",
-      description: "Route general queries to Querit, exact/code queries to Exa, current research to Tavily, and official-site lookups to Serper. Doubao is never selected automatically. Results include auditable provider and tool route metadata.",
+      description: "Route general queries to Querit, exact/code queries to Exa, current research to Tavily, official-site lookups to Serper, and LLM-ready grounding to Brave, Parallel, or You.com. Doubao is never selected automatically. Results include auditable provider and tool route metadata.",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", minLength: 1 },
-          mode: { type: "string", enum: ["general", "exact", "current", "official"], default: "general" },
+          mode: { type: "string", enum: ["general", "exact", "current", "official", "context"], default: "general" },
           limit: { type: "integer", minimum: 1, maximum: 20, default: 6 },
         },
         required: ["query"],
@@ -131,11 +131,13 @@ export class SearchToolkit {
     const mode = typeof args.mode === "string" ? args.mode : "general";
     const candidates = mode === "exact"
       ? ["exa_web_search_advanced_exa", "exa_web_search_exa", "querit_search"]
+      : mode === "context"
+        ? ["brave_llm_context", "parallel_search", "you_search", "tavily_tavily_search", "linkup_linkup_search"]
       : mode === "current"
-        ? ["tavily_tavily_search", "brave_news_search", "querit_search", "serper_news"]
+        ? ["tavily_tavily_search", "you_search", "brave_news_search", "querit_search", "serper_news"]
         : mode === "official"
           ? ["serper_search", "querit_search", "exa_web_search_exa"]
-          : ["querit_search", "brave_web_search", "serper_search", "tavily_tavily_search"];
+          : ["querit_search", "parallel_search", "you_search", "brave_web_search", "serper_search", "tavily_tavily_search"];
     const selectedName = candidates.find((name) => this.bindings.has(name));
     if (!selectedName) throw new Error(`No automatic provider is available for mode ${mode}`);
     const selected = this.bindings.get(selectedName);

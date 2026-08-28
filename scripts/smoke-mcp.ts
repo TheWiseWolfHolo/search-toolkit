@@ -23,6 +23,24 @@ writeFileSync(configPath, JSON.stringify({
       keys: ["smoke-key-not-used"],
       integration: { kind: "rest", adapter: "doubao" },
     },
+    brave: {
+      enabled: true,
+      automatic: false,
+      keys: ["smoke-key-not-used"],
+      integration: { kind: "rest", adapter: "brave" },
+    },
+    you: {
+      enabled: true,
+      automatic: false,
+      keys: ["smoke-key-not-used"],
+      integration: { kind: "rest", adapter: "you" },
+    },
+    parallel: {
+      enabled: true,
+      automatic: false,
+      keys: ["smoke-key-not-used"],
+      integration: { kind: "rest", adapter: "parallel" },
+    },
   },
 }));
 
@@ -36,12 +54,14 @@ try {
   await client.connect(transport);
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name);
-  for (const expected of ["querit_search", "doubao_search", "search_auto", "search_pool_status", "search_rotation_probe"]) {
+  for (const expected of ["querit_search", "doubao_search", "brave_web_search", "brave_news_search", "brave_llm_context", "you_search", "parallel_search", "search_auto", "search_pool_status", "search_rotation_probe"]) {
     if (!names.includes(expected)) throw new Error(`Missing MCP tool: ${expected}`);
   }
   const auto = listed.tools.find((tool) => tool.name === "search_auto");
   const probe = listed.tools.find((tool) => tool.name === "search_rotation_probe");
   if (auto?.annotations?.readOnlyHint !== true) throw new Error("search_auto must be read-only");
+  const autoMode = (auto?.inputSchema as { properties?: Record<string, { enum?: string[] }> }).properties?.mode;
+  if (!autoMode?.enum?.includes("context")) throw new Error("search_auto must expose context mode");
   if (probe?.annotations?.readOnlyHint !== false) throw new Error("search_rotation_probe must require write approval");
   if (!client.getInstructions()?.includes("Doubao is manual-only")) throw new Error("Missing server-wide quota instructions");
   const status = await client.callTool({ name: "search_pool_status", arguments: {} });

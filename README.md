@@ -10,12 +10,12 @@ Search Toolkit preserves provider-specific capabilities instead of flattening ev
 
 - Official Remote MCP proxy: Exa, Tavily, and LinkUp.
 - Official STDIO MCP proxy: Firecrawl.
-- Thin official-API adapters: Querit, Serper, Brave, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
+- Thin official-API adapters: Querit, Serper, Brave Web/News/LLM Context, You.com Web Search, Parallel Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
 - Persistent per-provider key pools backed by SQLite.
 - Provider-prefixed upstream tool names and schemas are discovered from official MCP servers at startup, then filtered by an optional provider tool policy.
 - Raw keys stay outside the repository in a local JSON file.
 
-Official references used by the implementation include the [Codex MCP configuration guide](https://learn.chatgpt.com/docs/extend/mcp), [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), and [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp).
+Official references used by the implementation include the [Codex MCP configuration guide](https://learn.chatgpt.com/docs/extend/mcp), [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp), [You.com Search API](https://you.com/docs/api-reference/search/v1-search), and [Parallel Search API](https://docs.parallel.ai/api-reference/search/search).
 
 ## Provider capabilities
 
@@ -25,7 +25,9 @@ Official references used by the implementation include the [Codex MCP configurat
 | Exact strings, semantic discovery, code and page content | Exa official MCP |
 | Current search, extraction and agent research | Tavily official MCP |
 | Concise Google results, news and images | Serper |
-| Independent web/news index | Brave Search |
+| Independent web/news index and LLM-ready grounding chunks | Brave Web, News, and LLM Context |
+| Unified Web + News results with optional query-aware highlights | You.com Search |
+| Semantic objectives with ranked, LLM-optimized excerpts | Parallel Search |
 | Sourced answers and research jobs | LinkUp official MCP |
 | Search, scrape, crawl, map and structured extraction | Firecrawl official MCP |
 | Compact search | Jina Search |

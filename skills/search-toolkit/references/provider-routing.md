@@ -24,7 +24,17 @@ Use for exact error messages, identifiers, configuration keys, code strings, obs
 
 ### Brave — independent grounding
 
-Use Brave Web for structured independent-index results and Brave News for current or breaking news. Prefer Brave when a consequential claim needs a second retrieval perspective. The current server does not expose Brave LLM Context, so do not request it until it appears in the live inventory.
+Use Brave Web for structured independent-index results and Brave News for current or breaking news. Prefer Brave when a consequential claim needs a second retrieval perspective.
+
+Use Brave LLM Context when an agent needs pre-extracted text, tables, code, or discussion chunks from several search results without separately fetching each page. Control the response with URL, token, per-URL, snippet, freshness, threshold, Goggles, and optional local-recall parameters. Start around 4096 tokens for ordinary grounding and increase only when the task justifies more context. It returns `grounding` plus `sources`, not a generated final answer. Keep ordinary URL discovery on Brave Web, known-URL reading on a fetch/scrape tool, and deep multi-step synthesis on Tavily or LinkUp research.
+
+### You.com — unified Web and News with query-aware highlights
+
+Use `you_search` when one current query should return both Web and News sections, or when You.com's query-aware highlights can replace a separate fetch pass. Keep the default `contentLevel: snippets` for ordinary discovery. Select `highlights` explicitly for citation chunks or RAG-style grounding; extraction can add latency and provider charges. This adapter intentionally does not expose full-page mode: known URLs belong on a fetch/contents tool, and unrestricted full bodies are too easy to invoke accidentally.
+
+### Parallel — semantic objectives and dense excerpts
+
+Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
 
 ### Serper — concise Google-style SERP
 

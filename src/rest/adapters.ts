@@ -157,7 +157,7 @@ export class TinyfishAdapter implements RestAdapter {
 
 export class BraveAdapter implements RestAdapter {
   tools(): Tool[] {
-    return ["web", "news"].map((kind) => searchTool(
+    const searches = ["web", "news"].map((kind) => searchTool(
       `brave_${kind}_search`,
       `Brave ${kind === "web" ? "Web" : "News"} Search`,
       `Search Brave's independent ${kind} index with the official Search API.`,
@@ -168,9 +168,52 @@ export class BraveAdapter implements RestAdapter {
         safesearch: { type: "string", enum: ["off", "moderate", "strict"] },
       },
     ));
+    const context: Tool = {
+      name: "brave_llm_context",
+      title: "Brave LLM Context",
+      description: "Retrieve pre-extracted, relevance-ranked Web content for AI agents, grounding, and RAG with explicit token and URL budgets.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1, maxLength: 400, description: "Search query; Brave allows at most 50 words" },
+          country: { type: "string", minLength: 2, maxLength: 2 },
+          searchLang: { type: "string", minLength: 2 },
+          count: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Search results considered before context extraction" },
+          maximumNumberOfUrls: { type: "integer", minimum: 1, maximum: 50, default: 20 },
+          maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 8192 },
+          maximumNumberOfSnippets: { type: "integer", minimum: 1, maximum: 256, default: 50 },
+          contextThresholdMode: { type: "string", enum: ["disabled", "strict", "balanced", "lenient"] },
+          maximumNumberOfTokensPerUrl: { type: "integer", minimum: 512, maximum: 8192, default: 4096 },
+          maximumNumberOfSnippetsPerUrl: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+          goggles: {
+            oneOf: [
+              { type: "string" },
+              { type: "array", minItems: 1, maxItems: 3, items: { type: "string" } },
+            ],
+          },
+          freshness: { type: "string", description: "pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD" },
+          safesearch: { type: "string", enum: ["off", "moderate", "strict"] },
+          spellcheck: { type: "boolean", default: true },
+          enableLocal: { type: "boolean" },
+          enableSourceMetadata: { type: "boolean", default: false },
+          locationLatitude: { type: "number", minimum: -90, maximum: 90 },
+          locationLongitude: { type: "number", minimum: -180, maximum: 180 },
+          locationCity: { type: "string" },
+          locationState: { type: "string" },
+          locationStateName: { type: "string" },
+          locationCountry: { type: "string", minLength: 2, maxLength: 2 },
+          locationPostalCode: { type: "string" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    };
+    return [...searches, context];
   }
 
   async call(tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
+    if (tool === "brave_llm_context") return this.callLlmContext(args, key);
     const kind = tool.includes("news") ? "news" : "web";
     const url = new URL(`https://api.search.brave.com/res/v1/${kind}/search`);
     url.searchParams.set("q", stringArg(args, "query"));
@@ -184,6 +227,203 @@ export class BraveAdapter implements RestAdapter {
     const container = data[kind] as Record<string, unknown> | undefined;
     const rows = container?.results ?? data.results;
     return { items: Array.isArray(rows) ? rows.map(normalizeItem) : [] };
+  }
+
+  private async callLlmContext(args: Record<string, unknown>, key: string): Promise<unknown> {
+    const body: Record<string, unknown> = { q: stringArg(args, "query") };
+    for (const [source, target] of [
+      ["country", "country"],
+      ["searchLang", "search_lang"],
+      ["count", "count"],
+      ["maximumNumberOfUrls", "maximum_number_of_urls"],
+      ["maximumNumberOfTokens", "maximum_number_of_tokens"],
+      ["maximumNumberOfSnippets", "maximum_number_of_snippets"],
+      ["contextThresholdMode", "context_threshold_mode"],
+      ["maximumNumberOfTokensPerUrl", "maximum_number_of_tokens_per_url"],
+      ["maximumNumberOfSnippetsPerUrl", "maximum_number_of_snippets_per_url"],
+      ["goggles", "goggles"],
+      ["freshness", "freshness"],
+      ["safesearch", "safesearch"],
+      ["spellcheck", "spellcheck"],
+      ["enableLocal", "enable_local"],
+      ["enableSourceMetadata", "enable_source_metadata"],
+    ] as const) {
+      const value = args[source];
+      if (value !== undefined && value !== null && value !== "") body[target] = value;
+    }
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Accept-Encoding": "gzip",
+      "Content-Type": "application/json",
+      "X-Subscription-Token": key,
+    };
+    for (const [source, target] of [
+      ["locationLatitude", "X-Loc-Lat"],
+      ["locationLongitude", "X-Loc-Long"],
+      ["locationCity", "X-Loc-City"],
+      ["locationState", "X-Loc-State"],
+      ["locationStateName", "X-Loc-State-Name"],
+      ["locationCountry", "X-Loc-Country"],
+      ["locationPostalCode", "X-Loc-Postal-Code"],
+    ] as const) {
+      const value = args[source];
+      if (typeof value === "string" && value.trim()) headers[target] = value;
+      if (typeof value === "number" && Number.isFinite(value)) headers[target] = String(value);
+    }
+    return requestJson("https://api.search.brave.com/res/v1/llm/context", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    }, 30_000);
+  }
+}
+
+export class YouAdapter implements RestAdapter {
+  tools(): Tool[] {
+    return [searchTool(
+      "you_search",
+      "You.com Web Search",
+      "Search You.com's unified Web and News index. Returns snippets by default or query-aware highlights when explicitly requested.",
+      {
+        freshness: { type: "string", description: "day, week, month, year, or YYYY-MM-DDtoYYYY-MM-DD" },
+        offset: { type: "integer", minimum: 0, maximum: 9, default: 0 },
+        country: { type: "string" },
+        language: { type: "string", description: "BCP 47 language code" },
+        safesearch: { type: "string", enum: ["off", "moderate", "strict"], default: "moderate" },
+        includeDomains: { type: "array", maxItems: 500, items: { type: "string" } },
+        excludeDomains: { type: "array", maxItems: 500, items: { type: "string" } },
+        boostDomains: { type: "array", maxItems: 500, items: { type: "string" } },
+        contentLevel: {
+          type: "string",
+          enum: ["snippets", "highlights"],
+          default: "snippets",
+          description: "Highlights trigger query-aware per-page extraction; snippets are the low-cost default",
+        },
+      },
+    )];
+  }
+
+  async call(_tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
+    const body: Record<string, unknown> = {
+      query: stringArg(args, "query"),
+      count: numberArg(args, "limit", 6),
+    };
+    for (const [source, target] of [
+      ["freshness", "freshness"],
+      ["offset", "offset"],
+      ["country", "country"],
+      ["language", "language"],
+      ["safesearch", "safesearch"],
+    ] as const) {
+      const value = args[source];
+      if (value !== undefined && value !== null && value !== "") body[target] = value;
+    }
+    for (const [source, target] of [
+      ["includeDomains", "include_domains"],
+      ["excludeDomains", "exclude_domains"],
+      ["boostDomains", "boost_domains"],
+    ] as const) {
+      const values = arrayArg(args, source);
+      if (values.length) body[target] = values;
+    }
+    if (stringArg(args, "contentLevel") === "highlights") {
+      body.extraction = { extraction_mode: "highlights", highlights: {} };
+    }
+    const base = config.integration.kind === "rest" && config.integration.baseUrl
+      ? config.integration.baseUrl
+      : "https://ydc-index.io/v1/search";
+    const data = await requestJson(base, {
+      method: "POST",
+      headers: { "X-API-Key": key, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 30_000);
+    const results = data.results && typeof data.results === "object"
+      ? data.results as Record<string, unknown>
+      : {};
+    const items = [
+      ...normalizeYouSection(results.web, "web"),
+      ...normalizeYouSection(results.news, "news"),
+    ];
+    return { items, metadata: data.metadata };
+  }
+}
+
+export class ParallelAdapter implements RestAdapter {
+  tools(): Tool[] {
+    return [searchTool(
+      "parallel_search",
+      "Parallel Search",
+      "Search Parallel's AI-native index with a natural-language objective and LLM-optimized excerpts. Supply 1-3 concise keyword queries when possible.",
+      {
+        searchQueries: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: { type: "string", maxLength: 200 },
+          description: "Concise 3-6 word keyword searches; the main query is used if omitted",
+        },
+        mode: { type: "string", enum: ["turbo", "fast", "basic", "advanced"], default: "advanced" },
+        maxCharsTotal: { type: "integer", minimum: 1 },
+        maxResults: { type: "integer", minimum: 1, maximum: 20 },
+        maxCharsPerResult: { type: "integer", minimum: 1 },
+        includeDomains: { type: "array", items: { type: "string" } },
+        excludeDomains: { type: "array", items: { type: "string" } },
+        maxAgeSeconds: { type: "integer", minimum: 0 },
+        location: { type: "string", minLength: 2, maxLength: 2, description: "ISO 3166-1 alpha-2 country code" },
+        sessionId: { type: "string", maxLength: 1000 },
+        clientModel: { type: "string" },
+      },
+    )];
+  }
+
+  async call(_tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
+    const query = stringArg(args, "query");
+    const searches = arrayArg(args, "searchQueries");
+    const body: Record<string, unknown> = {
+      objective: query,
+      search_queries: searches.length ? searches : [query],
+    };
+    for (const [source, target] of [
+      ["mode", "mode"],
+      ["maxCharsTotal", "max_chars_total"],
+      ["sessionId", "session_id"],
+      ["clientModel", "client_model"],
+    ] as const) {
+      const value = args[source];
+      if (value !== undefined && value !== null && value !== "") body[target] = value;
+    }
+    const advanced: Record<string, unknown> = {};
+    const sourcePolicy: Record<string, unknown> = {};
+    const include = arrayArg(args, "includeDomains");
+    const exclude = arrayArg(args, "excludeDomains");
+    if (include.length) sourcePolicy.include_domains = include;
+    if (exclude.length) sourcePolicy.exclude_domains = exclude;
+    if (Object.keys(sourcePolicy).length) advanced.source_policy = sourcePolicy;
+    if (typeof args.maxAgeSeconds === "number") advanced.fetch_policy = { max_age_seconds: args.maxAgeSeconds };
+    if (typeof args.maxCharsPerResult === "number") advanced.excerpt_settings = { max_chars_per_result: args.maxCharsPerResult };
+    const maxResults = typeof args.maxResults === "number"
+      ? args.maxResults
+      : typeof args.limit === "number"
+        ? args.limit
+        : undefined;
+    if (maxResults !== undefined) advanced.max_results = maxResults;
+    if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
+    if (Object.keys(advanced).length) body.advanced_settings = advanced;
+    const base = config.integration.kind === "rest" && config.integration.baseUrl
+      ? config.integration.baseUrl
+      : "https://api.parallel.ai/v1/search";
+    const data = await requestJson(base, {
+      method: "POST",
+      headers: { "x-api-key": key, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60_000);
+    return {
+      items: Array.isArray(data.results) ? data.results.map(normalizeParallelItem) : [],
+      searchId: data.search_id,
+      sessionId: data.session_id,
+      warnings: data.warnings,
+      usage: data.usage,
+    };
   }
 }
 
@@ -265,8 +505,38 @@ export function adapterFor(name: string): RestAdapter {
   if (name === "jina") return new JinaAdapter();
   if (name === "tinyfish") return new TinyfishAdapter();
   if (name === "brave") return new BraveAdapter();
+  if (name === "you") return new YouAdapter();
+  if (name === "parallel") return new ParallelAdapter();
   if (name === "grok") return new GrokAdapter();
   throw new Error(`Unknown REST adapter: ${name}`);
+}
+
+function normalizeYouSection(value: unknown, section: "web" | "news"): Array<SearchItem & { section: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.map((row) => {
+    const item = row && typeof row === "object" ? row as Record<string, unknown> : {};
+    const contents = item.contents && typeof item.contents === "object"
+      ? item.contents as Record<string, unknown>
+      : {};
+    const highlights = Array.isArray(contents.highlights) ? contents.highlights.map(String) : [];
+    const snippets = Array.isArray(item.snippets) ? item.snippets.map(String) : [];
+    return {
+      section,
+      title: String(item.title ?? item.url ?? ""),
+      url: String(item.url ?? ""),
+      text: (highlights.length ? highlights : snippets.length ? snippets : [String(item.description ?? "")]).join("\n").slice(0, 12_000),
+    };
+  });
+}
+
+function normalizeParallelItem(value: unknown): SearchItem {
+  const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const excerpts = Array.isArray(item.excerpts) ? item.excerpts.map(String) : [];
+  return {
+    title: String(item.title ?? item.url ?? ""),
+    url: String(item.url ?? ""),
+    text: excerpts.join("\n").slice(0, 20_000),
+  };
 }
 
 function arrayArg(args: Record<string, unknown>, name: string): string[] {
