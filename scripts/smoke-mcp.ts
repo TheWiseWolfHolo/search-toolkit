@@ -39,6 +39,11 @@ try {
   for (const expected of ["querit_search", "doubao_search", "search_auto", "search_pool_status", "search_rotation_probe"]) {
     if (!names.includes(expected)) throw new Error(`Missing MCP tool: ${expected}`);
   }
+  const auto = listed.tools.find((tool) => tool.name === "search_auto");
+  const probe = listed.tools.find((tool) => tool.name === "search_rotation_probe");
+  if (auto?.annotations?.readOnlyHint !== true) throw new Error("search_auto must be read-only");
+  if (probe?.annotations?.readOnlyHint !== false) throw new Error("search_rotation_probe must require write approval");
+  if (!client.getInstructions()?.includes("Doubao is manual-only")) throw new Error("Missing server-wide quota instructions");
   const status = await client.callTool({ name: "search_pool_status", arguments: {} });
   if (status.isError) throw new Error("search_pool_status returned an error");
   console.log(JSON.stringify({ ok: true, toolCount: names.length, tools: names }, null, 2));

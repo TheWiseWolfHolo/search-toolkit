@@ -9,12 +9,12 @@ npm install
 npm run build
 ```
 
-Set `SEARCH_TOOLKIT_CONFIG` only when the config is not in the default platform path.
+The Windows default is `%USERPROFILE%/.config/search-toolkit/providers.json`, deliberately outside `AppData/Local` so packaged apps and ordinary CLI processes resolve the same physical file. Pass `--config` explicitly in agent configuration for auditable cross-client setup.
 
 ## Codex
 
 ```powershell
-codex mcp add searchToolkit -- node E:/Script/Services/search-toolkit/dist/src/mcp-server.js
+codex mcp add searchToolkit -- node E:/Script/Services/search-toolkit/dist/src/mcp-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
 Equivalent `~/.codex/config.toml`:
@@ -22,16 +22,17 @@ Equivalent `~/.codex/config.toml`:
 ```toml
 [mcp_servers.searchToolkit]
 command = "node"
-args = ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js"]
+args = ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js", "--config", "C:/Users/you/.config/search-toolkit/providers.json"]
 startup_timeout_sec = 60
 tool_timeout_sec = 120
 enabled = true
+default_tools_approval_mode = "writes"
 ```
 
 ## Claude Code
 
 ```powershell
-claude mcp add searchToolkit -- node E:/Script/Services/search-toolkit/dist/src/mcp-server.js
+claude mcp add searchToolkit -- node E:/Script/Services/search-toolkit/dist/src/mcp-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
 ## Cursor or Claude Desktop
@@ -41,7 +42,7 @@ claude mcp add searchToolkit -- node E:/Script/Services/search-toolkit/dist/src/
   "mcpServers": {
     "searchToolkit": {
       "command": "node",
-      "args": ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js"]
+      "args": ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js", "--config", "C:/Users/you/.config/search-toolkit/providers.json"]
     }
   }
 }

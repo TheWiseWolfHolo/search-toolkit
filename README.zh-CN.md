@@ -23,7 +23,7 @@
 | 带来源答案和研究任务 | LinkUp 官方 MCP |
 | 搜索、抓取、爬取、站点 Map、结构化提取 | Firecrawl 官方 MCP |
 | 紧凑搜索 | Jina Search |
-| 搜索与 Web Agent 自动化 | TinyFish |
+| 紧凑的独立搜索 | TinyFish Search |
 | 中文本地搜索且明确同意消耗次数 | 豆包 |
 | Web + X 原生搜索与模型综合 | Grok / xAI Responses |
 
@@ -44,7 +44,7 @@ npm run smoke:mcp
 真实配置默认位于：
 
 ```text
-%LOCALAPPDATA%/search-toolkit/providers.json
+%USERPROFILE%/.config/search-toolkit/providers.json
 ```
 
 一次性从 Kelivo 导出：
@@ -53,7 +53,7 @@ npm run smoke:mcp
 npm run import:kelivo
 ```
 
-导出后运行时不再读取 Kelivo。以后可以直接编辑独立 JSON，或者通过后续管理命令增删 Key。
+该路径刻意避开 Windows MSIX 对 `AppData/Local` 的虚拟化，Codex、Claude Code 与裸 CLI 会读取同一个物理文件。导出后运行时不再读取 Kelivo。
 
 ## 使用
 
@@ -64,9 +64,9 @@ node dist/src/cli.js call querit_search '{"query":"今天的 AI Agent 新闻","l
 node dist/src/cli.js probe querit "轮询验证"
 ```
 
-MCP 会暴露官方上游的所有工具，并额外提供：
+MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 27 个工具收窄为 7 个核心检索/获取工具，完整目录需要显式 `toolPolicy.allow: ["*"]`。此外提供：
 
-- `search_auto`：按能力自动选 Provider，绝不自动调用豆包。
+- `search_auto`：按能力自动选 Provider，返回可审计的 `{provider, tool, upstreamTool}` 路由信息，绝不自动调用豆包。
 - `search_pool_status`：查看脱敏 Key 池和轮询状态。
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
 
@@ -77,6 +77,7 @@ MCP 会暴露官方上游的所有工具，并额外提供：
 - 工具输出只显示 Key 掩码。
 - `400/404/422` 不会导致错误禁用其他 Key。
 - `401/403` 禁用当前 Key；`429/402` 冷却当前 Key；网络错误或 `5xx` 最多换下一把重试一次。
+- 创建、更新、运行任务和提交反馈不标成只读；删除工具标成 destructive。Codex 建议使用 `default_tools_approval_mode = "writes"`。
 
 ## License
 

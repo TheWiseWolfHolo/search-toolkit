@@ -32,6 +32,10 @@ export interface ProviderConfig {
   manualOnly?: boolean;
   keys: string[];
   integration: IntegrationConfig;
+  toolPolicy?: {
+    allow?: string[];
+    deny?: string[];
+  };
   options?: Record<string, unknown>;
 }
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "statePath": "C:/Users/you/AppData/Local/search-toolkit/state.db",
+  "statePath": "C:/Users/you/.config/search-toolkit/state.db",
   "providers": {
     "exa": {
       "enabled": true,
@@ -41,6 +41,17 @@
         "command": "npx",
         "args": ["-y", "firecrawl-mcp@3.24.0"],
         "envKey": "FIRECRAWL_API_KEY"
+      },
+      "toolPolicy": {
+        "allow": [
+          "firecrawl_scrape",
+          "firecrawl_map",
+          "firecrawl_search",
+          "firecrawl_crawl",
+          "firecrawl_check_crawl_status",
+          "firecrawl_developer_search",
+          "firecrawl_research_search_github"
+        ]
       }
     },
     "querit": {

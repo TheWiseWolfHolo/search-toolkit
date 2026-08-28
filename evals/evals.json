@@ -3,26 +3,36 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "查一下这个很冷门的报错原文 `search_auto_test_on_launch_v1` 出自哪里，给我代码来源。",
-      "expected_output": "Routes to Exa exact/code discovery, cites a commit-pinned code page, and verifies repository identity or reports origin ambiguity instead of assuming the first matching fork is canonical.",
+      "prompt": "查一下精确字符串 `search_auto_test_on_launch_v1` 最早出自哪个项目，给出 commit-pinned 代码链接并核验 fork/rename 关系。末尾附上本次搜索结果中的 route.provider 和 route.tool 作为验收信息。",
+      "expected_output": "Uses Exa exact/code discovery, cites commit-pinned code, resolves or explicitly reports repository-origin ambiguity, and exposes auditable route metadata.",
       "files": [],
       "expectations": [
         "Provides a commit-pinned source URL containing the exact string.",
         "Checks repository identity or fork/rename ambiguity before naming the original project.",
-        "Does not use Doubao unless the user explicitly requests it."
+        "Reports route.provider as exa and an Exa route.tool from the tool result."
       ]
     },
     {
       "id": 2,
-      "prompt": "找 Cloudflare Workers 最新的 Python 与 Node.js compatibility 官方文档，只要官方来源。",
-      "expected_output": "Routes to Serper official lookup or an official-site capable provider and filters to Cloudflare docs.",
-      "files": []
+      "prompt": "查一下今天的新加坡 AI 创业新闻，最多给 5 条候选来源，不要使用豆包，也不要启动深度研究。末尾附上 route.provider 和 route.tool。",
+      "expected_output": "Uses compact general/current retrieval, returns at most five sources, avoids Doubao and deep research, and exposes route metadata.",
+      "files": [],
+      "expectations": [
+        "Returns no more than five source URLs.",
+        "Does not use or cite Doubao and does not start deep research.",
+        "Reports route.provider and route.tool from the tool result."
+      ]
     },
     {
       "id": 3,
-      "prompt": "用豆包搜索一下今天的新加坡 AI 新闻。",
-      "expected_output": "Calls Doubao because the provider was explicitly requested despite its manual-only quota policy.",
-      "files": []
+      "prompt": "直接读取 https://modelcontextprotocol.io/specification/2025-11-25/server/tools 并概括 ToolAnnotations；不要重新搜索这个已知 URL，也不要调用本机不存在的 Jina Reader 或 TinyFish Browser。",
+      "expected_output": "Fetches the known URL directly through an actually exposed fetch/scrape tool, summarizes ToolAnnotations, and does not perform a redundant search or invent unavailable tools.",
+      "files": [],
+      "expectations": [
+        "Summarizes readOnlyHint and destructiveHint from the requested page.",
+        "Uses a direct fetch or scrape capability rather than a search query.",
+        "Does not claim to call Jina Reader or TinyFish Browser."
+      ]
     }
   ]
 }

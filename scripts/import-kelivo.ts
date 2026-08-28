@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ProviderConfig, ToolkitConfig } from "../src/types.js";
+import { DEFAULT_FIRECRAWL_TOOLS } from "../src/upstream.js";
 
 export function importKelivoDatabase(databasePath: string, outputPath: string): unknown {
   const db = new DatabaseSync(databasePath, { readOnly: true });
@@ -51,12 +52,15 @@ function providerFromPayload(type: string, payload: Record<string, unknown>): Pr
     url: "https://mcp.linkup.so/mcp",
     auth: { kind: "bearer" },
   }, options);
-  if (type === "firecrawl") return provider(keys, false, {
-    kind: "stdio_mcp",
-    command: "npx",
-    args: ["-y", "firecrawl-mcp@3.24.0"],
-    envKey: "FIRECRAWL_API_KEY",
-  }, options);
+  if (type === "firecrawl") return {
+    ...provider(keys, false, {
+      kind: "stdio_mcp",
+      command: "npx",
+      args: ["-y", "firecrawl-mcp@3.24.0"],
+      envKey: "FIRECRAWL_API_KEY",
+    }, options),
+    toolPolicy: { allow: [...DEFAULT_FIRECRAWL_TOOLS] },
+  };
   if (["querit", "serper", "jina", "tinyfish"].includes(type)) {
     return provider(keys, type === "querit" || type === "serper", { kind: "rest", adapter: type as "querit" }, options);
   }
@@ -97,7 +101,7 @@ function defaultKelivoDatabase(): string {
 function defaultOutput(): string {
   if (process.env.SEARCH_TOOLKIT_CONFIG) return resolve(process.env.SEARCH_TOOLKIT_CONFIG);
   if (process.platform === "win32") {
-    return resolve(process.env.LOCALAPPDATA ?? resolve(homedir(), "AppData/Local"), "search-toolkit/providers.json");
+    return resolve(homedir(), ".config/search-toolkit/providers.json");
   }
   return resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "search-toolkit/providers.json");
 }

@@ -11,7 +11,10 @@ await toolkit.initialize();
 
 const server = new Server(
   { name: "search-toolkit", version: "0.1.0" },
-  { capabilities: { tools: { listChanged: false } } },
+  {
+    capabilities: { tools: { listChanged: false } },
+    instructions: "Use the narrowest provider that fits the task. Start with compact search, inspect results, then fetch selected URLs. Doubao is manual-only. Key rotation probes consume quota. Tools that create, update, delete, start jobs, send notifications, or submit feedback require explicit user intent; respect tool annotations and approval prompts.",
+  },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolkit.listTools() }));

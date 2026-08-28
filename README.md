@@ -12,7 +12,7 @@ Search Toolkit preserves provider-specific capabilities instead of flattening ev
 - Official STDIO MCP proxy: Firecrawl.
 - Thin official-API adapters: Querit, Serper, Brave, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
 - Persistent per-provider key pools backed by SQLite.
-- Provider-prefixed upstream tool names and schemas are discovered from official MCP servers at startup.
+- Provider-prefixed upstream tool names and schemas are discovered from official MCP servers at startup, then filtered by an optional provider tool policy.
 - Raw keys stay outside the repository in a local JSON file.
 
 Official references used by the implementation include the [Codex MCP configuration guide](https://learn.chatgpt.com/docs/extend/mcp), [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), and [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp).
@@ -29,7 +29,7 @@ Official references used by the implementation include the [Codex MCP configurat
 | Sourced answers and research jobs | LinkUp official MCP |
 | Search, scrape, crawl, map and structured extraction | Firecrawl official MCP |
 | Compact search | Jina Search |
-| Search plus separate web-agent automation | TinyFish |
+| Compact independent search | TinyFish Search |
 | Chinese-local search with explicit quota use | Doubao, manual-only by default |
 | Native Web + X search with model synthesis | Grok / xAI Responses |
 
@@ -49,7 +49,7 @@ Node.js 22 or newer is required. Node.js 24 is recommended because the persisten
 Copy `config.example.json` to a private path outside the repository and replace placeholder keys:
 
 ```powershell
-$env:SEARCH_TOOLKIT_CONFIG = "$env:LOCALAPPDATA/search-toolkit/providers.json"
+$env:SEARCH_TOOLKIT_CONFIG = "$HOME/.config/search-toolkit/providers.json"
 ```
 
 The local one-time importer can migrate configured Kelivo search keys into the standalone text config:
@@ -58,7 +58,7 @@ The local one-time importer can migrate configured Kelivo search keys into the s
 npm run import:kelivo
 ```
 
-The importer reads Kelivo once and writes `%LOCALAPPDATA%/search-toolkit/providers.json`. Runtime MCP and CLI processes never access Kelivo.
+The importer reads Kelivo once and writes `%USERPROFILE%/.config/search-toolkit/providers.json` on Windows. This avoids MSIX `AppData/Local` virtualization, so Codex, Claude Code, and ordinary CLI processes read the same physical file. Runtime MCP and CLI processes never access Kelivo.
 
 ## CLI
 
@@ -76,19 +76,22 @@ Build first, then add the local STDIO server to Codex:
 ```toml
 [mcp_servers.searchToolkit]
 command = "C:/path/to/node.exe"
-args = ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js"]
+args = ["E:/Script/Services/search-toolkit/dist/src/mcp-server.js", "--config", "C:/Users/you/.config/search-toolkit/providers.json"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true
+default_tools_approval_mode = "writes"
 ```
 
 The MCP server exposes:
 
-- Every discovered official upstream MCP tool, prefixed by provider.
+- Provider-prefixed official upstream tools selected by the provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its entire management catalog.
 - Every configured REST adapter tool.
-- `search_auto` for capability-aware default routing.
+- `search_auto` for capability-aware default routing with auditable `{provider, tool, upstreamTool}` metadata.
 - `search_pool_status` for masked key-pool diagnostics.
 - `search_rotation_probe` for a live, quota-consuming rotation proof.
+
+Set `toolPolicy.allow` to `["*"]` for a provider only when exposing its full upstream catalog is intentional. Write and destructive tools retain corrected annotations so clients can request approval.
 
 ## Key rotation
 

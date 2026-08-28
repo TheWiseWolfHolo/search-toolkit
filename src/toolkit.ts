@@ -68,12 +68,15 @@ export class SearchToolkit {
   }
 
   private async providerBindings(name: string, config: ProviderConfig): Promise<ToolBinding[]> {
+    let bindings: ToolBinding[];
     if (config.integration.kind === "rest") {
-      return new RestProvider(name, config, this.rotation, adapterFor(config.integration.adapter)).bindings();
+      bindings = new RestProvider(name, config, this.rotation, adapterFor(config.integration.adapter)).bindings();
+    } else {
+      const provider = new UpstreamMcpProvider(name, config, this.rotation);
+      this.upstreams.push(provider);
+      bindings = await provider.bindings();
     }
-    const provider = new UpstreamMcpProvider(name, config, this.rotation);
-    this.upstreams.push(provider);
-    return provider.bindings();
+    return filterBindings(config, bindings);
   }
 
   private managementBindings(): ToolBinding[] {
@@ -87,7 +90,7 @@ export class SearchToolkit {
     const autoTool: Tool = {
       name: "search_auto",
       title: "Search with the recommended provider",
-      description: "Route general queries to Querit, exact/code queries to Exa, current research to Tavily, and official-site lookups to Serper. Doubao is never selected automatically.",
+      description: "Route general queries to Querit, exact/code queries to Exa, current research to Tavily, and official-site lookups to Serper. Doubao is never selected automatically. Results include auditable provider and tool route metadata.",
       inputSchema: {
         type: "object",
         properties: {
@@ -115,7 +118,7 @@ export class SearchToolkit {
         required: ["provider", "query"],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     };
     return [
       binding(statusTool, async () => result(this.status())),
@@ -137,7 +140,8 @@ export class SearchToolkit {
     if (!selectedName) throw new Error(`No automatic provider is available for mode ${mode}`);
     const selected = this.bindings.get(selectedName);
     if (!selected) throw new Error(`Automatic provider disappeared: ${selectedName}`);
-    return selected.call(toolArguments(selected.exposed, String(args.query ?? ""), Number(args.limit ?? 6)));
+    const output = await selected.call(toolArguments(selected.exposed, String(args.query ?? ""), Number(args.limit ?? 6)));
+    return attachRouteMetadata(selected, output);
   }
 
   private async probe(args: Record<string, unknown>): Promise<unknown> {
@@ -168,6 +172,39 @@ function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
 
 function result(value: unknown): unknown {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+}
+
+export function attachRouteMetadata(binding: ToolBinding, output: unknown): unknown {
+  const route = {
+    provider: binding.provider,
+    tool: binding.exposed.name,
+    upstreamTool: binding.upstreamName,
+  };
+  if (!output || typeof output !== "object") return result({ route, result: output });
+  const record = output as Record<string, unknown>;
+  const content = Array.isArray(record.content) ? record.content : [];
+  const meta = record._meta && typeof record._meta === "object"
+    ? record._meta as Record<string, unknown>
+    : {};
+  const searchToolkitMeta = meta.searchToolkit && typeof meta.searchToolkit === "object"
+    ? meta.searchToolkit as Record<string, unknown>
+    : {};
+  return {
+    ...record,
+    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...content],
+    structuredContent: { route, result: record.structuredContent ?? null },
+    _meta: { ...meta, searchToolkit: { ...searchToolkitMeta, route } },
+  };
+}
+
+export function filterBindings(config: ProviderConfig, bindings: ToolBinding[]): ToolBinding[] {
+  const allow = config.toolPolicy?.allow;
+  const deny = new Set(config.toolPolicy?.deny ?? []);
+  return bindings.filter((binding) => {
+    const names = [binding.upstreamName, binding.exposed.name];
+    const allowed = !allow || allow.includes("*") || names.some((name) => allow.includes(name));
+    return allowed && !names.some((name) => deny.has(name));
+  });
 }
 
 function cleanError(error: unknown): string {

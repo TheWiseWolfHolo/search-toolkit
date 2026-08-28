@@ -55,7 +55,7 @@ export class RestProvider {
       return {
         content: [{ type: "text", text: JSON.stringify(structuredContent) }],
         structuredContent,
-        _meta: { searchToolkit: { keySlot: selection.masked, latencyMs } },
+        _meta: { searchToolkit: { provider: this.name, upstreamTool: tool, keySlot: selection.masked, latencyMs } },
       };
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);

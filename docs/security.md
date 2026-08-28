@@ -19,4 +19,11 @@
 
 ## Open-world tools
 
-Search, crawl, scrape, and remote MCP tools interact with the public internet. Tool annotations mark them read-only and open-world, but MCP annotations are hints rather than an authorization boundary. Agents and users should still review URLs and fetched content as untrusted input.
+Search, crawl, scrape, and remote MCP tools interact with the public internet. MCP annotations are hints rather than an authorization boundary, but Search Toolkit does not overwrite every upstream tool as read-only:
+
+- Pure lookup, fetch, scrape, map, list, get, status, and check tools are marked read-only.
+- Create, update, run, feedback, interaction, crawl, extract, agent, parse, and research jobs are marked as writes.
+- Delete, remove, destroy, and revoke tools are marked destructive.
+- Firecrawl monitor, interaction, feedback, and agent tools are not exposed by the default focused allowlist. Set `toolPolicy.allow` to `["*"]` only when the full catalog and its approval surface are intentional.
+
+Codex should use `default_tools_approval_mode = "writes"` so non-read-only tools prompt. Agents and users should still review URLs, fetched content, and upstream annotations as untrusted input.

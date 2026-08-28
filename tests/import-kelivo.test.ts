@@ -19,12 +19,31 @@ test("one-time importer flattens all keys without retaining a Kelivo dependency"
       JSON.stringify({ type: "querit", id: "q", apiKey: "primary-key", apiKeys: ["extra-one", "extra-two"] }),
       Date.now(),
     );
+    db.prepare("INSERT INTO search_service_rows VALUES (?, ?, ?, ?)").run(
+      "f",
+      1,
+      JSON.stringify({ type: "firecrawl", id: "f", apiKey: "firecrawl-key" }),
+      Date.now(),
+    );
     db.close();
     importKelivoDatabase(databasePath, outputPath);
     const config = JSON.parse(readFileSync(outputPath, "utf8")) as Record<string, unknown>;
-    const providers = config.providers as Record<string, { keys: string[]; integration: { kind: string } }>;
+    const providers = config.providers as Record<string, {
+      keys: string[];
+      integration: { kind: string };
+      toolPolicy?: { allow?: string[] };
+    }>;
     assert.deepEqual(providers.querit?.keys, ["primary-key", "extra-one", "extra-two"]);
     assert.equal(providers.querit?.integration.kind, "rest");
+    assert.deepEqual(providers.firecrawl?.toolPolicy?.allow, [
+      "firecrawl_scrape",
+      "firecrawl_map",
+      "firecrawl_search",
+      "firecrawl_crawl",
+      "firecrawl_check_crawl_status",
+      "firecrawl_developer_search",
+      "firecrawl_research_search_github",
+    ]);
     rmSync(databasePath, { force: true });
     assert.equal(JSON.parse(readFileSync(outputPath, "utf8")).providers.querit.keys.length, 3);
   } finally {

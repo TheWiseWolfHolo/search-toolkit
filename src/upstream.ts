@@ -7,6 +7,16 @@ import { statusFromError, shouldRetryWithNextKey } from "./errors.js";
 import type { KeySelection, ProviderConfig, ToolBinding } from "./types.js";
 import { maskKey, RotationStore } from "./rotation.js";
 
+export const DEFAULT_FIRECRAWL_TOOLS = [
+  "firecrawl_scrape",
+  "firecrawl_map",
+  "firecrawl_search",
+  "firecrawl_crawl",
+  "firecrawl_check_crawl_status",
+  "firecrawl_developer_search",
+  "firecrawl_research_search_github",
+] as const;
+
 interface ClientEntry {
   client: Client;
   close(): Promise<void>;
@@ -23,7 +33,7 @@ export class UpstreamMcpProvider {
   ) {}
 
   async bindings(): Promise<ToolBinding[]> {
-    const tools = await this.discoverTools();
+    const tools = filterUpstreamTools(this.name, this.config, await this.discoverTools());
     return tools.map((tool) => {
       const exposedName = `${this.name}_${sanitizeName(tool.name)}`;
       return {
@@ -34,12 +44,7 @@ export class UpstreamMcpProvider {
           name: exposedName,
           title: tool.title ? `${this.name}: ${tool.title}` : `${this.name}: ${tool.name}`,
           description: `[Official ${this.name} MCP; rotating ${this.config.keys.length} configured key(s)] ${tool.description ?? ""}`,
-          annotations: {
-            ...tool.annotations,
-            readOnlyHint: true,
-            destructiveHint: false,
-            openWorldHint: true,
-          },
+          annotations: safeToolAnnotations(tool),
         },
         call: async (arguments_: Record<string, unknown>) => this.call(tool.name, arguments_),
       };
@@ -89,7 +94,7 @@ export class UpstreamMcpProvider {
         throw new Error(`${this.name} upstream tool error: ${text.slice(0, 500)}`);
       }
       this.rotation.record(selection, { ok: true, latencyMs });
-      return appendRotationMetadata(result, selection.masked, latencyMs);
+      return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const httpStatus = statusFromError(error);
@@ -148,13 +153,50 @@ function sanitizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-function appendRotationMetadata(result: unknown, masked: string, latencyMs: number): unknown {
+export function filterUpstreamTools(provider: string, config: ProviderConfig, tools: Tool[]): Tool[] {
+  const defaultAllow = provider === "firecrawl" ? [...DEFAULT_FIRECRAWL_TOOLS] : undefined;
+  const allow = config.toolPolicy?.allow ?? defaultAllow;
+  const deny = new Set(config.toolPolicy?.deny ?? []);
+  return tools.filter((tool) => {
+    const allowed = !allow || allow.includes("*") || allow.includes(tool.name);
+    return allowed && !deny.has(tool.name);
+  });
+}
+
+export function safeToolAnnotations(tool: Tool): Tool["annotations"] {
+  const annotations = { ...tool.annotations };
+  const name = tool.name.toLowerCase();
+  const destructive = /(?:^|_)(?:delete|remove|destroy|revoke)(?:_|$)/.test(name);
+  const retrieval = /(?:^|_)(?:search|fetch|scrape|map|list|get|status|check|read|inspect|related)(?:_|$)/.test(name);
+  const explicitWrite = /(?:^|_)(?:create|update|patch|set|run|start|stop|feedback|interact)(?:_|$)/.test(name);
+  const job = /(?:^|_)(?:agent|crawl|extract|parse|research)(?:_|$)/.test(name);
+  if (destructive) return { ...annotations, readOnlyHint: false, destructiveHint: true };
+  if (explicitWrite) return { ...annotations, readOnlyHint: false, destructiveHint: false };
+  if (retrieval) return { ...annotations, readOnlyHint: true, destructiveHint: false };
+  if (job) return { ...annotations, readOnlyHint: false, destructiveHint: false };
+  return annotations;
+}
+
+function appendRotationMetadata(
+  result: unknown,
+  provider: string,
+  upstreamTool: string,
+  masked: string,
+  latencyMs: number,
+): unknown {
   if (!result || typeof result !== "object") return result;
   const record = result as Record<string, unknown>;
+  const meta = record._meta && typeof record._meta === "object"
+    ? record._meta as Record<string, unknown>
+    : {};
+  const searchToolkitMeta = meta.searchToolkit && typeof meta.searchToolkit === "object"
+    ? meta.searchToolkit as Record<string, unknown>
+    : {};
   return {
     ...record,
     _meta: {
-      searchToolkit: { keySlot: masked, latencyMs },
+      ...meta,
+      searchToolkit: { ...searchToolkitMeta, provider, upstreamTool, keySlot: masked, latencyMs },
     },
   };
 }

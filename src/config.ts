@@ -9,8 +9,10 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export function defaultConfigPath(): string {
   if (process.env.SEARCH_TOOLKIT_CONFIG) return resolve(process.env.SEARCH_TOOLKIT_CONFIG);
   if (process.platform === "win32") {
-    const local = process.env.LOCALAPPDATA ?? resolve(homedir(), "AppData/Local");
-    return resolve(local, "search-toolkit/providers.json");
+    // AppData/Local is transparently virtualized for packaged Windows apps.
+    // A home-relative path is visible to packaged Codex and ordinary CLI/Claude
+    // processes as the same physical file.
+    return resolve(homedir(), ".config/search-toolkit/providers.json");
   }
   const configHome = process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config");
   return resolve(configHome, "search-toolkit/providers.json");
@@ -44,6 +46,14 @@ function validateProvider(name: string, provider: ProviderConfig): void {
   }
   const unique = new Set(provider.keys.map((key) => key.trim()).filter(Boolean));
   if (unique.size !== provider.keys.length) throw new Error(`${name}.keys contains blanks or duplicates`);
+  for (const [policyName, values] of Object.entries(provider.toolPolicy ?? {})) {
+    if (!Array.isArray(values) || values.some((value) => typeof value !== "string" || !value.trim())) {
+      throw new Error(`${name}.toolPolicy.${policyName} must contain non-blank tool names`);
+    }
+    if (new Set(values).size !== values.length) {
+      throw new Error(`${name}.toolPolicy.${policyName} contains duplicates`);
+    }
+  }
 }
 
 export function sanitizedConfig(config: ToolkitConfig): unknown {
@@ -57,6 +67,7 @@ export function sanitizedConfig(config: ToolkitConfig): unknown {
         manualOnly: value.manualOnly ?? false,
         keyCount: value.keys.length,
         integration: value.integration.kind,
+        toolPolicy: value.toolPolicy,
       }]),
     ),
   };
