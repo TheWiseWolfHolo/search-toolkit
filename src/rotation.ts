@@ -111,7 +111,7 @@ export class RotationStore {
     );
   }
 
-  status(provider: string, keys: string[]): unknown {
+  status(provider: string, keys: string[]) {
     const cursor = this.db.prepare("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
       | { next_slot: number }
       | undefined;

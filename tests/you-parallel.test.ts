@@ -24,8 +24,16 @@ test("You.com uses the current POST Search contract and normalizes Web plus News
     capturedInit = init;
     return new Response(JSON.stringify({
       results: {
-        web: [{ title: "Web", url: "https://example.com/web", contents: { highlights: ["Web highlight"] } }],
-        news: [{ title: "News", url: "https://example.com/news", snippets: ["News snippet"] }],
+        web: Array.from({ length: 4 }, (_, index) => ({
+          title: `Web ${index + 1}`,
+          url: `https://example.com/web-${index + 1}`,
+          contents: { highlights: [`Web highlight ${index + 1}`] },
+        })),
+        news: Array.from({ length: 4 }, (_, index) => ({
+          title: `News ${index + 1}`,
+          url: `https://example.com/news-${index + 1}`,
+          snippets: [`News snippet ${index + 1}`],
+        })),
       },
       metadata: { search_uuid: "search-id" },
     }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -61,7 +69,7 @@ test("You.com uses the current POST Search contract and normalizes Web plus News
       include_domains: ["example.com"],
       extraction: { extraction_mode: "highlights", highlights: {} },
     });
-    assert.deepEqual((output.items as Array<Record<string, unknown>>).map((item) => item.section), ["web", "news"]);
+    assert.deepEqual((output.items as Array<Record<string, unknown>>).map((item) => item.section), ["web", "news", "web", "news"]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -87,7 +95,8 @@ test("Parallel uses the v1 semantic Search contract and advanced settings", asyn
     assert.equal(tool?.name, "parallel_search");
     assert.equal(tool?.annotations?.readOnlyHint, true);
     const schema = tool?.inputSchema as { properties?: Record<string, Record<string, unknown>> };
-    assert.equal(schema.properties?.mode?.default, "basic");
+    assert.deepEqual(schema.properties?.mode?.enum, ["turbo", "fast", "basic", "advanced"]);
+    assert.equal(schema.properties?.mode?.default, "fast");
     const output = await adapter.call("parallel_search", {
       query: "Find current official web retrieval API changes",
       searchQueries: ["web retrieval API changes", "official search API changelog"],

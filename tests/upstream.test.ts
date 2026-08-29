@@ -80,6 +80,10 @@ test("classifies hyphenated upstream tool names", () => {
     { readOnlyHint: true, destructiveHint: false },
   );
   assert.deepEqual(
+    safeToolAnnotations(tool("anysearch-extract")),
+    { readOnlyHint: true, destructiveHint: false },
+  );
+  assert.deepEqual(
     safeToolAnnotations(tool("linkup-delete-cache")),
     { readOnlyHint: false, destructiveHint: true },
   );

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RestProvider, searchTool, type RestAdapter } from "../src/rest/base.js";
+import { SerperAdapter } from "../src/rest/adapters.js";
 import { RotationStore } from "../src/rotation.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -40,5 +41,31 @@ test("REST direct results expose the same route provenance shape", async () => {
   } finally {
     rotation.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Serper enforces the requested result limit when News ignores num", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> = {};
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      news: Array.from({ length: 8 }, (_, index) => ({
+        title: `News ${index + 1}`,
+        link: `https://example.com/news-${index + 1}`,
+      })),
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const output = await new SerperAdapter().call("serper_news", {
+      query: "latest agent news",
+      limit: 3,
+      tbs: "qdr:w",
+    }, "test-key") as { items: Array<Record<string, unknown>> };
+    assert.deepEqual(requestBody, { q: "latest agent news", num: 3, tbs: "qdr:w" });
+    assert.equal(output.items.length, 3);
+    assert.deepEqual(output.items.map((item) => item.title), ["News 1", "News 2", "News 3"]);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

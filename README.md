@@ -8,14 +8,14 @@ Official-first web tools for AI agents, with persistent multi-key rotation and t
 
 Search Toolkit preserves provider-specific capabilities instead of flattening every backend into one generic search endpoint.
 
-- Official Remote MCP proxy: Exa, Tavily, and LinkUp.
+- Official Remote MCP proxy: Exa, Tavily, LinkUp, and AnySearch.
 - Official STDIO MCP proxy: Firecrawl.
 - Thin official-API adapters: Querit, Serper, Brave Web/News/LLM Context, You.com Web Search, Parallel Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
 - Persistent per-provider key pools backed by SQLite.
 - Provider-prefixed upstream tool names and schemas are discovered from official MCP servers at startup, then filtered by an optional provider tool policy.
 - Raw keys stay outside the repository in a local JSON file.
 
-Official references used by the implementation include the [Codex MCP configuration guide](https://learn.chatgpt.com/docs/extend/mcp), [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp), [You.com Search API](https://you.com/docs/api-reference/search/v1-search), and [Parallel Search API](https://docs.parallel.ai/api-reference/search/search).
+Official references used by the implementation include the [Codex MCP configuration guide](https://learn.chatgpt.com/docs/extend/mcp), [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), [AnySearch MCP](https://github.com/anysearch-ai/anysearch-mcp-server), [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp), [You.com Search API](https://you.com/docs/api-reference/search/v1-search), and [Parallel Search API](https://docs.parallel.ai/api-reference/search/search).
 
 ## Provider capabilities
 
@@ -29,6 +29,7 @@ Official references used by the implementation include the [Codex MCP configurat
 | Unified Web + News results with optional query-aware highlights | You.com Search |
 | Semantic objectives with ranked, LLM-optimized excerpts | Parallel Search |
 | Sourced answers and research jobs | LinkUp official MCP |
+| Manual general/vertical search, parallel batches, and URL extraction | AnySearch official MCP |
 | Search, scrape, crawl, map and structured extraction | Firecrawl official MCP |
 | Compact search | Jina Search |
 | Compact independent search | TinyFish Search |

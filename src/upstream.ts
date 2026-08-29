@@ -167,9 +167,9 @@ export function safeToolAnnotations(tool: Tool): Tool["annotations"] {
   const annotations = { ...tool.annotations };
   const name = sanitizeName(tool.name);
   const destructive = /(?:^|_)(?:delete|remove|destroy|revoke)(?:_|$)/.test(name);
-  const retrieval = /(?:^|_)(?:search|fetch|scrape|map|list|get|status|check|read|inspect|related)(?:_|$)/.test(name);
+  const retrieval = /(?:^|_)(?:search|fetch|scrape|extract|map|list|get|status|check|read|inspect|related)(?:_|$)/.test(name);
   const explicitWrite = /(?:^|_)(?:create|update|patch|set|run|start|stop|feedback|interact)(?:_|$)/.test(name);
-  const job = /(?:^|_)(?:agent|crawl|extract|parse|research)(?:_|$)/.test(name);
+  const job = /(?:^|_)(?:agent|crawl|parse|research)(?:_|$)/.test(name);
   if (destructive) return { ...annotations, readOnlyHint: false, destructiveHint: true };
   if (explicitWrite) return { ...annotations, readOnlyHint: false, destructiveHint: false };
   if (retrieval) return { ...annotations, readOnlyHint: true, destructiveHint: false };

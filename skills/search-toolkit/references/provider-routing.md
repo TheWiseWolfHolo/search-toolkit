@@ -34,19 +34,19 @@ Use `you_search` when one current query should return both Web and News sections
 
 ### Parallel — semantic objectives and dense excerpts
 
-Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Use `basic` for routine quality retrieval, `advanced` for complex semantic or multi-hop work, and `turbo` only when low latency matters more than depth. The stable V1 modes are turbo, basic, and advanced; do not describe the legacy `fast` alias as a separate low-cost tier. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
+Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Use `fast` for most interactive agent retrieval, `basic` when the task specifically benefits from extended excerpts, and `advanced` for complex semantic or multi-hop work. Use `turbo` only for English or Japanese queries that prioritize the lowest latency. Turbo and fast share the lower price tier; basic and advanced share the higher price tier, so basic is a specialized excerpt mode rather than a middle-cost default. The current Search API exposes all four modes. A live check confirmed that fast currently returns useful Chinese results, but use basic or advanced when broader multilingual coverage is a hard requirement because Parallel only documents that guarantee for those modes. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
 
 ## Automatic routing
 
 Balanced routing uses these quality-oriented profiles:
 
-- General: Parallel Basic → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
+- General: Parallel Fast → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
 - Exact: Exa Search → Serper → Tavily exact/basic → Brave Web.
 - Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
-- Current: Brave News → You snippets → Tavily Search → Serper News. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`; use supported freshness/date controls when needed.
+- Current: Brave News → Serper News → You snippets → Tavily Search. The default `freshness: week` maps to Brave `pw`, Serper `qdr:w`, You.com `week`, and Tavily `week`; callers can select day, month, or year instead. Automatic routing stops after the first success; use a direct Serper News call as an independent second search when news coverage or corroboration matters. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`.
 - Official navigation: Serper → Brave Web → Exa Search → You snippets.
 
-Max quality changes General to Parallel Advanced, Exact to Exa Advanced, and Context to Parallel Advanced before Brave LLM Context. It does not silently turn ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
+Max quality uses Parallel Advanced for General and Context, Exa Advanced for Exact and Official, You.com highlights in General, and Tavily Advanced wherever Tavily appears. Candidate order otherwise stays mode-specific, and max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
 
 Automatic routing may try at most two Providers. A second compatible retrieval Provider is eligible after a recognized availability failure: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, Provider 5xx, or clear statusless MCP messages such as rate limits, temporary unavailability, and no healthy slots. Request/schema errors, policy or safety blocks, local code errors, and unknown failures are terminal. Explicit HTTP status outranks error-body keyword guesses. The first successful result is returned without silently merging Providers; use an explicit independent cross-check when the claim warrants one.
 
@@ -61,6 +61,10 @@ Use when the task naturally extends from search into extraction, fresh/news foll
 ### LinkUp — sourced synthesis and research
 
 Use for sourced synthesized answers, sequential retrieval, structured research, and explicitly long-running tasks. Prefer raw results for downstream model synthesis when possible; deep modes are slower and more expensive.
+
+### AnySearch — manual multi-interface retrieval
+
+Use the official AnySearch MCP manually when one request benefits from parallel batches, source-directory discovery, vertical routing, or its paired URL extraction tool. Keep it outside automatic routing. Live checks found strong English official-document discovery, detailed `security.vuln` output, useful structured finance quotes, and accurate React results from `code.doc`; `batch_search` isolated a malformed item without losing successful siblings. The same checks found noisy Chinese general results, irrelevant `academic.search` ranking, and a slow repository-constrained `code.snippet` query that ignored the intended repository. Before any vertical search, call `get_sub_domains` and pass only the returned sub-domain and parameter fields; inspect the result set rather than assuming vertical routing worked. Use AnySearch Extract as a convenient paired reader, not as a replacement for Firecrawl on difficult pages. The free plan currently advertises 1,000 requests per day and 20 QPS per key. Treat privacy claims conservatively because the provider's legal terms allow service logs with truncated query content.
 
 ### Firecrawl — web data acquisition
 
@@ -82,10 +86,12 @@ Use when X posts, users, threads, reactions, or X-native breaking signals are ce
 
 ## Fetch policy
 
-Fetch only selected sources. Prefer the current provider's fetch tool when suitable, Exa Fetch for Exa-discovered pages, and Firecrawl Scrape for robust rendering, structured extraction, screenshots, crawling, or difficult pages. The current server has no Querit Contents or Jina Reader tool.
+Fetch only selected sources. Prefer the current provider's fetch tool when suitable, AnySearch Extract for URLs selected through AnySearch, Exa Fetch for Exa-discovered pages, and Firecrawl Scrape for robust rendering, structured extraction, screenshots, crawling, or difficult pages. The current server has no Querit Contents or Jina Reader tool.
 
 ## Research and verification
 
 Normal web questions need ordinary search, not deep research. Escalate to Tavily Research or LinkUp Research only for several searches, lead-following, broad comparison, substantial reports, or demonstrated retrieval gaps.
 
 For disputed or consequential claims, prefer authoritative primary sources, useful domain/date constraints, and a provider backed by a different retrieval path. Brave is the preferred independent-index cross-check. Reposts of the same underlying source count as one source.
+
+For local repositories and newly written or freshly pushed code, use `rg` or `gh search code` before web search. Exa and Firecrawl Developer are useful after code has been indexed, but no web provider should be expected to find a commit immediately.

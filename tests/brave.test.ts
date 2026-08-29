@@ -134,7 +134,7 @@ test("search_auto context mode routes to Brave LLM Context", async () => {
       limit: 4,
     }) as Record<string, unknown>;
     assert.equal(requestBody.q, "ground this answer");
-    assert.equal(requestBody.count, 4);
+    assert.equal(requestBody.count, 20);
     assert.equal(requestBody.maximum_number_of_tokens, 4096);
     assert.deepEqual((output.structuredContent as Record<string, unknown>).route, {
       provider: "brave",

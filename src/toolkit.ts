@@ -9,6 +9,7 @@ import { UpstreamMcpProvider } from "./upstream.js";
 
 export type AutoMode = "general" | "exact" | "current" | "official" | "context";
 export type AutoQuality = "balanced" | "max";
+export type AutoFreshness = "day" | "week" | "month" | "year";
 
 export interface AutoCandidate {
   name: string;
@@ -68,18 +69,23 @@ export class SearchToolkit {
     this.rotation.close();
   }
 
-  status(): unknown {
+  status(verbose = false): unknown {
+    const tools = this.listTools();
     return {
       version: 1,
+      verbose,
       providers: Object.entries(this.config.providers).map(([name, config]) => ({
         name,
         enabled: config.enabled,
         automatic: config.automatic,
         manualOnly: config.manualOnly ?? false,
         integration: config.integration.kind,
-        rotation: this.rotation.status(name, config.keys),
+        rotation: verbose
+          ? this.rotation.status(name, config.keys)
+          : compactRotation(this.rotation.status(name, config.keys)),
       })),
-      tools: this.listTools().map((tool) => tool.name),
+      toolCount: tools.length,
+      ...(verbose ? { tools: tools.map((tool) => tool.name) } : {}),
       warnings: this.warnings,
     };
   }
@@ -100,8 +106,18 @@ export class SearchToolkit {
     const statusTool: Tool = {
       name: "search_pool_status",
       title: "Search provider and key-pool status",
-      description: "Show enabled providers, exposed tools, masked key slots, rotation cursors, and startup warnings. Never returns raw keys.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      description: "Show a compact masked provider/key-pool health summary and startup warnings. Set verbose=true for complete masked key-slot counters and the exposed tool list. Never returns raw keys.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          verbose: {
+            type: "boolean",
+            default: false,
+            description: "Include every masked key slot, its counters, and the complete exposed tool list.",
+          },
+        },
+        additionalProperties: false,
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     };
     const autoTool: Tool = {
@@ -119,7 +135,19 @@ export class SearchToolkit {
             default: "balanced",
             description: "Balanced uses strong routine retrieval; max selects Parallel Advanced or Exa Advanced where the mode supports it",
           },
-          limit: { type: "integer", minimum: 1, maximum: 20, default: 6 },
+          freshness: {
+            type: "string",
+            enum: ["day", "week", "month", "year"],
+            default: "week",
+            description: "Current-mode time window mapped to each provider's native freshness control; ignored by other modes",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 20,
+            default: 6,
+            description: "Requested result limit. Brave LLM Context ignores this field and preserves a 20-source grounding pool; context-mode fallback providers may apply it to their own result count.",
+          },
           maximumNumberOfTokens: {
             type: "integer",
             minimum: 1024,
@@ -151,7 +179,7 @@ export class SearchToolkit {
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     };
     return [
-      binding(statusTool, async () => result(this.status())),
+      binding(statusTool, async (args) => result(this.status(args.verbose === true))),
       binding(autoTool, async (args) => this.callAuto(args)),
       binding(probeTool, async (args) => this.probe(args)),
     ];
@@ -172,10 +200,7 @@ export class SearchToolkit {
     const attempts: AutoAttempt[] = [];
     let lastError: unknown;
     for (const entry of candidates.slice(0, 2)) {
-      const selectedArguments = {
-        ...toolArguments(entry.binding.exposed, String(args.query ?? ""), Number(args.limit ?? 6)),
-        ...entry.candidate.nativeArguments,
-      };
+      const selectedArguments = { ...(entry.candidate.nativeArguments ?? {}) };
       try {
         const output = await entry.binding.call(selectedArguments);
         attempts.push({
@@ -213,13 +238,17 @@ export class SearchToolkit {
     if (!config?.enabled) throw new Error(`Provider is not enabled: ${provider}`);
     const providerTools = Array.from(this.bindings.values()).filter((item) => item.provider === provider);
     const requested = typeof args.tool === "string" ? this.bindings.get(args.tool) : undefined;
-    const selected = requested ?? providerTools.find((item) => /search/i.test(item.exposed.name)) ?? providerTools[0];
+    const selected = requested
+      ?? providerTools.find((item) => item.exposed.name === `${provider}_search`)
+      ?? providerTools.find((item) => item.upstreamName === "search")
+      ?? providerTools.find((item) => /search/i.test(item.exposed.name))
+      ?? providerTools[0];
     if (!selected || selected.provider !== provider) throw new Error(`No callable tool found for provider: ${provider}`);
     const count = Math.min(Number(args.calls ?? config.keys.length), Math.max(config.keys.length, 1), 12);
     const attempts: unknown[] = [];
     for (let index = 0; index < count; index += 1) {
       try {
-        const output = await selected.call(toolArguments(selected.exposed, String(args.query ?? ""), 1));
+        const output = await selected.call(probeArguments(selected.exposed, String(args.query ?? ""), 1));
         attempts.push({ index: index + 1, ok: true, meta: extractMeta(output) });
       } catch (error) {
         attempts.push({ index: index + 1, ok: false, error: cleanError(error) });
@@ -235,6 +264,26 @@ function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
 
 function result(value: unknown): unknown {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+}
+
+function compactRotation(rotation: ReturnType<RotationStore["status"]>): unknown {
+  const counts = { healthy: 0, cooldown: 0, disabled: 0 };
+  const unhealthySlots: Array<Record<string, unknown>> = [];
+  for (const key of rotation.keys) {
+    const details = key.status as Record<string, unknown>;
+    const status = details.status === "cooldown" || details.status === "disabled" ? details.status : "healthy";
+    counts[status] += 1;
+    if (status !== "healthy") {
+      const { slot: _duplicateSlot, ...health } = details;
+      unhealthySlots.push({ slot: key.slot, masked: key.masked, ...health });
+    }
+  }
+  return {
+    keyCount: rotation.keyCount,
+    nextSlot: rotation.nextSlot,
+    ...counts,
+    unhealthySlots,
+  };
 }
 
 export function attachRouteMetadata(
@@ -300,14 +349,14 @@ function extractMeta(value: unknown): unknown {
   return record._meta ?? record.structuredContent;
 }
 
-function toolArguments(tool: Tool, query: string, limit: number): Record<string, unknown> {
+function probeArguments(tool: Tool, query: string, limit: number): Record<string, unknown> {
   const properties = tool.inputSchema && typeof tool.inputSchema === "object"
     ? (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}
     : {};
   const args: Record<string, unknown> = {};
   const queryName = ["query", "q", "search_query"].find((name) => name in properties) ?? "query";
   args[queryName] = query;
-  for (const name of ["max_results", "numResults", "limit", "count", "num"]) {
+  for (const name of ["max_results", "maxResults", "numResults", "limit", "count", "num"]) {
     if (name in properties) {
       args[name] = limit;
       break;
@@ -322,54 +371,75 @@ function autoMode(value: unknown): AutoMode {
     : "general";
 }
 
+function autoFreshness(value: unknown): AutoFreshness {
+  return value === "day" || value === "month" || value === "year" ? value : "week";
+}
+
 export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown> = {}): AutoCandidate[] {
-  const parallelMode = quality === "max" ? "advanced" : "basic";
+  const query = String(args.query ?? "");
+  const limit = Number(args.limit ?? 6);
+  const parallelMode = quality === "max" ? "advanced" : "fast";
   const tavilyDepth = quality === "max" ? "advanced" : "basic";
   const braveTokens = typeof args.maximumNumberOfTokens === "number" ? args.maximumNumberOfTokens : 4096;
+  const freshness = autoFreshness(args.freshness);
+  const braveFreshness = { day: "pd", week: "pw", month: "pm", year: "py" }[freshness];
+  const serperFreshness = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" }[freshness];
+  const candidate = (
+    name: string,
+    limitKey: "limit" | "max_results" | "maxResults" | "numResults" | undefined,
+    nativeArguments: Record<string, unknown> = {},
+  ): AutoCandidate => ({
+    name,
+    nativeArguments: {
+      query,
+      ...(limitKey ? { [limitKey]: limit } : {}),
+      ...nativeArguments,
+    },
+  });
   switch (mode) {
     case "exact":
       return [
-        { name: quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa" },
-        { name: "serper_search" },
-        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth, exact_match: true } },
-        { name: "brave_web_search" },
+        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
+        candidate("serper_search", "limit"),
+        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, exact_match: true }),
+        candidate("brave_web_search", "limit"),
       ];
     case "context":
       return quality === "max"
         ? [
-            { name: "parallel_search", nativeArguments: { mode: "advanced" } },
-            { name: "brave_llm_context", nativeArguments: { maximumNumberOfTokens: braveTokens } },
-            { name: "you_search", nativeArguments: { contentLevel: "highlights" } },
-            { name: "tavily_tavily_search", nativeArguments: { search_depth: "advanced" } },
+            candidate("parallel_search", "maxResults", { mode: "advanced" }),
+            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
+            candidate("you_search", "limit", { contentLevel: "highlights" }),
+            candidate("tavily_tavily_search", "max_results", { search_depth: "advanced" }),
           ]
         : [
-            { name: "brave_llm_context", nativeArguments: { maximumNumberOfTokens: braveTokens } },
-            { name: "parallel_search", nativeArguments: { mode: "basic" } },
-            { name: "you_search", nativeArguments: { contentLevel: "highlights" } },
-            { name: "tavily_tavily_search", nativeArguments: { search_depth: "basic" } },
+            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
+            candidate("parallel_search", "maxResults", { mode: "basic" }),
+            candidate("you_search", "limit", { contentLevel: "highlights" }),
+            candidate("tavily_tavily_search", "max_results", { search_depth: "basic" }),
           ];
     case "current":
       return [
-        { name: "brave_news_search" },
-        { name: "you_search", nativeArguments: { contentLevel: "snippets" } },
-        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth } },
-        { name: "serper_news" },
+        candidate("brave_news_search", "limit", { freshness: braveFreshness }),
+        candidate("serper_news", "limit", { tbs: serperFreshness }),
+        candidate("you_search", "limit", { contentLevel: "snippets", freshness }),
+        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, time_range: freshness }),
       ];
     case "official":
       return [
-        { name: "serper_search" },
-        { name: "brave_web_search" },
-        { name: quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa" },
-        { name: "you_search", nativeArguments: { contentLevel: "snippets" } },
+        candidate("serper_search", "limit"),
+        candidate("brave_web_search", "limit"),
+        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
+        candidate("you_search", "limit", { contentLevel: "snippets" }),
       ];
     default:
       return [
-        { name: "parallel_search", nativeArguments: { mode: parallelMode } },
-        { name: "you_search", nativeArguments: { contentLevel: quality === "max" ? "highlights" : "snippets" } },
-        { name: "brave_web_search" },
-        { name: "exa_web_search_exa" },
-        { name: "querit_search" },
-        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth } },
+        candidate("parallel_search", "maxResults", { mode: parallelMode }),
+        candidate("you_search", "limit", { contentLevel: quality === "max" ? "highlights" : "snippets" }),
+        candidate("brave_web_search", "limit"),
+        candidate("exa_web_search_exa", "numResults"),
+        candidate("querit_search", "limit"),
+        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
       ];
   }
 }

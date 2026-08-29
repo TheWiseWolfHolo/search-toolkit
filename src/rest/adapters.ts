@@ -72,7 +72,7 @@ export class SerperAdapter implements RestAdapter {
       body: JSON.stringify(body),
     });
     const source = kind === "search" ? data.organic : data[kind];
-    return { items: Array.isArray(source) ? source.map(normalizeItem) : [] };
+    return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalizeItem) : [] };
   }
 }
 
@@ -342,10 +342,16 @@ export class YouAdapter implements RestAdapter {
     const results = data.results && typeof data.results === "object"
       ? data.results as Record<string, unknown>
       : {};
-    const items = [
-      ...normalizeYouSection(results.web, "web"),
-      ...normalizeYouSection(results.news, "news"),
-    ];
+    const web = normalizeYouSection(results.web, "web");
+    const news = normalizeYouSection(results.news, "news");
+    const limit = numberArg(args, "limit", 6);
+    const items: SearchItem[] = [];
+    for (let index = 0; items.length < limit && (index < web.length || index < news.length); index += 1) {
+      const webItem = web[index];
+      const newsItem = news[index];
+      if (webItem) items.push(webItem);
+      if (newsItem && items.length < limit) items.push(newsItem);
+    }
     return { items, metadata: data.metadata };
   }
 }
@@ -366,9 +372,9 @@ export class ParallelAdapter implements RestAdapter {
         },
         mode: {
           type: "string",
-          enum: ["turbo", "basic", "advanced"],
-          default: "basic",
-          description: "Basic is the recommended default for general agents; use turbo for lowest latency/cost and advanced explicitly for highest-quality multi-hop retrieval",
+          enum: ["turbo", "fast", "basic", "advanced"],
+          default: "fast",
+          description: "Fast is the recommended default for most agents and shares turbo's price tier; turbo minimizes latency and is limited to English and Japanese, basic returns extended excerpts at the same price tier as advanced, and advanced targets highest-quality multi-hop retrieval",
         },
         maxCharsTotal: { type: "integer", minimum: 1 },
         maxResults: { type: "integer", minimum: 1, maximum: 20 },
@@ -389,7 +395,7 @@ export class ParallelAdapter implements RestAdapter {
     const body: Record<string, unknown> = {
       objective: query,
       search_queries: searches.length ? searches : [query],
-      mode: stringArg(args, "mode", "basic"),
+      mode: stringArg(args, "mode", "fast"),
     };
     for (const [source, target] of [
       ["maxCharsTotal", "max_chars_total"],

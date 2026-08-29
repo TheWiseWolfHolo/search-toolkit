@@ -32,6 +32,17 @@
         "auth": { "kind": "bearer" }
       }
     },
+    "anysearch": {
+      "enabled": true,
+      "automatic": false,
+      "keys": ["replace-me"],
+      "integration": {
+        "kind": "remote_mcp",
+        "url": "https://api.anysearch.com/mcp",
+        "auth": { "kind": "bearer" },
+        "headers": { "X-Anysearch-Client": "search-toolkit/0.1.0" }
+      }
+    },
     "firecrawl": {
       "enabled": true,
       "automatic": false,
