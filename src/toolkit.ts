@@ -1,10 +1,27 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
+import { shouldFailoverProvider, statusFromError } from "./errors.js";
 import { RestProvider } from "./rest/base.js";
 import { adapterFor } from "./rest/adapters.js";
 import { RotationStore } from "./rotation.js";
 import type { ProviderConfig, ToolBinding, ToolkitConfig } from "./types.js";
 import { UpstreamMcpProvider } from "./upstream.js";
+
+export type AutoMode = "general" | "exact" | "current" | "official" | "context";
+export type AutoQuality = "balanced" | "max";
+
+export interface AutoCandidate {
+  name: string;
+  nativeArguments?: Record<string, unknown>;
+}
+
+interface AutoAttempt {
+  provider: string;
+  tool: string;
+  candidateRank: number;
+  outcome: "success" | "error";
+  status?: number;
+}
 
 export class SearchToolkit {
   readonly config: ToolkitConfig;
@@ -90,12 +107,18 @@ export class SearchToolkit {
     const autoTool: Tool = {
       name: "search_auto",
       title: "Search with the recommended provider",
-      description: "Route general queries to Querit, exact/code queries to Exa, current research to Tavily, official-site lookups to Serper, and LLM-ready grounding to Brave, Parallel, or You.com. Doubao is never selected automatically. Results include auditable provider and tool route metadata.",
+      description: "Quality-first routing across Parallel, You.com, Brave, Exa, Querit, Tavily, and Serper. Use balanced for routine work and max for complex semantic or multi-hop retrieval. On a recognized provider-availability failure it may try one compatible retrieval fallback. Doubao, research, crawl, and agentic tools are never selected automatically. Results include auditable route and attempt metadata.",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", minLength: 1 },
           mode: { type: "string", enum: ["general", "exact", "current", "official", "context"], default: "general" },
+          quality: {
+            type: "string",
+            enum: ["balanced", "max"],
+            default: "balanced",
+            description: "Balanced uses strong routine retrieval; max selects Parallel Advanced or Exa Advanced where the mode supports it",
+          },
           limit: { type: "integer", minimum: 1, maximum: 20, default: 6 },
           maximumNumberOfTokens: {
             type: "integer",
@@ -135,33 +158,53 @@ export class SearchToolkit {
   }
 
   private async callAuto(args: Record<string, unknown>): Promise<unknown> {
-    const mode = typeof args.mode === "string" ? args.mode : "general";
-    const candidates = mode === "exact"
-      ? ["exa_web_search_advanced_exa", "exa_web_search_exa", "querit_search"]
-      : mode === "context"
-        ? ["brave_llm_context", "parallel_search", "you_search", "tavily_tavily_search", "linkup_linkup_search"]
-      : mode === "current"
-        ? ["tavily_tavily_search", "you_search", "brave_news_search", "querit_search", "serper_news"]
-        : mode === "official"
-          ? ["serper_search", "querit_search", "exa_web_search_exa"]
-          : ["querit_search", "parallel_search", "you_search", "brave_web_search", "serper_search", "tavily_tavily_search"];
-    const selectedName = candidates.find((name) => {
-      const candidate = this.bindings.get(name);
-      if (!candidate) return false;
-      const provider = this.config.providers[candidate.provider];
-      return provider?.automatic === true && provider.manualOnly !== true;
-    });
-    if (!selectedName) throw new Error(`No automatic provider is available for mode ${mode}`);
-    const selected = this.bindings.get(selectedName);
-    if (!selected) throw new Error(`Automatic provider disappeared: ${selectedName}`);
-    const selectedArguments = toolArguments(selected.exposed, String(args.query ?? ""), Number(args.limit ?? 6));
-    if (mode === "context" && selected.exposed.name === "brave_llm_context") {
-      selectedArguments.maximumNumberOfTokens = typeof args.maximumNumberOfTokens === "number"
-        ? args.maximumNumberOfTokens
-        : 4096;
+    const mode = autoMode(args.mode);
+    const quality = args.quality === "max" ? "max" : "balanced";
+    const candidates = autoCandidates(mode, quality, args)
+      .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
+      .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
+        if (!entry.binding) return false;
+        const provider = this.config.providers[entry.binding.provider];
+        return provider?.automatic === true && provider.manualOnly !== true;
+      });
+    if (!candidates.length) throw new Error(`No automatic provider is available for mode ${mode}`);
+
+    const attempts: AutoAttempt[] = [];
+    let lastError: unknown;
+    for (const entry of candidates.slice(0, 2)) {
+      const selectedArguments = {
+        ...toolArguments(entry.binding.exposed, String(args.query ?? ""), Number(args.limit ?? 6)),
+        ...entry.candidate.nativeArguments,
+      };
+      try {
+        const output = await entry.binding.call(selectedArguments);
+        attempts.push({
+          provider: entry.binding.provider,
+          tool: entry.binding.exposed.name,
+          candidateRank: entry.candidateRank,
+          outcome: "success",
+        });
+        return attachRouteMetadata(entry.binding, output, {
+          mode,
+          quality,
+          candidateRank: entry.candidateRank,
+          providerAttempt: attempts.length,
+          attempts,
+        });
+      } catch (error) {
+        lastError = error;
+        const status = statusFromError(error);
+        attempts.push({
+          provider: entry.binding.provider,
+          tool: entry.binding.exposed.name,
+          candidateRank: entry.candidateRank,
+          outcome: "error",
+          ...(status ? { status } : {}),
+        });
+        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts);
+      }
     }
-    const output = await selected.call(selectedArguments);
-    return attachRouteMetadata(selected, output);
+    throw autoFailure(lastError ?? new Error(`No automatic provider completed mode ${mode}`), attempts);
   }
 
   private async probe(args: Record<string, unknown>): Promise<unknown> {
@@ -194,7 +237,11 @@ function result(value: unknown): unknown {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
 }
 
-export function attachRouteMetadata(binding: ToolBinding, output: unknown): unknown {
+export function attachRouteMetadata(
+  binding: ToolBinding,
+  output: unknown,
+  auto?: Record<string, unknown>,
+): unknown {
   const route = {
     provider: binding.provider,
     tool: binding.exposed.name,
@@ -212,9 +259,12 @@ export function attachRouteMetadata(binding: ToolBinding, output: unknown): unkn
     : {};
   return {
     ...record,
-    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...resultContent],
-    structuredContent: { route, result: record.structuredContent ?? null },
-    _meta: { ...meta, searchToolkit: { ...searchToolkitMeta, route } },
+    content: [{
+      type: "text",
+      text: JSON.stringify({ searchToolkitRoute: route, ...(auto ? { searchToolkitAuto: auto } : {}) }),
+    }, ...resultContent],
+    structuredContent: { route, ...(auto ? { searchAuto: auto } : {}), result: record.structuredContent ?? null },
+    _meta: { ...meta, searchToolkit: { ...searchToolkitMeta, route, ...(auto ? { auto } : {}) } },
   };
 }
 
@@ -264,4 +314,71 @@ function toolArguments(tool: Tool, query: string, limit: number): Record<string,
     }
   }
   return args;
+}
+
+function autoMode(value: unknown): AutoMode {
+  return value === "exact" || value === "current" || value === "official" || value === "context"
+    ? value
+    : "general";
+}
+
+export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown> = {}): AutoCandidate[] {
+  const parallelMode = quality === "max" ? "advanced" : "basic";
+  const tavilyDepth = quality === "max" ? "advanced" : "basic";
+  const braveTokens = typeof args.maximumNumberOfTokens === "number" ? args.maximumNumberOfTokens : 4096;
+  switch (mode) {
+    case "exact":
+      return [
+        { name: quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa" },
+        { name: "serper_search" },
+        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth, exact_match: true } },
+        { name: "brave_web_search" },
+      ];
+    case "context":
+      return quality === "max"
+        ? [
+            { name: "parallel_search", nativeArguments: { mode: "advanced" } },
+            { name: "brave_llm_context", nativeArguments: { maximumNumberOfTokens: braveTokens } },
+            { name: "you_search", nativeArguments: { contentLevel: "highlights" } },
+            { name: "tavily_tavily_search", nativeArguments: { search_depth: "advanced" } },
+          ]
+        : [
+            { name: "brave_llm_context", nativeArguments: { maximumNumberOfTokens: braveTokens } },
+            { name: "parallel_search", nativeArguments: { mode: "basic" } },
+            { name: "you_search", nativeArguments: { contentLevel: "highlights" } },
+            { name: "tavily_tavily_search", nativeArguments: { search_depth: "basic" } },
+          ];
+    case "current":
+      return [
+        { name: "brave_news_search" },
+        { name: "you_search", nativeArguments: { contentLevel: "snippets" } },
+        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth } },
+        { name: "serper_news" },
+      ];
+    case "official":
+      return [
+        { name: "serper_search" },
+        { name: "brave_web_search" },
+        { name: quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa" },
+        { name: "you_search", nativeArguments: { contentLevel: "snippets" } },
+      ];
+    default:
+      return [
+        { name: "parallel_search", nativeArguments: { mode: parallelMode } },
+        { name: "you_search", nativeArguments: { contentLevel: quality === "max" ? "highlights" : "snippets" } },
+        { name: "brave_web_search" },
+        { name: "exa_web_search_exa" },
+        { name: "querit_search" },
+        { name: "tavily_tavily_search", nativeArguments: { search_depth: tavilyDepth } },
+      ];
+  }
+}
+
+function autoFailure(error: unknown, attempts: AutoAttempt[]): Error {
+  const summary = attempts
+    .map((attempt) => `${attempt.provider}/${attempt.tool}[${attempt.status ?? "unknown"}]`)
+    .join(" -> ");
+  const wrapped = new Error(`search_auto failed after ${summary || "no provider attempts"}: ${cleanError(error)}`);
+  (wrapped as Error & { attempts: AutoAttempt[] }).attempts = attempts.map((attempt) => ({ ...attempt }));
+  return wrapped;
 }

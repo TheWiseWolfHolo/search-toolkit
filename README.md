@@ -21,9 +21,9 @@ Official references used by the implementation include the [Codex MCP configurat
 
 | Intent | Provider or tool family |
 | --- | --- |
-| General fast web lookup | Querit |
+| General quality-oriented lookup | `search_auto` with Parallel, You.com, Brave, Exa, Querit, and Tavily |
 | Exact strings, semantic discovery, code and page content | Exa official MCP |
-| Current search, extraction and agent research | Tavily official MCP |
+| Current news and fast-changing facts | Brave News, You.com, Tavily, and Serper News |
 | Concise Google results, news and images | Serper |
 | Independent web/news index and LLM-ready grounding chunks | Brave Web, News, and LLM Context |
 | Unified Web + News results with optional query-aware highlights | You.com Search |
@@ -89,11 +89,11 @@ The MCP server exposes:
 
 - Provider-prefixed official upstream tools selected by the provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its entire management catalog.
 - Every configured REST adapter tool.
-- `search_auto` for capability-aware default routing. It considers only providers with `automatic: true` and always excludes `manualOnly` providers.
+- `search_auto` for quality-first capability routing with `balanced` and `max` quality profiles. It considers only providers with `automatic: true`, always excludes `manualOnly` providers, and may try one compatible retrieval fallback after a recognized provider-availability failure.
 - `search_pool_status` for masked key-pool diagnostics.
 - `search_rotation_probe` for a live, quota-consuming rotation proof.
 
-Every successful provider call carries auditable `{provider, tool, upstreamTool}` provenance. REST calls expose it in structured content, upstream MCP calls prepend a model-visible `searchToolkitRoute` content block, and `search_auto` normalizes both paths to one route block without duplication.
+Every successful provider call carries auditable `{provider, tool, upstreamTool}` provenance. REST calls expose it in structured content, upstream MCP calls prepend a model-visible `searchToolkitRoute` content block, and `search_auto` normalizes both paths to one route block without duplication. Automatic results also include mode, quality, candidate rank, and the bounded attempt list in `structuredContent.searchAuto`.
 
 Set `toolPolicy.allow` to `["*"]` for a provider only when exposing its full upstream catalog is intentional. Write and destructive tools retain corrected annotations so clients can request approval.
 

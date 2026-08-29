@@ -1,10 +1,10 @@
 # Web retrieval routing policy
 
-Choose providers by capability and task intent. Prefer the cheapest, narrowest, and least context-heavy tool that can reliably solve the task.
+Choose providers by capability and task intent. Prefer strong retrieval that fits the task; request price is secondary because configured quotas are ample. Still avoid unnecessary latency, oversized context, and implicit research or crawling.
 
 ## Core rules
 
-1. Start ordinary lookup with Querit unless another provider has a clear advantage.
+1. Start ordinary lookup with `search_auto` in balanced general mode. Use max quality for broad, ambiguous, multi-aspect, or high-value retrieval.
 2. Do not send the same query to every provider. Use a second independent path only when the claim matters or the first result set is weak.
 3. Escalate in this order: compact search → inspect → fetch selected URLs → deep research → browser/agent automation.
 4. If a URL is known, fetch or scrape it directly instead of searching for it again.
@@ -14,9 +14,9 @@ Choose providers by capability and task intent. Prefer the cheapest, narrowest, 
 
 ## Provider roles
 
-### Querit — default retrieval
+### Querit — balanced compact retrieval
 
-Use for ordinary factual lookup, fast source discovery, and current information without a specialist requirement. Do not escalate merely because a more sophisticated provider is available.
+Use for compact factual lookup and source discovery when its result style fits the task. It remains available in the general automatic pool and for direct calls, but it is not the unconditional first hop.
 
 ### Exa — precision and long-tail discovery
 
@@ -34,7 +34,21 @@ Use `you_search` when one current query should return both Web and News sections
 
 ### Parallel — semantic objectives and dense excerpts
 
-Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Keep the default `mode: basic` for routine agent work, select `turbo` for the lowest latency and cost, and use `advanced` explicitly for higher-latency multi-hop retrieval. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
+Use `parallel_search` for broad or ambiguous goals where the agent can state what evidence it wants, not merely a keyword. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts designed for model context. Use `basic` for routine quality retrieval, `advanced` for complex semantic or multi-hop work, and `turbo` only when low latency matters more than depth. The stable V1 modes are turbo, basic, and advanced; do not describe the legacy `fast` alias as a separate low-cost tier. Leave `advanced_settings` controls unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
+
+## Automatic routing
+
+Balanced routing uses these quality-oriented profiles:
+
+- General: Parallel Basic → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
+- Exact: Exa Search → Serper → Tavily exact/basic → Brave Web.
+- Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
+- Current: Brave News → You snippets → Tavily Search → Serper News. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`; use supported freshness/date controls when needed.
+- Official navigation: Serper → Brave Web → Exa Search → You snippets.
+
+Max quality changes General to Parallel Advanced, Exact to Exa Advanced, and Context to Parallel Advanced before Brave LLM Context. It does not silently turn ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
+
+Automatic routing may try at most two Providers. A second compatible retrieval Provider is eligible after a recognized availability failure: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, Provider 5xx, or clear statusless MCP messages such as rate limits, temporary unavailability, and no healthy slots. Request/schema errors, policy or safety blocks, local code errors, and unknown failures are terminal. Explicit HTTP status outranks error-body keyword guesses. The first successful result is returned without silently merging Providers; use an explicit independent cross-check when the claim warrants one.
 
 ### Serper — concise Google-style SERP
 

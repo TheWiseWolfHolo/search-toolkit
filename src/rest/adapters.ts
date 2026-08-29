@@ -366,7 +366,7 @@ export class ParallelAdapter implements RestAdapter {
         },
         mode: {
           type: "string",
-          enum: ["turbo", "fast", "basic", "advanced"],
+          enum: ["turbo", "basic", "advanced"],
           default: "basic",
           description: "Basic is the recommended default for general agents; use turbo for lowest latency/cost and advanced explicitly for highest-quality multi-hop retrieval",
         },

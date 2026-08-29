@@ -5,7 +5,7 @@ description: Use Search Toolkit's official-first MCP tools for fast current web 
 
 # Search Toolkit
 
-Use the cheapest, narrowest provider that reliably fits the task. Escalate from search to selected-page fetch, then to research or automation only when the simpler step is insufficient.
+Choose by capability fit and retrieval quality first. Request price is a secondary constraint because the configured quotas are ample, but avoid unnecessary latency, oversized responses, and implicit research or crawling. Escalate from search to selected-page fetch, then to research or automation only when the simpler step is insufficient.
 
 ## Retrieval workflow
 
@@ -21,11 +21,11 @@ Prefer the native Search Toolkit MCP tools when they are present in the live inv
 
 ## Capability routing
 
-- General lookup: `search_auto` in general mode or Querit.
-- Exact strings, code, obscure sources, and semantic discovery: Exa. Verify repository identity and fork/rename relationships before naming an origin.
-- Independent cross-checking and current news: Brave Web/News. Use `brave_llm_context` or `search_auto` in context mode when the model needs relevance-ranked content chunks from multiple pages within a controlled token budget. Direct calls and `search_auto` requests routed to Brave send a 4096-token budget by default; set `maximumNumberOfTokens` explicitly when the task needs another value. Context fallbacks use provider-specific controls, so this parameter does not apply to them. LLM Context returns grounding and source metadata, not a final synthesized answer; do not use it for simple URL discovery or a known URL that should be fetched directly.
+- General lookup: `search_auto` with `mode: general, quality: balanced`. Use `quality: max` for broad, ambiguous, multi-aspect, or high-value retrieval so the router can select deeper semantic search rather than merely choosing a cheaper mode. Read the routing reference when exact Provider order matters.
+- Exact strings, code, obscure sources, and semantic discovery: Exa. Balanced exact search uses normal Exa Search; use `quality: max` or the direct Advanced tool when domain, date, text, subpage, category, or highlight controls justify it. Verify repository identity and fork/rename relationships before naming an origin.
+- Independent cross-checking and current news: Brave Web/News. Use `search_auto` current mode for fast-changing facts; use Brave directly when an independent index is important. The current Tavily MCP schema exposes general search rather than a news topic, so freshness comes from the query and supported date/time controls instead of an invented `topic: news`. Use `brave_llm_context` or `search_auto` in context mode when the model needs relevance-ranked content chunks from multiple pages within a controlled token budget. Direct calls and `search_auto` requests routed to Brave send a 4096-token budget by default; set `maximumNumberOfTokens` explicitly when the task needs another value. Context fallbacks use provider-specific controls, so this parameter does not apply to them. LLM Context returns grounding and source metadata, not a final synthesized answer; do not use it for simple URL discovery or a known URL that should be fetched directly.
 - Unified Web and News retrieval: `you_search`. Keep `contentLevel: snippets` for ordinary discovery; request `highlights` only when the model needs query-aware passages from the returned pages. Do not turn on extraction merely because it is available.
-- Semantic, multi-aspect retrieval: `parallel_search`. Give it a self-contained natural-language objective plus 1-3 concise `searchQueries` when the task is broader than one keyword query. Keep `mode: basic` for routine agent work, use `turbo` for the lowest latency and cost, and choose `advanced` explicitly only when higher-latency multi-hop retrieval is justified. Use the ranked excerpts before deciding whether any page still needs fetching.
+- Semantic, multi-aspect retrieval: `parallel_search`. Give it a self-contained natural-language objective plus 1-3 concise `searchQueries` when the task is broader than one keyword query. Use `basic` for routine quality retrieval, `advanced` for complex semantic or multi-hop work, and `turbo` only when low latency matters more than depth. The stable V1 modes are turbo, basic, and advanced. Use the ranked excerpts before deciding whether any page still needs fetching.
 - Official-site and concise Google-style results: Serper.
 - Search-to-extract, crawl, map, and managed research: Tavily, only when the workflow needs more than lookup.
 - Sourced synthesis and long research: LinkUp; avoid deep modes for routine questions.
@@ -34,11 +34,13 @@ Prefer the native Search Toolkit MCP tools when they are present in the live inv
 - Chinese-local retrieval: Doubao only when the user explicitly requests it or approves its limited quota. It never enters automatic routing or fallback.
 - X-native posts and social signals: Grok/X Search when X itself matters; corroborate important claims on the wider web.
 
+`search_auto` may try one additional compatible retrieval Provider after a recognized availability failure: unusable credentials or balance, network failure, timeout, HTTP 408/425/429, Provider 5xx, or clear statusless MCP messages such as rate limits and temporary unavailability. Request/schema errors, policy or safety blocks, local code errors, and unknown failures remain terminal. The router never upgrades ordinary search into Research, Crawl, full-page extraction, or agentic work. Successful results include `structuredContent.searchAuto`; terminal errors include a safe Provider/tool/status attempt summary without upstream error bodies.
+
 ## Evidence discipline
 
 Search results discover sources; they do not automatically prove every snippet claim. For important or time-sensitive claims, fetch or read the most relevant source page before answering. Keep citations adjacent to the claims they support.
 
-For source-backed web research, current-fact answers, exact-source tracing, and audit-oriented work, end with one compact route line so the provider decision remains auditable. Match the answer language, for example `Search route: provider/tool` or `搜索路由：provider/tool`. Copy the values from returned provenance: prefer `structuredContent.route`, otherwise use the leading `searchToolkitRoute` content block, and use `_meta.searchToolkit.route` only when the client exposes it. Omit the footer for trivial utility lookups unless provenance materially helps or the user requests it; never infer or fabricate missing route values.
+For source-backed web research, current-fact answers, exact-source tracing, and audit-oriented work, end with one compact route line so the provider decision remains auditable. Match the answer language, for example `Search route: provider/tool` or `搜索路由：provider/tool`. Copy the values from returned provenance: prefer `structuredContent.route`, otherwise use the leading `searchToolkitRoute` content block, and use `_meta.searchToolkit.route` only when the client exposes it. `structuredContent.searchAuto` explains automatic routing and bounded failover when present. Omit the footer for trivial utility lookups unless provenance materially helps or the user requests it; never infer or fabricate missing route values.
 
 For consequential or disputed claims, prefer primary sources and cross-check through an independent retrieval path; Brave is the preferred independent-index check. Multiple copies of one underlying report are not independent confirmation.
 
