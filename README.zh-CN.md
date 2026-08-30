@@ -1,6 +1,6 @@
 # Search Toolkit
 
-面向 AI Agent 的官方优先搜索工具集，提供持久化多 Key 轮询、MCP、CLI 与 Agent Skill。
+面向 AI Agent 的官方优先搜索工具集，提供持久化多 Key 轮询、STDIO / Streamable HTTP MCP、CLI 与 Agent Skill。
 
 ## 核心原则
 
@@ -76,6 +76,16 @@ MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 2
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
 
 每次成功的 Provider 调用都会返回可审计的 `{provider, tool, upstreamTool}`：REST 直调写入结构化结果，上游 MCP 直调在 `content` 首块返回模型可见的 `searchToolkitRoute`，`search_auto` 会把两种路径归一成单个路由块而不重复，并在 `structuredContent.searchAuto` 中补充 mode、quality、候选序号与受限尝试记录。
+
+移动端或远程客户端可启动同一核心的 Streamable HTTP transport：
+
+```powershell
+$env:SEARCH_TOOLKIT_HTTP_TOKENS = '[{"hash":"<owner token SHA-256>"},{"hash":"<guest token SHA-256>","tools":["search_auto","search_images"],"requestsPerMinute":30,"maxSessions":8}]'
+$env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
+node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
+```
+
+客户端连接 `/mcp` 并发送 `Authorization: Bearer <client-token>`。不设置 `tools` 的是 owner token；分享给他人的 token 应设置明确工具白名单、`requestsPerMinute` 限流，并可用 `maxSessions` 限制活跃会话数。owner token 不设置 `maxSessions` 时不受会话数限制。STDIO 与 HTTP 共用 Provider 配置、轮询状态和路由逻辑，HTTP 只额外施加传输层访问策略。公网部署应放在 HTTPS 后，Provider Key 始终留在服务器。
 
 ## 安全边界
 

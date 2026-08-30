@@ -1,6 +1,6 @@
 # Search Toolkit
 
-Official-first web tools for AI agents, with persistent multi-key rotation and three entry points: MCP, CLI, and Agent Skills.
+Official-first web tools for AI agents, with persistent multi-key rotation, MCP over STDIO or Streamable HTTP, CLI, and Agent Skills.
 
 [简体中文](README.zh-CN.md)
 
@@ -87,6 +87,16 @@ enabled = true
 default_tools_approval_mode = "writes"
 ```
 
+For mobile or remote clients, start the same toolkit over stateful Streamable HTTP. Store only SHA-256 client-token hashes on the server:
+
+```powershell
+$env:SEARCH_TOOLKIT_HTTP_TOKENS = '[{"hash":"<owner-sha256-hex>"},{"hash":"<guest-sha256-hex>","tools":["search_auto","search_images"],"requestsPerMinute":30,"maxSessions":8}]'
+$env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
+node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
+```
+
+Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token; shared tokens should use an explicit tool allowlist, `requestsPerMinute` limit, and optional `maxSessions` cap. Owner tokens remain uncapped unless they explicitly set `maxSessions`. STDIO and HTTP use the same Provider config, rotation state, and routing behavior; HTTP only adds transport-level access policy. Put public deployments behind HTTPS and keep Provider keys server-side.
+
 The MCP server exposes:
 
 - Provider-prefixed official upstream tools selected by the provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its entire management catalog.
@@ -121,6 +131,7 @@ The reusable skill is under `skills/search-toolkit/`. Copy or link it into your 
 ```powershell
 npm test
 npm run smoke:mcp
+npm run smoke:http -- https://search-mcp.example.com/mcp C:/private/client-token.txt
 npm pack --dry-run
 ```
 
