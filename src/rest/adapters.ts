@@ -1,5 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { ProviderConfig, SearchItem } from "../types.js";
+import type { ImageSearchItem, ProviderConfig, SearchItem } from "../types.js";
 import { requestJson, searchTool, type RestAdapter } from "./base.js";
 
 const numberArg = (args: Record<string, unknown>, name: string, fallback: number) =>
@@ -53,7 +53,9 @@ export class SerperAdapter implements RestAdapter {
     return ["search", "news", "images"].map((kind) => searchTool(
       `serper_${kind}`,
       `Serper ${kind[0]?.toUpperCase()}${kind.slice(1)}`,
-      `Query Google's ${kind} results through the official Serper REST API with concise snippets.`,
+      kind === "images"
+        ? "Search Google Images through Serper. Returns original image and thumbnail URLs, dimensions, source page, publisher, and rank when available. This is text-to-image discovery, not reverse image search."
+        : `Query Google's ${kind} results through the official Serper REST API with concise snippets.`,
       {
         gl: { type: "string", description: "Country code" },
         hl: { type: "string", description: "Language code" },
@@ -72,7 +74,8 @@ export class SerperAdapter implements RestAdapter {
       body: JSON.stringify(body),
     });
     const source = kind === "search" ? data.organic : data[kind];
-    return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalizeItem) : [] };
+    const normalize = kind === "images" ? normalizeSerperImage : normalizeItem;
+    return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalize) : [] };
   }
 }
 
@@ -209,11 +212,35 @@ export class BraveAdapter implements RestAdapter {
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     };
-    return [...searches, context];
+    const images: Tool = {
+      name: "brave_image_search",
+      title: "Brave Image Search",
+      description: "Search Brave's independent image index. Returns original image and privacy-proxied thumbnail URLs, source pages, dimensions, descriptions, and publishers when available. This is text-to-image discovery, not reverse image search.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1, maxLength: 400, description: "Image search query; Brave allows at most 50 words" },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 10 },
+          country: {
+            type: "string",
+            enum: ["AR", "AU", "AT", "BE", "BR", "CA", "CL", "DK", "FI", "FR", "DE", "GR", "HK", "IN", "ID", "IT", "JP", "KR", "MY", "MX", "NL", "NZ", "NO", "CN", "PL", "PT", "PH", "RU", "SA", "ZA", "ES", "SE", "CH", "TW", "TR", "GB", "US", "ALL"],
+            default: "ALL",
+          },
+          searchLang: { type: "string", minLength: 2 },
+          safesearch: { type: "string", enum: ["off", "strict"], default: "strict" },
+          spellcheck: { type: "boolean", default: true },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    };
+    return [...searches, images, context];
   }
 
   async call(tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
     if (tool === "brave_llm_context") return this.callLlmContext(args, key);
+    if (tool === "brave_image_search") return this.callImageSearch(args, key);
     const kind = tool.includes("news") ? "news" : "web";
     const url = new URL(`https://api.search.brave.com/res/v1/${kind}/search`);
     url.searchParams.set("q", stringArg(args, "query"));
@@ -227,6 +254,21 @@ export class BraveAdapter implements RestAdapter {
     const container = data[kind] as Record<string, unknown> | undefined;
     const rows = container?.results ?? data.results;
     return { items: Array.isArray(rows) ? rows.map(normalizeItem) : [] };
+  }
+
+  private async callImageSearch(args: Record<string, unknown>, key: string): Promise<unknown> {
+    const url = new URL("https://api.search.brave.com/res/v1/images/search");
+    url.searchParams.set("q", stringArg(args, "query"));
+    url.searchParams.set("count", String(numberArg(args, "limit", 10)));
+    url.searchParams.set("country", stringArg(args, "country", "ALL"));
+    for (const [source, target] of [["searchLang", "search_lang"], ["safesearch", "safesearch"]] as const) {
+      if (stringArg(args, source)) url.searchParams.set(target, stringArg(args, source));
+    }
+    if (typeof args.spellcheck === "boolean") url.searchParams.set("spellcheck", String(args.spellcheck));
+    const data = await requestJson(url.toString(), {
+      headers: { Accept: "application/json", "X-Subscription-Token": key },
+    });
+    return { items: Array.isArray(data.results) ? data.results.map(normalizeBraveImage) : [] };
   }
 
   private async callLlmContext(args: Record<string, unknown>, key: string): Promise<unknown> {
@@ -567,6 +609,56 @@ function normalizeItem(value: unknown): SearchItem {
     url: String(item.url ?? item.link ?? item.Url ?? ""),
     text: String(item.text ?? item.snippet ?? item.description ?? item.content ?? item.Summary ?? "").slice(0, 4_000),
   };
+}
+
+function normalizeSerperImage(value: unknown): ImageSearchItem {
+  const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return compactImageItem({
+    title: String(item.title ?? item.imageUrl ?? ""),
+    url: String(item.link ?? item.url ?? ""),
+    text: String(item.source ?? item.domain ?? ""),
+    imageUrl: String(item.imageUrl ?? ""),
+    thumbnailUrl: stringValue(item.thumbnailUrl),
+    width: numberValue(item.imageWidth),
+    height: numberValue(item.imageHeight),
+    thumbnailWidth: numberValue(item.thumbnailWidth),
+    thumbnailHeight: numberValue(item.thumbnailHeight),
+    source: stringValue(item.source),
+    domain: stringValue(item.domain),
+    position: numberValue(item.position),
+  });
+}
+
+function normalizeBraveImage(value: unknown): ImageSearchItem {
+  const item = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const properties = objectRecord(item.properties);
+  const thumbnail = objectRecord(item.thumbnail);
+  return compactImageItem({
+    title: String(item.title ?? properties.url ?? ""),
+    url: String(item.url ?? ""),
+    text: String(item.description ?? item.source ?? ""),
+    imageUrl: String(properties.url ?? thumbnail.original ?? ""),
+    thumbnailUrl: stringValue(thumbnail.src) ?? stringValue(properties.placeholder),
+    width: numberValue(properties.width),
+    height: numberValue(properties.height),
+    source: stringValue(item.source),
+  });
+}
+
+function compactImageItem(item: Record<string, unknown>): ImageSearchItem {
+  return Object.fromEntries(Object.entries(item).filter(([, value]) => value !== undefined && value !== "")) as unknown as ImageSearchItem;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function extractResponseText(data: Record<string, unknown>): string {

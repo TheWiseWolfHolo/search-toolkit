@@ -54,6 +54,12 @@ Automatic routing may try at most two Providers. A second compatible retrieval P
 
 Use to locate official sites, known pages, or a small ranked result set. It is not a page reader, crawler, research engine, or browser.
 
+### Image discovery — Brave Images, Serper Images, Tavily images
+
+Use `search_images` for normal quality-first worldwide text-to-image discovery. It prefers Brave's independent image index and falls back to Serper's Google Images results only after a recognized availability failure. Automatic image routing intentionally ignores country hints so a narrow regional request cannot displace the stronger primary index; use direct Brave Images or Serper Images only when country targeting or the index itself is the actual requirement. Tavily images remain available through direct Tavily Search as contextual companions to Web results, but they are not part of the automatic image chain because their response shape is not a normalized image SERP. Preserve original image URLs separately from source-page URLs and thumbnails.
+
+None of these tools performs reverse image search. An uploaded image can only reach a reverse-image provider if the client exposes an attachment URL or explicitly passes supported image bytes to a tool. Vision-captioning the upload and then running text-to-image search is a useful fallback, but it must not be described as visual matching or source tracing.
+
 ### Tavily — managed web workflow
 
 Use when the task naturally extends from search into extraction, fresh/news follow-up, mapping, crawling, or multi-source research. Do not use Tavily Research for a lookup that ordinary search can answer.

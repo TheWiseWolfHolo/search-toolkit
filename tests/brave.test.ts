@@ -6,14 +6,15 @@ import test from "node:test";
 import { BraveAdapter } from "../src/rest/adapters.js";
 import { SearchToolkit } from "../src/toolkit.js";
 
-test("Brave exposes Web, News, and LLM Context as distinct tools", () => {
+test("Brave exposes Web, News, Images, and LLM Context as distinct tools", () => {
   const tools = new BraveAdapter().tools();
   assert.deepEqual(tools.map((tool) => tool.name), [
     "brave_web_search",
     "brave_news_search",
+    "brave_image_search",
     "brave_llm_context",
   ]);
-  const context = tools[2];
+  const context = tools[3];
   assert.ok(context);
   const schema = context.inputSchema as { properties?: Record<string, Record<string, unknown>> };
   assert.equal(schema.properties?.maximumNumberOfTokens?.minimum, 1024);

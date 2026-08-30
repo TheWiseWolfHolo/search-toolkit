@@ -6,7 +6,7 @@
 
 - 不把所有搜索服务压成一个失去特色的通用接口。
 - Exa、Tavily、LinkUp、AnySearch、Firecrawl 优先透明代理官方 MCP，保留官方工具 schema。
-- Querit、Serper、Brave Web/News/LLM Context、You.com Search、Parallel Search、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
+- Querit、Serper、Brave Web/News/Images/LLM Context、You.com Search、Parallel Search、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
 - 每家 Provider 独立维护 Key 池；SQLite 游标可跨进程、跨重启持续轮询。
 - 真实 Key 只保存在仓库外的文本 JSON，不写进代码、Skill、README 或 Codex 配置。
 - 豆包默认 `manualOnly`，不会被 `search_auto` 或自动兜底消耗。
@@ -18,6 +18,7 @@
 | 普通质量优先 Web 搜索 | `search_auto`，由 Parallel、You.com、Brave、Exa、Querit、Tavily 按能力路由 |
 | 精确字符串、代码、语义搜索、网页正文 | Exa 官方 MCP |
 | 当前新闻与快速变化事实 | Brave News、You.com、Tavily、Serper News |
+| 保留原图、缩略图、尺寸与来源页的全球质量优先文本搜图 | `search_images`：Brave Images → Serper Images |
 | 官网、Google 精准结果、新闻与图片 | Serper |
 | 独立 Web / News 索引与 LLM-ready grounding chunks | Brave Web、News、LLM Context |
 | 一次返回 Web + News，可选 query-aware highlights | You.com Search |
@@ -70,6 +71,7 @@ node dist/src/cli.js probe querit "轮询验证"
 MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 27 个工具收窄为 7 个核心检索/获取工具，完整目录需要显式 `toolPolicy.allow: ["*"]`。此外提供：
 
 - `search_auto`：提供 `balanced` / `max` 两档质量优先路由，只考虑 `automatic: true` 且不是 `manualOnly` 的 Provider；识别到 Provider 可用性故障时最多尝试一个同类检索兜底，豆包因此不会被自动调用。
+- `search_images`：全球质量优先按 Brave Images → Serper Images 做文本搜图，自动路由不使用国家范围缩窄结果；需要国家筛选时才直调 Provider。它不会自动收到聊天附件，也不等同于反向搜图。
 - `search_pool_status`：查看脱敏 Key 池和轮询状态。
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
 
