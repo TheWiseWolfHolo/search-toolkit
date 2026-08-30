@@ -161,6 +161,23 @@ export class SearchToolkit {
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     };
+    const imageTool: Tool = {
+      name: "search_images",
+      title: "Search for images",
+      description: "Quality-first text-to-image discovery through Brave's worldwide independent image index, with Serper Google Images as the availability fallback. Returns image URLs and source metadata; it does not inspect an uploaded image or perform reverse image search. Use provider tools directly for country-specific filtering.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", minLength: 1 },
+          limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
+          language: { type: "string", description: "Optional language preference for Brave/Serper" },
+          safesearch: { type: "string", enum: ["strict", "off"], default: "strict", description: "Applied by Brave; fallback providers use their own safety behavior" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    };
     const probeTool: Tool = {
       name: "search_rotation_probe",
       title: "Verify provider key rotation",
@@ -181,6 +198,7 @@ export class SearchToolkit {
     return [
       binding(statusTool, async (args) => result(this.status(args.verbose === true))),
       binding(autoTool, async (args) => this.callAuto(args)),
+      binding(imageTool, async (args) => this.callImageSearch(args)),
       binding(probeTool, async (args) => this.probe(args)),
     ];
   }
@@ -230,6 +248,49 @@ export class SearchToolkit {
       }
     }
     throw autoFailure(lastError ?? new Error(`No automatic provider completed mode ${mode}`), attempts);
+  }
+
+  private async callImageSearch(args: Record<string, unknown>): Promise<unknown> {
+    const candidates = imageCandidates(args)
+      .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
+      .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
+        if (!entry.binding) return false;
+        const provider = this.config.providers[entry.binding.provider];
+        return provider?.automatic === true && provider.manualOnly !== true;
+      });
+    if (!candidates.length) throw new Error("No automatic image-search provider is available");
+
+    const attempts: AutoAttempt[] = [];
+    let lastError: unknown;
+    for (const entry of candidates.slice(0, 2)) {
+      try {
+        const output = await entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) });
+        attempts.push({
+          provider: entry.binding.provider,
+          tool: entry.binding.exposed.name,
+          candidateRank: entry.candidateRank,
+          outcome: "success",
+        });
+        return attachRouteMetadata(entry.binding, output, {
+          mode: "images",
+          candidateRank: entry.candidateRank,
+          providerAttempt: attempts.length,
+          attempts,
+        });
+      } catch (error) {
+        lastError = error;
+        const status = statusFromError(error);
+        attempts.push({
+          provider: entry.binding.provider,
+          tool: entry.binding.exposed.name,
+          candidateRank: entry.candidateRank,
+          outcome: "error",
+          ...(status ? { status } : {}),
+        });
+        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts, "search_images");
+      }
+    }
+    throw autoFailure(lastError ?? new Error("No automatic image-search provider completed"), attempts, "search_images");
   }
 
   private async probe(args: Record<string, unknown>): Promise<unknown> {
@@ -444,11 +505,28 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   }
 }
 
-function autoFailure(error: unknown, attempts: AutoAttempt[]): Error {
+export function imageCandidates(args: Record<string, unknown> = {}): AutoCandidate[] {
+  const query = String(args.query ?? "");
+  const limit = Number(args.limit ?? 10);
+  const language = typeof args.language === "string" && args.language ? args.language : undefined;
+  const safesearch = args.safesearch === "off" ? "off" : "strict";
+  return [
+    {
+      name: "brave_image_search",
+      nativeArguments: { query, limit, country: "ALL", ...(language ? { searchLang: language } : {}), safesearch },
+    },
+    {
+      name: "serper_images",
+      nativeArguments: { query, limit, ...(language ? { hl: language } : {}) },
+    },
+  ];
+}
+
+function autoFailure(error: unknown, attempts: AutoAttempt[], toolName = "search_auto"): Error {
   const summary = attempts
     .map((attempt) => `${attempt.provider}/${attempt.tool}[${attempt.status ?? "unknown"}]`)
     .join(" -> ");
-  const wrapped = new Error(`search_auto failed after ${summary || "no provider attempts"}: ${cleanError(error)}`);
+  const wrapped = new Error(`${toolName} failed after ${summary || "no provider attempts"}: ${cleanError(error)}`);
   (wrapped as Error & { attempts: AutoAttempt[] }).attempts = attempts.map((attempt) => ({ ...attempt }));
   return wrapped;
 }

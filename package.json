@@ -17,7 +17,8 @@
   },
   "bin": {
     "search-toolkit": "dist/src/cli.js",
-    "search-toolkit-mcp": "dist/src/mcp-server.js"
+    "search-toolkit-mcp": "dist/src/mcp-server.js",
+    "search-toolkit-http": "dist/src/http-server.js"
   },
   "files": [
     "dist/",
@@ -32,15 +33,17 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "smoke:mcp": "npm run build && node dist/scripts/smoke-mcp.js",
+    "smoke:http": "npm run build && node dist/scripts/smoke-http.js",
     "probe:all": "npm run build && node dist/scripts/probe-all.js",
     "import:kelivo": "npm run build && node dist/scripts/import-kelivo.js",
     "prepack": "npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "zod": "4.4.3"
+    "express": "5.2.1"
   },
   "devDependencies": {
+    "@types/express": "5.0.5",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }

@@ -65,6 +65,18 @@ export interface SearchItem {
   text: string;
 }
 
+export interface ImageSearchItem extends SearchItem {
+  imageUrl: string;
+  thumbnailUrl?: string;
+  width?: number;
+  height?: number;
+  thumbnailWidth?: number;
+  thumbnailHeight?: number;
+  source?: string;
+  domain?: string;
+  position?: number;
+}
+
 export interface NormalizedResult {
   provider: string;
   keySlot: string;

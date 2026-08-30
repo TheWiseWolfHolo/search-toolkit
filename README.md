@@ -1,6 +1,6 @@
 # Search Toolkit
 
-Official-first web tools for AI agents, with persistent multi-key rotation and three entry points: MCP, CLI, and Agent Skills.
+Official-first web tools for AI agents, with persistent multi-key rotation, MCP over STDIO or Streamable HTTP, CLI, and Agent Skills.
 
 [简体中文](README.zh-CN.md)
 
@@ -10,7 +10,7 @@ Search Toolkit preserves provider-specific capabilities instead of flattening ev
 
 - Official Remote MCP proxy: Exa, Tavily, LinkUp, and AnySearch.
 - Official STDIO MCP proxy: Firecrawl.
-- Thin official-API adapters: Querit, Serper, Brave Web/News/LLM Context, You.com Web Search, Parallel Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
+- Thin official-API adapters: Querit, Serper, Brave Web/News/Images/LLM Context, You.com Web Search, Parallel Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
 - Persistent per-provider key pools backed by SQLite.
 - Provider-prefixed upstream tool names and schemas are discovered from official MCP servers at startup, then filtered by an optional provider tool policy.
 - Raw keys stay outside the repository in a local JSON file.
@@ -24,6 +24,7 @@ Official references used by the implementation include the [Codex MCP configurat
 | General quality-oriented lookup | `search_auto` with Parallel, You.com, Brave, Exa, Querit, and Tavily |
 | Exact strings, semantic discovery, code and page content | Exa official MCP |
 | Current news and fast-changing facts | Brave News, You.com, Tavily, and Serper News |
+| Worldwide text-to-image discovery with original image and source metadata | `search_images`: Brave Images → Serper Images |
 | Concise Google results, news and images | Serper |
 | Independent web/news index and LLM-ready grounding chunks | Brave Web, News, and LLM Context |
 | Unified Web + News results with optional query-aware highlights | You.com Search |
@@ -86,11 +87,22 @@ enabled = true
 default_tools_approval_mode = "writes"
 ```
 
+For mobile or remote clients, start the same toolkit over stateful Streamable HTTP. Store only SHA-256 client-token hashes on the server:
+
+```powershell
+$env:SEARCH_TOOLKIT_HTTP_TOKENS = '[{"hash":"<owner-sha256-hex>"},{"hash":"<guest-sha256-hex>","tools":["search_auto","search_images"],"requestsPerMinute":30,"maxSessions":8}]'
+$env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
+node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
+```
+
+Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token; shared tokens should use an explicit tool allowlist, `requestsPerMinute` limit, and optional `maxSessions` cap. Owner tokens remain uncapped unless they explicitly set `maxSessions`. STDIO and HTTP use the same Provider config, rotation state, and routing behavior; HTTP only adds transport-level access policy. Put public deployments behind HTTPS and keep Provider keys server-side.
+
 The MCP server exposes:
 
 - Provider-prefixed official upstream tools selected by the provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its entire management catalog.
 - Every configured REST adapter tool.
 - `search_auto` for quality-first capability routing with `balanced` and `max` quality profiles. It considers only providers with `automatic: true`, always excludes `manualOnly` providers, and may try one compatible retrieval fallback after a recognized provider-availability failure.
+- `search_images` for quality-first worldwide text-to-image discovery through Brave Images, then Serper Images on availability failure. Country-specific filtering stays on direct Provider tools. It is not reverse image search and does not receive chat attachments by itself.
 - `search_pool_status` for masked key-pool diagnostics.
 - `search_rotation_probe` for a live, quota-consuming rotation proof.
 
@@ -119,6 +131,7 @@ The reusable skill is under `skills/search-toolkit/`. Copy or link it into your 
 ```powershell
 npm test
 npm run smoke:mcp
+npm run smoke:http -- https://search-mcp.example.com/mcp C:/private/client-token.txt
 npm pack --dry-run
 ```
 

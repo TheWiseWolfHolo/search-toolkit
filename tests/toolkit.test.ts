@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { attachRouteMetadata, autoCandidates, filterBindings, SearchToolkit } from "../src/toolkit.js";
+import { attachRouteMetadata, autoCandidates, filterBindings, imageCandidates, SearchToolkit } from "../src/toolkit.js";
 import type { ProviderConfig, ToolBinding } from "../src/types.js";
 
 const binding: ToolBinding = {
@@ -160,4 +160,11 @@ test("automatic route profiles keep their intentional provider order", () => {
   });
   assert.equal(autoCandidates("official", "balanced", request)[0]?.name, "serper_search");
   assert.equal(autoCandidates("official", "max", request)[2]?.name, "exa_web_search_advanced_exa");
+  assert.deepEqual(imageCandidates({ query: "route contract", limit: 9 }).map((item) => item.name), [
+    "brave_image_search", "serper_images",
+  ]);
+  assert.deepEqual(imageCandidates({ query: "route contract", limit: 9 })[0]?.nativeArguments, {
+    query: "route contract", limit: 9, country: "ALL", safesearch: "strict",
+  });
+  assert.deepEqual(imageCandidates({ query: "route contract", country: "SG" }), imageCandidates({ query: "route contract" }));
 });
