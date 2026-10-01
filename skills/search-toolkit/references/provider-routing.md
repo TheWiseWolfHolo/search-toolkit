@@ -12,6 +12,28 @@ Choose providers by capability and task intent. Prefer strong retrieval that fit
 6. Inspect the live tool inventory. Official MCP catalogs change, and tools may be hidden by a provider's tool policy or by the `lean` profile.
 7. Keep raw keys out of prompts, results, logs, and tool arguments.
 
+## Reading a result
+
+Every result starts with a JSON block, `{"searchToolkitRoute": {...}, "searchToolkitAuto": {...}}`, followed by readable text: numbered results with the provider's publication date in parentheses when it reports one. `searchToolkitAuto` lists which providers were tried and how each attempt ended. Prefer `structuredContent.route` when the client exposes it.
+
+`search_auto` stops at the first provider that answers and tries one more only after an availability failure. `fetch_auto` also moves on when a reader returns almost no text, up to three providers. Nothing is merged unless `crossCheck` is set.
+
+## CLI
+
+```text
+search-toolkit search "<query>" [--mode general|exact|current|official|context] [--quality max] [--limit 6] [--freshness week] [--cross]
+search-toolkit fetch <url> [--quality max] [--max-chars 12000]
+search-toolkit tools [--json]        # names; --json for schemas
+search-toolkit call <tool> '<json-arguments>' [--json]
+search-toolkit status [--verbose]
+```
+
+Output is the same text a model receives over MCP: a route line, then the results. `--json` prints the full structured result. `reset` and `migrate-config` are operator commands, not for agents.
+
+## Code and configuration origin
+
+Before saying a string "originates from" a project (出自), inspect the matched file, repository name, commit date, and any fork or rename relationship visible in the source. If several repositories contain the string and ancestry is unresolved, cite the candidates and say the origin is uncertain rather than promoting the first hit.
+
 ## Which providers automatic routing may use
 
 A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only when its config lists the matching capability in `auto` (`search`, `images`, `fetch`). A provider with an empty `auto` list, such as Doubao, LinkUp, AnySearch, Grok, Jina, and TinyFish in the reference setup, is reachable only by calling its tools directly.
