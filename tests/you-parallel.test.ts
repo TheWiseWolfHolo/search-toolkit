@@ -51,7 +51,7 @@ test("You.com uses the current POST Search contract and normalizes Web plus News
       contentLevel: "highlights",
     }, "test-key", {
       enabled: true,
-      automatic: true,
+      auto: ["search"],
       keys: ["test-key"],
       integration: { kind: "rest", adapter: "you" },
     }) as Record<string, unknown>;
@@ -111,7 +111,7 @@ test("Parallel uses the v1 semantic Search contract and advanced settings", asyn
       clientModel: "gpt-5.6",
     }, "test-key", {
       enabled: true,
-      automatic: true,
+      auto: ["search"],
       keys: ["test-key"],
       integration: { kind: "rest", adapter: "parallel" },
     }) as Record<string, unknown>;

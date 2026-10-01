@@ -46,7 +46,7 @@ test("search_auto results preserve content and expose an auditable route", () =>
 test("provider tool policies also filter REST bindings", () => {
   const config: ProviderConfig = {
     enabled: true,
-    automatic: true,
+    auto: ["search"],
     keys: ["key"],
     integration: { kind: "rest", adapter: "brave" },
     toolPolicy: { allow: ["brave_web_search"], deny: [] },

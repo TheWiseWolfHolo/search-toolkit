@@ -1,6 +1,8 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { HttpError, shouldRetryWithNextKey, statusFromError } from "../errors.js";
-import { RotationStore } from "../rotation.js";
+import { HttpError, parseRetryAfter, statusFromError } from "../errors.js";
+import { callWithRotation } from "../keys.js";
+import { renderPayload } from "../render.js";
+import type { RotationStore } from "../rotation.js";
 import type { KeySelection, ProviderConfig, ToolBinding } from "../types.js";
 
 export interface RestAdapter {
@@ -25,15 +27,9 @@ export class RestProvider {
     }));
   }
 
-  private async call(tool: string, args: Record<string, unknown>): Promise<unknown> {
-    const first = this.rotation.select(this.name, this.config.keys);
-    try {
-      return await this.callWith(first, tool, args);
-    } catch (error) {
-      const status = statusFromError(error);
-      if (this.config.keys.length < 2 || !shouldRetryWithNextKey(status)) throw error;
-      return this.callWith(this.rotation.select(this.name, this.config.keys), tool, args);
-    }
+  private call(tool: string, args: Record<string, unknown>): Promise<unknown> {
+    return callWithRotation(this.rotation, this.name, this.config.keys, (selection) =>
+      this.callWith(selection, tool, args));
   }
 
   private async callWith(
@@ -47,17 +43,20 @@ export class RestProvider {
       const latencyMs = Math.round(performance.now() - started);
       this.rotation.record(selection, { ok: true, latencyMs, httpStatus: 200 });
       const route = { provider: this.name, tool, upstreamTool: tool };
-      const structuredContent = {
-        provider: this.name,
-        tool,
-        route,
-        keySlot: selection.masked,
-        latencyMs,
-        data: payload,
-      };
       return {
-        content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-        structuredContent,
+        // Model-visible content: one compact route block, then readable text.
+        content: [
+          { type: "text", text: JSON.stringify({ searchToolkitRoute: route }) },
+          { type: "text", text: renderPayload(payload) },
+        ],
+        structuredContent: {
+          provider: this.name,
+          tool,
+          route,
+          keySlot: selection.masked,
+          latencyMs,
+          data: payload,
+        },
         _meta: {
           searchToolkit: { provider: this.name, upstreamTool: tool, keySlot: selection.masked, latencyMs, route },
         },
@@ -65,10 +64,19 @@ export class RestProvider {
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const status = statusFromError(error);
-      this.rotation.record(selection, { ok: false, latencyMs, ...(status ? { httpStatus: status } : {}) });
+      this.rotation.record(selection, {
+        ok: false,
+        latencyMs,
+        ...(status ? { httpStatus: status } : {}),
+        ...(error instanceof HttpError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+      });
       throw error;
     }
   }
+}
+
+export function baseUrlOf(config: ProviderConfig, fallback: string): string {
+  return config.integration.kind === "rest" && config.integration.baseUrl ? config.integration.baseUrl : fallback;
 }
 
 export async function requestJson(
@@ -80,9 +88,14 @@ export async function requestJson(
   const text = await response.text();
   if (!response.ok) {
     const safe = text.replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>").slice(0, 500);
-    throw new HttpError(`HTTP ${response.status}: ${safe}`, response.status);
+    throw new HttpError(`HTTP ${response.status}: ${safe}`, response.status, parseRetryAfter(response.headers.get("retry-after")));
   }
-  return JSON.parse(text) as Record<string, unknown>;
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // A 200 with a non-JSON body is a gateway or captive-page problem, not a request error.
+    throw new HttpError(`HTTP 502: non-JSON response (${text.slice(0, 80).replace(/\s+/g, " ")})`, 502);
+  }
 }
 
 export function searchTool(name: string, title: string, description: string, extra: Record<string, unknown> = {}): Tool {

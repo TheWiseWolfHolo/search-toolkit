@@ -26,22 +26,37 @@ export type IntegrationConfig =
       baseUrl?: string;
     };
 
+/** What a provider may be chosen for without being named explicitly. An empty list means manual use only. */
+export type AutoCapability = "search" | "images" | "fetch";
+
 export interface ProviderConfig {
   enabled: boolean;
-  automatic: boolean;
-  manualOnly?: boolean;
+  auto: AutoCapability[];
   keys: string[];
   integration: IntegrationConfig;
   toolPolicy?: {
     allow?: string[];
     deny?: string[];
+    /** Replace the exposed description of a tool, keyed by its upstream name. */
+    descriptions?: Record<string, string>;
   };
   options?: Record<string, unknown>;
 }
 
+export type ToolkitProfile = "full" | "lean";
+
+export interface ShapingConfig {
+  /** Longest exposed tool description; 0 keeps upstream text untouched. */
+  maxDescriptionChars?: number;
+  /** Longest description on a single input parameter; 0 keeps them untouched. */
+  maxParamDescriptionChars?: number;
+}
+
 export interface ToolkitConfig {
-  version: 1;
+  version: 2;
   statePath: string;
+  profile?: ToolkitProfile;
+  shaping?: ShapingConfig;
   providers: Record<string, ProviderConfig>;
 }
 
@@ -50,6 +65,7 @@ export interface KeySelection {
   slot: number;
   key: string;
   masked: string;
+  fingerprint: string;
 }
 
 export interface ToolBinding {
@@ -63,6 +79,8 @@ export interface SearchItem {
   title: string;
   url: string;
   text: string;
+  /** Publication or crawl date as the provider reports it (ISO date when available). */
+  date?: string;
 }
 
 export interface ImageSearchItem extends SearchItem {

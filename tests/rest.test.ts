@@ -13,13 +13,13 @@ test("REST direct results expose the same route provenance shape", async () => {
   const rotation = new RotationStore(join(directory, "state.db"));
   const config: ProviderConfig = {
     enabled: true,
-    automatic: true,
+    auto: ["search"],
     keys: ["test-key"],
     integration: { kind: "rest", adapter: "brave" },
   };
   const adapter: RestAdapter = {
     tools: () => [searchTool("brave_web_search", "Brave", "Search")],
-    call: async () => ({ results: [{ url: "https://example.com" }] }),
+    call: async () => ({ items: [{ title: "Example", url: "https://example.com", text: "Line one" + String.fromCharCode(10) + "Line two", date: "2026-09-30" }] }),
   };
   try {
     const provider = new RestProvider("brave", config, rotation, adapter);
@@ -37,7 +37,10 @@ test("REST direct results expose the same route provenance shape", async () => {
       expectedRoute,
     );
     const content = output.content as Array<{ text: string }>;
-    assert.deepEqual(JSON.parse(content[0]?.text ?? "{}").route, expectedRoute);
+    assert.equal(content.length, 2);
+    assert.deepEqual(JSON.parse(content[0]?.text ?? "{}").searchToolkitRoute, expectedRoute);
+    // Model-visible text is a compact rendering, not an escaped JSON dump.
+    assert.equal(content[1]?.text, ["1. Example (2026-09-30)", "   https://example.com", "   Line one", "   Line two"].join(String.fromCharCode(10)));
   } finally {
     rotation.close();
     rmSync(directory, { recursive: true, force: true });

@@ -2,9 +2,14 @@
 import { createServer } from "node:http";
 import { boundedInteger, createSearchToolkitHttpApp, parseHttpTokenPolicies } from "./http.js";
 import { SearchToolkit } from "./toolkit.js";
+import type { ToolkitProfile } from "./types.js";
 
-const configIndex = process.argv.indexOf("--config");
-const configPath = configIndex >= 0 ? process.argv[configIndex + 1] : undefined;
+const configPath = flagValue("--config");
+const profile = flagValue("--profile");
+if (profile !== undefined && profile !== "full" && profile !== "lean") {
+  console.error(`--profile must be "full" or "lean", got "${profile}"`);
+  process.exit(2);
+}
 const host = process.env.SEARCH_TOOLKIT_HTTP_HOST ?? "127.0.0.1";
 const port = boundedInteger(Number(process.env.SEARCH_TOOLKIT_HTTP_PORT ?? 18_473), 18_473, 1, 65_535);
 const tokens = parseHttpTokenPolicies(process.env.SEARCH_TOOLKIT_HTTP_TOKENS);
@@ -17,7 +22,7 @@ const sessionTtlMs = boundedInteger(
   24 * 60 * 60_000,
 );
 
-const toolkit = new SearchToolkit(configPath);
+const toolkit = new SearchToolkit(configPath, profile ? { profile: profile as ToolkitProfile } : {});
 await toolkit.initialize();
 const runtime = createSearchToolkitHttpApp(toolkit, {
   tokens,
@@ -44,4 +49,9 @@ process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 
 function listEnv(name: string): string[] {
   return (process.env[name] ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function flagValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
 }

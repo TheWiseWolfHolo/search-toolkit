@@ -11,7 +11,7 @@ import type { ProviderConfig } from "../src/types.js";
 
 const baseConfig: ProviderConfig = {
   enabled: true,
-  automatic: false,
+  auto: [],
   keys: ["test-key"],
   integration: { kind: "stdio_mcp", command: "npx", args: [], envKey: "KEY" },
 };

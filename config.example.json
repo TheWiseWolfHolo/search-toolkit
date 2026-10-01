@@ -1,10 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
   "statePath": "C:/Users/you/.config/search-toolkit/state.db",
+  "profile": "full",
+  "shaping": { "maxDescriptionChars": 700, "maxParamDescriptionChars": 220 },
   "providers": {
     "exa": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search", "images", "fetch"],
       "keys": ["replace-me"],
       "integration": {
         "kind": "remote_mcp",
@@ -14,7 +16,7 @@
     },
     "tavily": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search", "images", "fetch"],
       "keys": ["replace-me"],
       "integration": {
         "kind": "remote_mcp",
@@ -24,7 +26,7 @@
     },
     "linkup": {
       "enabled": true,
-      "automatic": false,
+      "auto": [],
       "keys": ["replace-me"],
       "integration": {
         "kind": "remote_mcp",
@@ -34,18 +36,22 @@
     },
     "anysearch": {
       "enabled": true,
-      "automatic": false,
+      "auto": [],
       "keys": ["replace-me"],
       "integration": {
         "kind": "remote_mcp",
         "url": "https://api.anysearch.com/mcp",
-        "auth": { "kind": "bearer" },
-        "headers": { "X-Anysearch-Client": "search-toolkit/0.1.0" }
+        "auth": { "kind": "bearer" }
+      },
+      "toolPolicy": {
+        "descriptions": {
+          "search": "General and vertical web search. Pass only query for general search. To use domain/sub_domain, call get_sub_domains first and obey the parameter schema it returns; never guess domain values."
+        }
       }
     },
     "firecrawl": {
       "enabled": true,
-      "automatic": false,
+      "auto": ["fetch"],
       "keys": ["replace-me"],
       "integration": {
         "kind": "stdio_mcp",
@@ -67,37 +73,37 @@
     },
     "querit": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "querit" }
     },
     "serper": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search", "images"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "serper" }
     },
     "brave": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search", "images"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "brave" }
     },
     "you": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "you" }
     },
     "parallel": {
       "enabled": true,
-      "automatic": true,
+      "auto": ["search"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "parallel" }
     },
     "grok": {
       "enabled": true,
-      "automatic": false,
+      "auto": [],
       "keys": ["replace-me"],
       "integration": {
         "kind": "rest",
@@ -106,13 +112,13 @@
       },
       "options": {
         "model": "grok-4.6",
-        "reasoningEffort": "low"
+        "reasoningEffort": "low",
+        "systemPrompt": "Search the web and answer concisely with citations."
       }
     },
     "doubao": {
       "enabled": true,
-      "automatic": false,
-      "manualOnly": true,
+      "auto": [],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "doubao" }
     }

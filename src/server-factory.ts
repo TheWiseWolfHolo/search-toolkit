@@ -1,9 +1,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { SearchToolkit } from "./toolkit.js";
+import { PACKAGE_VERSION } from "./version.js";
 
-const instructions = "Use the narrowest provider that fits the task. Start with compact search, inspect results, then fetch selected URLs. Use Brave LLM Context for token-bounded multi-source grounding, You.com for unified Web/News with optional query-aware highlights, and Parallel for semantic objectives with LLM-optimized excerpts. Doubao is manual-only. Key rotation probes consume quota. Tools that create, update, delete, start jobs, send notifications, or submit feedback require explicit user intent; respect tool annotations and approval prompts.";
+const instructions = "Search with search_auto (web), search_images (images), and fetch_auto (a known URL) first; they pick a provider and report the route used. Reach for a provider tool directly only when its specific capability is needed. Brave LLM Context gives token-bounded multi-source grounding, You.com gives Web+News with highlights, Parallel suits semantic objectives. Doubao is manual-only. Rotation probes consume quota. Tools that create, update, delete, start jobs, or submit feedback need explicit user intent; respect annotations and approval prompts.";
 
 interface ProtocolServerOptions {
   allowTool?: (tool: Tool) => boolean;
@@ -11,31 +11,18 @@ interface ProtocolServerOptions {
 }
 
 export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolServerOptions = {}): Server {
-  const validatorProvider = new AjvJsonSchemaValidator();
-  const validators = new Map<string, ReturnType<AjvJsonSchemaValidator["getValidator"]>>();
   const server = new Server(
-    { name: "search-toolkit", version: "0.1.0" },
-    { capabilities: { tools: { listChanged: false } }, instructions },
+    { name: "search-toolkit", version: PACKAGE_VERSION },
+    { capabilities: { tools: { listChanged: true } }, instructions },
   );
   const visibleTools = () => toolkit.listTools().filter((tool) => options.allowTool?.(tool) ?? true);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: visibleTools() }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
-      const tool = toolkit.listTools().find((candidate) => candidate.name === request.params.name);
-      if (!tool || (options.allowTool && !options.allowTool(tool))) {
-        throw new Error("Tool is not available for this token");
-      }
-      let validator = validators.get(tool.name);
-      if (!validator) {
-        validator = validatorProvider.getValidator(tool.inputSchema as Parameters<AjvJsonSchemaValidator["getValidator"]>[0]);
-        validators.set(tool.name, validator);
-      }
-      const validation = validator(request.params.arguments ?? {});
-      if (!validation.valid) {
-        throw new Error(`Invalid arguments for ${tool.name}: ${validation.errorMessage}`);
-      }
+      const tool = visibleTools().find((candidate) => candidate.name === request.params.name);
+      if (!tool) throw new Error("Tool is not available for this token");
       options.beforeCall?.(tool.name);
-      return await toolkit.callTool(request.params.name, validation.data as Record<string, unknown>) as never;
+      return await toolkit.callTool(tool.name, request.params.arguments ?? {}) as never;
     } catch (error) {
       const text = (error instanceof Error ? error.message : String(error))
         .replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>")
@@ -43,5 +30,10 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
       return { content: [{ type: "text", text }], isError: true };
     }
   });
+  // An upstream catalog refreshed in the background changes the tool list mid-session.
+  const unsubscribe = toolkit.onToolsChanged(() => {
+    void server.sendToolListChanged().catch(() => undefined);
+  });
+  server.onclose = unsubscribe;
   return server;
 }

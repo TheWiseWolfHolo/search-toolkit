@@ -3,9 +3,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { statusFromError, shouldRetryWithNextKey } from "./errors.js";
+import {
+  isConnectionFailure,
+  keyFaultStatusFromToolText,
+  statusFromError,
+  textOfContent,
+  ToolResultError,
+} from "./errors.js";
+import { callWithRotation } from "./keys.js";
+import { keyFingerprint, maskKey, type RotationStore } from "./rotation.js";
 import type { KeySelection, ProviderConfig, ToolBinding } from "./types.js";
-import { maskKey, RotationStore } from "./rotation.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 export const DEFAULT_FIRECRAWL_TOOLS = [
   "firecrawl_scrape",
@@ -17,14 +25,15 @@ export const DEFAULT_FIRECRAWL_TOOLS = [
   "firecrawl_research_search_github",
 ] as const;
 
+const DISCOVERY_TIMEOUT_MS = 25_000;
+
 interface ClientEntry {
   client: Client;
   close(): Promise<void>;
 }
 
 export class UpstreamMcpProvider {
-  private readonly clients = new Map<number, Promise<ClientEntry>>();
-  private discovered: Tool[] | undefined;
+  private readonly clients = new Map<string, Promise<ClientEntry>>();
 
   constructor(
     readonly name: string,
@@ -32,51 +41,56 @@ export class UpstreamMcpProvider {
     private readonly rotation: RotationStore,
   ) {}
 
-  async bindings(): Promise<ToolBinding[]> {
-    const tools = filterUpstreamTools(this.name, this.config, await this.discoverTools());
-    return tools.map((tool) => {
-      const exposedName = `${this.name}_${sanitizeName(tool.name)}`;
-      return {
-        provider: this.name,
-        upstreamName: tool.name,
-        exposed: {
-          ...tool,
-          name: exposedName,
-          title: tool.title ? `${this.name}: ${tool.title}` : `${this.name}: ${tool.name}`,
-          description: `[Official ${this.name} MCP; rotating ${this.config.keys.length} configured key(s)] ${tool.description ?? ""}`,
-          annotations: safeToolAnnotations(tool),
-        },
-        call: async (arguments_: Record<string, unknown>) => this.call(tool.name, arguments_),
-      };
-    });
+  /** Wrap discovered upstream tools as exposed bindings; descriptions are shaped later by the toolkit. */
+  bindingsFor(discovered: Tool[]): ToolBinding[] {
+    return filterUpstreamTools(this.name, this.config, discovered).map((tool) => ({
+      provider: this.name,
+      upstreamName: tool.name,
+      exposed: {
+        ...tool,
+        name: `${this.name}_${sanitizeName(tool.name)}`,
+        title: tool.title ? `${this.name}: ${tool.title}` : `${this.name}: ${tool.name}`,
+        description: tool.description ?? "",
+        annotations: safeToolAnnotations(tool),
+      },
+      call: async (arguments_: Record<string, unknown>) => this.call(tool.name, arguments_),
+    }));
   }
 
   async close(): Promise<void> {
     const entries = await Promise.allSettled(this.clients.values());
+    this.clients.clear();
     await Promise.allSettled(entries.flatMap((entry) => entry.status === "fulfilled" ? [entry.value.close()] : []));
   }
 
-  private async discoverTools(): Promise<Tool[]> {
-    if (this.discovered) return this.discovered;
-    const key = this.config.keys[0];
-    if (!key) throw new Error(`${this.name} has no API key for MCP discovery`);
-    const selection: KeySelection = { provider: this.name, slot: 0, key, masked: maskKey(key) };
-    const entry = await this.clientFor(selection);
-    const result = await entry.client.listTools();
-    this.discovered = result.tools;
-    return result.tools;
+  /** List the live upstream catalog, falling back across keys so one bad key cannot hide a provider. */
+  async discover(): Promise<Tool[]> {
+    const keys = this.config.keys;
+    if (!keys.length) throw new Error(`${this.name} has no API key for MCP discovery`);
+    const usable = this.rotation.usableSlots(this.name, keys);
+    const order = usable.length ? usable : keys.map((_, slot) => slot);
+    let lastError: unknown;
+    for (const slot of order) {
+      const key = keys[slot] as string;
+      const selection = selectionFor(this.name, slot, key);
+      try {
+        const entry = await withTimeout(this.clientFor(selection), DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
+        return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+      } catch (error) {
+        lastError = error;
+        await this.dropClient(selection);
+        const status = statusFromError(error);
+        if (status === 401 || status === 402 || status === 403 || status === 429) {
+          this.rotation.record(selection, { ok: false, latencyMs: 0, httpStatus: status });
+        }
+      }
+    }
+    throw lastError;
   }
 
-  private async call(upstreamName: string, arguments_: Record<string, unknown>): Promise<unknown> {
-    const first = this.rotation.select(this.name, this.config.keys);
-    try {
-      return await this.callWith(first, upstreamName, arguments_);
-    } catch (error) {
-      const status = statusFromError(error);
-      if (this.config.keys.length < 2 || !shouldRetryWithNextKey(status)) throw error;
-      const next = this.rotation.select(this.name, this.config.keys);
-      return this.callWith(next, upstreamName, arguments_);
-    }
+  private call(upstreamName: string, arguments_: Record<string, unknown>): Promise<unknown> {
+    return callWithRotation(this.rotation, this.name, this.config.keys, (selection) =>
+      this.callWith(selection, upstreamName, arguments_));
   }
 
   private async callWith(
@@ -86,12 +100,17 @@ export class UpstreamMcpProvider {
   ): Promise<unknown> {
     const started = performance.now();
     try {
-      const entry = await this.clientFor(selection);
-      const result = await entry.client.callTool({ name: upstreamName, arguments: arguments_ });
+      const result = await this.invoke(selection, upstreamName, arguments_);
       const latencyMs = Math.round(performance.now() - started);
       if (result.isError) {
-        const text = JSON.stringify(result.content);
-        throw new Error(`${this.name} upstream tool error: ${text.slice(0, 500)}`);
+        const text = textOfContent(result.content);
+        const keyFault = keyFaultStatusFromToolText(text);
+        if (keyFault) {
+          throw new ToolResultError(`${this.name} upstream tool error: ${text.slice(0, 500)}`, result.content as unknown[], keyFault);
+        }
+        // The key and transport worked; the tool rejected this particular request.
+        this.rotation.record(selection, { ok: true, latencyMs, toolError: true });
+        return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
       }
       this.rotation.record(selection, { ok: true, latencyMs });
       return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
@@ -103,18 +122,50 @@ export class UpstreamMcpProvider {
     }
   }
 
+  /** One tool call; a dead transport (closed stdio child, expired session) is rebuilt once on the same key. */
+  private async invoke(selection: KeySelection, upstreamName: string, arguments_: Record<string, unknown>) {
+    for (let attempt = 0; ; attempt += 1) {
+      const entry = await this.clientFor(selection);
+      try {
+        return await entry.client.callTool({ name: upstreamName, arguments: arguments_ });
+      } catch (error) {
+        if (attempt > 0 || !isConnectionFailure(error)) throw error;
+        await this.dropClient(selection);
+      }
+    }
+  }
+
   private clientFor(selection: KeySelection): Promise<ClientEntry> {
-    let pending = this.clients.get(selection.slot);
+    let pending = this.clients.get(selection.fingerprint);
     if (!pending) {
-      pending = this.createClient(selection);
-      this.clients.set(selection.slot, pending);
+      const created = this.createClient(selection).then((entry) => {
+        // A crashed child process or closed session must not stay cached.
+        entry.client.onclose = () => {
+          if (this.clients.get(selection.fingerprint) === created) this.clients.delete(selection.fingerprint);
+        };
+        return entry;
+      });
+      pending = created;
+      this.clients.set(selection.fingerprint, created);
+      // A failed connect must not poison the slot for the rest of the process.
+      created.catch(() => {
+        if (this.clients.get(selection.fingerprint) === created) this.clients.delete(selection.fingerprint);
+      });
     }
     return pending;
   }
 
+  private async dropClient(selection: KeySelection): Promise<void> {
+    const pending = this.clients.get(selection.fingerprint);
+    this.clients.delete(selection.fingerprint);
+    if (!pending) return;
+    const entry = await pending.catch(() => undefined);
+    await entry?.close().catch(() => undefined);
+  }
+
   private async createClient(selection: KeySelection): Promise<ClientEntry> {
     const client = new Client(
-      { name: `search-toolkit-${this.name}-${selection.slot}`, version: "0.1.0" },
+      { name: `search-toolkit-${this.name}-${selection.slot}`, version: PACKAGE_VERSION },
       { capabilities: {} },
     );
     const integration = this.config.integration;
@@ -125,7 +176,7 @@ export class UpstreamMcpProvider {
       if (integration.auth.kind === "header") headers.set(integration.auth.name, selection.key);
       if (integration.auth.kind === "bearer") headers.set("Authorization", `Bearer ${selection.key}`);
       const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
-      // SDK v1.29's optional sessionId property conflicts with projects that
+      // The SDK's optional sessionId property conflicts with projects that
       // enable exactOptionalPropertyTypes, though the runtime transport is valid.
       await client.connect(transport as unknown as Transport);
       return { client, close: async () => transport.close() };
@@ -149,7 +200,36 @@ export class UpstreamMcpProvider {
   }
 }
 
-function sanitizeName(name: string): string {
+export function selectionFor(provider: string, slot: number, key: string): KeySelection {
+  return { provider, slot, key, masked: maskKey(key), fingerprint: keyFingerprint(key) };
+}
+
+async function listAllTools(client: Client): Promise<Tool[]> {
+  const tools: Tool[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.listTools(cursor ? { cursor } : {});
+    tools.push(...page.tools);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return tools;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function sanitizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
 }
 

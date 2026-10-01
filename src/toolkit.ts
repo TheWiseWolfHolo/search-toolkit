@@ -1,84 +1,160 @@
+import { dirname, join } from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { loadConfig } from "./config.js";
-import { shouldFailoverProvider, statusFromError } from "./errors.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { integrationFingerprint, ToolCatalogCache, toolsFingerprint } from "./catalog.js";
+import { loadConfigWithNotes } from "./config.js";
+import { shouldFailoverProvider, statusFromError, textOfContent, ToolResultError } from "./errors.js";
+import { mergeItems, type MergedItem } from "./merge.js";
+import { attachRouteMetadata, bodyBlocks, cleanError, isRouteContentBlock, isToolErrorResult, result } from "./provenance.js";
+import { renderItems } from "./render.js";
 import { RestProvider } from "./rest/base.js";
 import { adapterFor } from "./rest/adapters.js";
 import { RotationStore } from "./rotation.js";
-import type { ProviderConfig, ToolBinding, ToolkitConfig } from "./types.js";
+import {
+  autoCandidates, autoMode, fetchCandidates, imageCandidates,
+  type AutoCandidate, type AutoQuality,
+} from "./routes.js";
+import { shapeTool } from "./shape.js";
+import {
+  AUTO_TOOL, FETCH_TOOL, GATEWAY_CALL_TOOL, GATEWAY_LIST_TOOL, GATEWAY_TOOL_NAMES,
+  IMAGES_TOOL, MANAGEMENT_TOOL_NAMES, PROBE_TOOL, STATUS_TOOL,
+} from "./tools.js";
+import type { AutoCapability, ProviderConfig, ToolBinding, ToolkitConfig, ToolkitProfile } from "./types.js";
 import { UpstreamMcpProvider } from "./upstream.js";
 
-export type AutoMode = "general" | "exact" | "current" | "official" | "context";
-export type AutoQuality = "balanced" | "max";
-export type AutoFreshness = "day" | "week" | "month" | "year";
-
-export interface AutoCandidate {
-  name: string;
-  nativeArguments?: Record<string, unknown>;
-}
+export { attachRouteMetadata } from "./provenance.js";
+export { autoCandidates, fetchCandidates, imageCandidates } from "./routes.js";
+export type { AutoCandidate, AutoFreshness, AutoMode, AutoQuality } from "./routes.js";
 
 interface AutoAttempt {
   provider: string;
   tool: string;
   candidateRank: number;
-  outcome: "success" | "error";
+  outcome: "success" | "error" | "empty";
   status?: number;
 }
+
+interface ChainSpec {
+  tool: string;
+  capability: AutoCapability;
+  maxProviders: number;
+  meta: Record<string, unknown>;
+  emptyError: string;
+  /** Soft success test: false means "answered, but nothing usable"; the next provider is tried. */
+  usable?: (output: unknown) => boolean;
+}
+
+export interface ToolkitOptions {
+  profile?: ToolkitProfile;
+}
+
+type Validator = ReturnType<AjvJsonSchemaValidator["getValidator"]>;
+
+const MIN_FETCH_CHARS = 80;
+const LEAN_TOOL_NAMES = new Set(MANAGEMENT_TOOL_NAMES);
 
 export class SearchToolkit {
   readonly config: ToolkitConfig;
   readonly rotation: RotationStore;
   readonly warnings: string[] = [];
+  readonly profile: ToolkitProfile;
   private readonly bindings = new Map<string, ToolBinding>();
-  private readonly upstreams: UpstreamMcpProvider[] = [];
+  private readonly fullTools = new Map<string, Tool>();
+  private readonly owned = new Map<string, string[]>();
+  private readonly upstreams = new Map<string, UpstreamMcpProvider>();
+  private readonly listeners = new Set<() => void>();
+  private readonly validators = new Map<string, Validator | null>();
+  private readonly validatorFactory = new AjvJsonSchemaValidator();
+  private readonly catalog: ToolCatalogCache;
+  private closed = false;
 
-  constructor(configPath?: string) {
-    this.config = loadConfig(configPath);
+  constructor(configPath?: string, options: ToolkitOptions = {}) {
+    const loaded = loadConfigWithNotes(configPath);
+    this.config = loaded.config;
+    this.warnings.push(...loaded.notes);
     this.rotation = new RotationStore(this.config.statePath);
+    this.rotation.adoptLegacyState(Object.fromEntries(
+      Object.entries(this.config.providers).map(([name, provider]) => [name, provider.keys]),
+    ));
+    this.profile = options.profile ?? profileFromEnv() ?? this.config.profile ?? "full";
+    this.catalog = new ToolCatalogCache(join(dirname(this.config.statePath), "tool-catalog.json"));
   }
 
   async initialize(): Promise<void> {
     const providers = Object.entries(this.config.providers).filter(([, config]) => config.enabled);
-    for (const [name, config] of providers) {
+    // Providers are independent, so connect and discover them concurrently.
+    const settled = await Promise.all(providers.map(async ([name, config]) => {
       try {
-        const bindings = await this.providerBindings(name, config);
-        for (const binding of bindings) {
-          if (this.bindings.has(binding.exposed.name)) {
-            throw new Error(`Duplicate tool name: ${binding.exposed.name}`);
-          }
-          this.bindings.set(binding.exposed.name, binding);
-        }
+        return { name, bindings: await this.providerBindings(name, config) };
+      } catch (error) {
+        this.warnings.push(`${name}: ${cleanError(error)}`);
+        return { name, bindings: [] as ToolBinding[] };
+      }
+    }));
+    for (const { name, bindings } of settled) {
+      try {
+        this.registerProvider(name, bindings);
       } catch (error) {
         this.warnings.push(`${name}: ${cleanError(error)}`);
       }
     }
-    for (const binding of this.managementBindings()) this.bindings.set(binding.exposed.name, binding);
+    for (const managed of this.managementBindings()) this.bindings.set(managed.exposed.name, managed);
   }
 
+  /** Tools visible to MCP clients under the active profile. */
   listTools(): Tool[] {
-    return Array.from(this.bindings.values(), (binding) => binding.exposed);
+    const exposed = Array.from(this.bindings.values(), (binding) => binding.exposed);
+    return this.profile === "lean"
+      ? exposed.filter((tool) => LEAN_TOOL_NAMES.has(tool.name))
+      : exposed.filter((tool) => !GATEWAY_TOOL_NAMES.has(tool.name));
+  }
+
+  /** Subscribe to tool-catalog changes (an upstream's tools changed after a background refresh). */
+  onToolsChanged(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   async callTool(name: string, arguments_: Record<string, unknown>): Promise<unknown> {
     const binding = this.bindings.get(name);
     if (!binding) throw new Error(`Unknown Search Toolkit tool: ${name}`);
-    return binding.call(arguments_);
+    return binding.call(this.validateArguments(binding.exposed, arguments_));
+  }
+
+  /** Validate and default arguments against the exposed schema. A schema the validator cannot compile is left to the upstream. */
+  validateArguments(tool: Tool, arguments_: Record<string, unknown>): Record<string, unknown> {
+    let validator = this.validators.get(tool.name);
+    if (validator === undefined) {
+      try {
+        validator = this.validatorFactory.getValidator(tool.inputSchema as Parameters<AjvJsonSchemaValidator["getValidator"]>[0]);
+      } catch {
+        validator = null;
+      }
+      this.validators.set(tool.name, validator);
+    }
+    if (!validator) return arguments_;
+    const validation = validator(arguments_ ?? {});
+    if (!validation.valid) throw new Error(`Invalid arguments for ${tool.name}: ${validation.errorMessage}`);
+    return validation.data as Record<string, unknown>;
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled(this.upstreams.map((provider) => provider.close()));
+    this.closed = true;
+    this.listeners.clear();
+    await Promise.allSettled(Array.from(this.upstreams.values(), (provider) => provider.close()));
     this.rotation.close();
   }
 
   status(verbose = false): unknown {
     const tools = this.listTools();
     return {
-      version: 1,
+      version: 2,
+      profile: this.profile,
       verbose,
       providers: Object.entries(this.config.providers).map(([name, config]) => ({
         name,
         enabled: config.enabled,
-        automatic: config.automatic,
-        manualOnly: config.manualOnly ?? false,
+        auto: config.auto,
         integration: config.integration.kind,
         rotation: verbose
           ? this.rotation.status(name, config.keys)
@@ -96,183 +172,151 @@ export class SearchToolkit {
       bindings = new RestProvider(name, config, this.rotation, adapterFor(config.integration.adapter)).bindings();
     } else {
       const provider = new UpstreamMcpProvider(name, config, this.rotation);
-      this.upstreams.push(provider);
-      bindings = await provider.bindings();
+      this.upstreams.set(name, provider);
+      const fingerprint = integrationFingerprint(config.integration);
+      const cached = this.catalog.get(name, fingerprint);
+      let tools: Tool[];
+      if (cached) {
+        // Ready immediately from the snapshot; the upstream is contacted on first use.
+        tools = cached.tools;
+        if (cached.stale) this.refreshCatalog(name, config, provider, fingerprint, toolsFingerprint(tools));
+      } else {
+        tools = await provider.discover();
+        this.catalog.set(name, fingerprint, tools);
+      }
+      bindings = provider.bindingsFor(tools);
     }
-    return filterBindings(config, bindings);
+    return this.shapeBindings(config, filterBindings(config, bindings));
+  }
+
+  private shapeBindings(config: ProviderConfig, bindings: ToolBinding[]): ToolBinding[] {
+    return bindings.map((binding) => {
+      this.fullTools.set(binding.exposed.name, binding.exposed);
+      const override = config.toolPolicy?.descriptions?.[binding.upstreamName];
+      return { ...binding, exposed: shapeTool(binding.exposed, this.config.shaping, override) };
+    });
+  }
+
+  private registerProvider(name: string, bindings: ToolBinding[]): void {
+    for (const previous of this.owned.get(name) ?? []) {
+      this.bindings.delete(previous);
+      this.validators.delete(previous);
+    }
+    const names: string[] = [];
+    for (const binding of bindings) {
+      if (this.bindings.has(binding.exposed.name)) {
+        throw new Error(`Duplicate tool name: ${binding.exposed.name}`);
+      }
+      this.bindings.set(binding.exposed.name, binding);
+      names.push(binding.exposed.name);
+    }
+    this.owned.set(name, names);
+  }
+
+  private refreshCatalog(name: string, config: ProviderConfig, provider: UpstreamMcpProvider, fingerprint: string, known: string): void {
+    void provider.discover().then((tools) => {
+      if (this.closed) return;
+      this.catalog.set(name, fingerprint, tools);
+      if (toolsFingerprint(tools) === known) return;
+      this.registerProvider(name, this.shapeBindings(config, filterBindings(config, provider.bindingsFor(tools))));
+      for (const listener of this.listeners) listener();
+    }).catch(() => undefined);
   }
 
   private managementBindings(): ToolBinding[] {
-    const statusTool: Tool = {
-      name: "search_pool_status",
-      title: "Search provider and key-pool status",
-      description: "Show a compact masked provider/key-pool health summary and startup warnings. Set verbose=true for complete masked key-slot counters and the exposed tool list. Never returns raw keys.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          verbose: {
-            type: "boolean",
-            default: false,
-            description: "Include every masked key slot, its counters, and the complete exposed tool list.",
-          },
-        },
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-    };
-    const autoTool: Tool = {
-      name: "search_auto",
-      title: "Search with the recommended provider",
-      description: "Quality-first routing across Parallel, You.com, Brave, Exa, Querit, Tavily, and Serper. Use balanced for routine work and max for complex semantic or multi-hop retrieval. On a recognized provider-availability failure it may try one compatible retrieval fallback. Doubao, research, crawl, and agentic tools are never selected automatically. Results include auditable route and attempt metadata.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", minLength: 1 },
-          mode: { type: "string", enum: ["general", "exact", "current", "official", "context"], default: "general" },
-          quality: {
-            type: "string",
-            enum: ["balanced", "max"],
-            default: "balanced",
-            description: "Balanced uses strong routine retrieval; max selects Parallel Advanced or Exa Advanced where the mode supports it",
-          },
-          freshness: {
-            type: "string",
-            enum: ["day", "week", "month", "year"],
-            default: "week",
-            description: "Current-mode time window mapped to each provider's native freshness control; ignored by other modes",
-          },
-          limit: {
-            type: "integer",
-            minimum: 1,
-            maximum: 20,
-            default: 6,
-            description: "Requested result limit. Brave LLM Context ignores this field and preserves a 20-source grounding pool; context-mode fallback providers may apply it to their own result count.",
-          },
-          maximumNumberOfTokens: {
-            type: "integer",
-            minimum: 1024,
-            maximum: 32768,
-            default: 4096,
-            description: "Brave LLM Context token budget when context mode selects Brave; other fallback providers ignore this field",
-          },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
-    };
-    const imageTool: Tool = {
-      name: "search_images",
-      title: "Search for images",
-      description: "Quality-first text-to-image discovery through Brave's worldwide independent image index, with Serper Google Images as the availability fallback. Returns image URLs and source metadata; it does not inspect an uploaded image or perform reverse image search. Use provider tools directly for country-specific filtering.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", minLength: 1 },
-          limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
-          language: { type: "string", description: "Optional language preference for Brave/Serper" },
-          safesearch: { type: "string", enum: ["strict", "off"], default: "strict", description: "Applied by Brave; fallback providers use their own safety behavior" },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
-    };
-    const probeTool: Tool = {
-      name: "search_rotation_probe",
-      title: "Verify provider key rotation",
-      description: "Run a small number of real calls through one provider and return the masked key-slot sequence. This consumes provider quota.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          provider: { type: "string" },
-          query: { type: "string", minLength: 1 },
-          calls: { type: "integer", minimum: 1, maximum: 12 },
-          tool: { type: "string", description: "Optional exposed tool name; defaults to the provider's first search tool" },
-        },
-        required: ["provider", "query"],
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    };
     return [
-      binding(statusTool, async (args) => result(this.status(args.verbose === true))),
-      binding(autoTool, async (args) => this.callAuto(args)),
-      binding(imageTool, async (args) => this.callImageSearch(args)),
-      binding(probeTool, async (args) => this.probe(args)),
+      binding(STATUS_TOOL, async (args) => result(this.status(args.verbose === true))),
+      binding(AUTO_TOOL, async (args) => this.callAuto(args)),
+      binding(IMAGES_TOOL, async (args) => this.callImageSearch(args)),
+      binding(FETCH_TOOL, async (args) => this.callFetch(args)),
+      binding(PROBE_TOOL, async (args) => this.probe(args)),
+      binding(GATEWAY_LIST_TOOL, async (args) => this.gatewayList(args)),
+      binding(GATEWAY_CALL_TOOL, async (args) => this.gatewayCall(args)),
     ];
   }
 
   private async callAuto(args: Record<string, unknown>): Promise<unknown> {
     const mode = autoMode(args.mode);
-    const quality = args.quality === "max" ? "max" : "balanced";
-    const candidates = autoCandidates(mode, quality, args)
-      .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
-      .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
-        if (!entry.binding) return false;
-        const provider = this.config.providers[entry.binding.provider];
-        return provider?.automatic === true && provider.manualOnly !== true;
-      });
-    if (!candidates.length) throw new Error(`No automatic provider is available for mode ${mode}`);
-
-    const attempts: AutoAttempt[] = [];
-    let lastError: unknown;
-    for (const entry of candidates.slice(0, 2)) {
-      const selectedArguments = { ...(entry.candidate.nativeArguments ?? {}) };
-      try {
-        const output = await entry.binding.call(selectedArguments);
-        attempts.push({
-          provider: entry.binding.provider,
-          tool: entry.binding.exposed.name,
-          candidateRank: entry.candidateRank,
-          outcome: "success",
-        });
-        return attachRouteMetadata(entry.binding, output, {
-          mode,
-          quality,
-          candidateRank: entry.candidateRank,
-          providerAttempt: attempts.length,
-          attempts,
-        });
-      } catch (error) {
-        lastError = error;
-        const status = statusFromError(error);
-        attempts.push({
-          provider: entry.binding.provider,
-          tool: entry.binding.exposed.name,
-          candidateRank: entry.candidateRank,
-          outcome: "error",
-          ...(status ? { status } : {}),
-        });
-        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts);
-      }
+    const quality: AutoQuality = args.quality === "max" ? "max" : "balanced";
+    const candidates = autoCandidates(mode, quality, args);
+    const spec: ChainSpec = {
+      tool: "search_auto",
+      capability: "search",
+      maxProviders: 2,
+      meta: { mode, quality },
+      emptyError: `No automatic provider is available for mode ${mode}`,
+    };
+    if (args.crossCheck === true && mode !== "context") {
+      const merged = await this.crossCheck(candidates, spec, Number(args.limit ?? 6));
+      if (merged) return merged;
     }
-    throw autoFailure(lastError ?? new Error(`No automatic provider completed mode ${mode}`), attempts);
+    return this.runChain(candidates, spec);
   }
 
-  private async callImageSearch(args: Record<string, unknown>): Promise<unknown> {
-    const candidates = imageCandidates(args)
+  private callImageSearch(args: Record<string, unknown>): Promise<unknown> {
+    return this.runChain(imageCandidates(args), {
+      tool: "search_images",
+      capability: "images",
+      maxProviders: 2,
+      meta: { mode: "images" },
+      emptyError: "No automatic image-search provider is available",
+    });
+  }
+
+  private async callFetch(args: Record<string, unknown>): Promise<unknown> {
+    const url = String(args.url ?? "").trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error("fetch_auto requires an absolute http(s) URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("fetch_auto requires an http(s) URL");
+    const quality: AutoQuality = args.quality === "max" ? "max" : "balanced";
+    const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
+    const output = await this.runChain(fetchCandidates(quality, { url: parsed.toString(), maxChars }), {
+      tool: "fetch_auto",
+      capability: "fetch",
+      maxProviders: 3,
+      meta: { mode: "fetch", quality },
+      emptyError: "No automatic fetch provider is available",
+      usable: (candidate) => bodyText(candidate).trim().length >= MIN_FETCH_CHARS,
+    });
+    return truncateBody(output, maxChars);
+  }
+
+  private eligible(candidates: AutoCandidate[], capability: AutoCapability) {
+    return candidates
       .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
       .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
         if (!entry.binding) return false;
-        const provider = this.config.providers[entry.binding.provider];
-        return provider?.automatic === true && provider.manualOnly !== true;
+        return this.config.providers[entry.binding.provider]?.auto.includes(capability) === true;
       });
-    if (!candidates.length) throw new Error("No automatic image-search provider is available");
+  }
+
+  /** Try candidates in order; move on only after a recognised availability failure or an unusable answer. */
+  private async runChain(candidates: AutoCandidate[], spec: ChainSpec): Promise<unknown> {
+    const eligible = this.eligible(candidates, spec.capability);
+    if (!eligible.length) throw new Error(spec.emptyError);
 
     const attempts: AutoAttempt[] = [];
     let lastError: unknown;
-    for (const entry of candidates.slice(0, 2)) {
+    let fallback: { entry: (typeof eligible)[number]; output: unknown } | undefined;
+    for (const entry of eligible.slice(0, spec.maxProviders)) {
+      const base = { provider: entry.binding.provider, tool: entry.binding.exposed.name, candidateRank: entry.candidateRank };
       try {
         const output = await entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) });
-        attempts.push({
-          provider: entry.binding.provider,
-          tool: entry.binding.exposed.name,
-          candidateRank: entry.candidateRank,
-          outcome: "success",
-        });
+        if (isToolErrorResult(output)) {
+          throw new ToolResultError(textOfContent(bodyBlocks(output)).slice(0, 500), bodyBlocks(output));
+        }
+        if (spec.usable && !spec.usable(output)) {
+          attempts.push({ ...base, outcome: "empty" });
+          if (!fallback || bodyText(output).length > bodyText(fallback.output).length) fallback = { entry, output };
+          continue;
+        }
+        attempts.push({ ...base, outcome: "success" });
         return attachRouteMetadata(entry.binding, output, {
-          mode: "images",
+          ...spec.meta,
           candidateRank: entry.candidateRank,
           providerAttempt: attempts.length,
           attempts,
@@ -280,17 +324,89 @@ export class SearchToolkit {
       } catch (error) {
         lastError = error;
         const status = statusFromError(error);
-        attempts.push({
-          provider: entry.binding.provider,
-          tool: entry.binding.exposed.name,
-          candidateRank: entry.candidateRank,
-          outcome: "error",
-          ...(status ? { status } : {}),
-        });
-        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts, "search_images");
+        attempts.push({ ...base, outcome: "error", ...(status ? { status } : {}) });
+        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts, spec.tool);
       }
     }
-    throw autoFailure(lastError ?? new Error("No automatic image-search provider completed"), attempts, "search_images");
+    if (fallback) {
+      // Every reader answered thinly; return the fullest answer rather than an error.
+      return attachRouteMetadata(fallback.entry.binding, fallback.output, {
+        ...spec.meta,
+        candidateRank: fallback.entry.candidateRank,
+        providerAttempt: attempts.length,
+        attempts,
+      });
+    }
+    throw autoFailure(lastError ?? new Error(spec.emptyError), attempts, spec.tool);
+  }
+
+  /** Query two independent REST-backed indexes concurrently and merge by URL. Returns undefined when a pair is not available. */
+  private async crossCheck(candidates: AutoCandidate[], spec: ChainSpec, limit: number): Promise<unknown | undefined> {
+    const seen = new Set<string>();
+    const pair = this.eligible(candidates, spec.capability).filter((entry) => {
+      const provider = entry.binding.provider;
+      if (seen.has(provider) || this.config.providers[provider]?.integration.kind !== "rest") return false;
+      seen.add(provider);
+      return true;
+    }).slice(0, 2);
+    if (pair.length < 2) return undefined;
+
+    const settled = await Promise.allSettled(pair.map((entry) => entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) })));
+    const lists: Array<{ provider: string; items: MergedItem[] }> = [];
+    const routes: Array<Record<string, unknown>> = [];
+    const failed: string[] = [];
+    settled.forEach((outcome, index) => {
+      const entry = pair[index] as (typeof pair)[number];
+      const items = outcome.status === "fulfilled" ? itemsOf(outcome.value) : undefined;
+      if (!items) {
+        failed.push(entry.binding.provider);
+        return;
+      }
+      lists.push({ provider: entry.binding.provider, items: items as MergedItem[] });
+      routes.push({ provider: entry.binding.provider, tool: entry.binding.exposed.name, upstreamTool: entry.binding.upstreamName });
+    });
+    if (!lists.length) return undefined;
+
+    const merged = mergeItems(lists, limit);
+    const auto = {
+      ...spec.meta,
+      crossCheck: { routes, failed, corroborated: merged.filter((item) => item.foundBy.length > 1).length },
+    };
+    const route = routes[0] as Record<string, unknown>;
+    return {
+      content: [
+        { type: "text", text: JSON.stringify({ searchToolkitRoute: route, searchToolkitAuto: auto }) },
+        { type: "text", text: renderItems(merged) },
+      ],
+      structuredContent: { route, searchAuto: auto, result: { items: merged } },
+      _meta: { searchToolkit: { route, auto } },
+    };
+  }
+
+  private gatewayList(args: Record<string, unknown>): unknown {
+    const name = typeof args.name === "string" ? args.name : undefined;
+    if (name) {
+      const tool = this.fullTools.get(name);
+      if (!tool || MANAGEMENT_TOOL_NAMES.has(name)) throw new Error(`Unknown provider tool: ${name}`);
+      return result({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: tool.annotations });
+    }
+    const provider = typeof args.provider === "string" ? args.provider : undefined;
+    const rows = Array.from(this.bindings.values())
+      .filter((item) => !MANAGEMENT_TOOL_NAMES.has(item.exposed.name) && (!provider || item.provider === provider))
+      .map((item) => {
+        const full = this.fullTools.get(item.exposed.name) ?? item.exposed;
+        const kind = full.annotations?.readOnlyHint === true ? "read" : "action";
+        return `${item.exposed.name} [${kind}] ${firstSentence(full.description ?? "", 110)}`;
+      });
+    return { content: [{ type: "text", text: rows.length ? rows.join("\n") : "No provider tools match." }] };
+  }
+
+  private async gatewayCall(args: Record<string, unknown>): Promise<unknown> {
+    const name = String(args.name ?? "");
+    const target = this.bindings.get(name);
+    if (!target || MANAGEMENT_TOOL_NAMES.has(name)) throw new Error(`Unknown provider tool: ${name}`);
+    const inner = args.arguments && typeof args.arguments === "object" ? args.arguments as Record<string, unknown> : {};
+    return target.call(this.validateArguments(target.exposed, inner));
   }
 
   private async probe(args: Record<string, unknown>): Promise<unknown> {
@@ -319,12 +435,13 @@ export class SearchToolkit {
   }
 }
 
-function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
-  return { exposed: tool, provider: "search_toolkit", upstreamName: tool.name, call };
+function profileFromEnv(): ToolkitProfile | undefined {
+  const value = process.env.SEARCH_TOOLKIT_PROFILE;
+  return value === "full" || value === "lean" ? value : undefined;
 }
 
-function result(value: unknown): unknown {
-  return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
+function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
+  return { exposed: tool, provider: "search_toolkit", upstreamName: tool.name, call };
 }
 
 function compactRotation(rotation: ReturnType<RotationStore["status"]>): unknown {
@@ -347,61 +464,14 @@ function compactRotation(rotation: ReturnType<RotationStore["status"]>): unknown
   };
 }
 
-export function attachRouteMetadata(
-  binding: ToolBinding,
-  output: unknown,
-  auto?: Record<string, unknown>,
-): unknown {
-  const route = {
-    provider: binding.provider,
-    tool: binding.exposed.name,
-    upstreamTool: binding.upstreamName,
-  };
-  if (!output || typeof output !== "object") return result({ route, result: output });
-  const record = output as Record<string, unknown>;
-  const content = Array.isArray(record.content) ? record.content : [];
-  const resultContent = isRouteContentBlock(content[0]) ? content.slice(1) : content;
-  const meta = record._meta && typeof record._meta === "object"
-    ? record._meta as Record<string, unknown>
-    : {};
-  const searchToolkitMeta = meta.searchToolkit && typeof meta.searchToolkit === "object"
-    ? meta.searchToolkit as Record<string, unknown>
-    : {};
-  return {
-    ...record,
-    content: [{
-      type: "text",
-      text: JSON.stringify({ searchToolkitRoute: route, ...(auto ? { searchToolkitAuto: auto } : {}) }),
-    }, ...resultContent],
-    structuredContent: { route, ...(auto ? { searchAuto: auto } : {}), result: record.structuredContent ?? null },
-    _meta: { ...meta, searchToolkit: { ...searchToolkitMeta, route, ...(auto ? { auto } : {}) } },
-  };
-}
-
-function isRouteContentBlock(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const block = value as Record<string, unknown>;
-  if (block.type !== "text" || typeof block.text !== "string") return false;
-  try {
-    const parsed = JSON.parse(block.text) as Record<string, unknown>;
-    return Boolean(parsed.searchToolkitRoute && typeof parsed.searchToolkitRoute === "object");
-  } catch {
-    return false;
-  }
-}
-
 export function filterBindings(config: ProviderConfig, bindings: ToolBinding[]): ToolBinding[] {
   const allow = config.toolPolicy?.allow;
   const deny = new Set(config.toolPolicy?.deny ?? []);
-  return bindings.filter((binding) => {
-    const names = [binding.upstreamName, binding.exposed.name];
+  return bindings.filter((item) => {
+    const names = [item.upstreamName, item.exposed.name];
     const allowed = !allow || allow.includes("*") || names.some((name) => allow.includes(name));
     return allowed && !names.some((name) => deny.has(name));
   });
-}
-
-function cleanError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>").slice(0, 500);
 }
 
 function extractMeta(value: unknown): unknown {
@@ -426,105 +496,50 @@ function probeArguments(tool: Tool, query: string, limit: number): Record<string
   return args;
 }
 
-function autoMode(value: unknown): AutoMode {
-  return value === "exact" || value === "current" || value === "official" || value === "context"
-    ? value
-    : "general";
+function firstSentence(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const end = flat.search(/[.!?](?:\s|$)/);
+  const sentence = end > 0 ? flat.slice(0, end + 1) : flat;
+  return sentence.length > max ? `${sentence.slice(0, max - 1).trimEnd()}…` : sentence;
 }
 
-function autoFreshness(value: unknown): AutoFreshness {
-  return value === "day" || value === "month" || value === "year" ? value : "week";
+function bodyText(output: unknown): string {
+  return textOfContent(bodyBlocks(output));
 }
 
-export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown> = {}): AutoCandidate[] {
-  const query = String(args.query ?? "");
-  const limit = Number(args.limit ?? 6);
-  const parallelMode = quality === "max" ? "advanced" : "fast";
-  const tavilyDepth = quality === "max" ? "advanced" : "basic";
-  const braveTokens = typeof args.maximumNumberOfTokens === "number" ? args.maximumNumberOfTokens : 4096;
-  const freshness = autoFreshness(args.freshness);
-  const braveFreshness = { day: "pd", week: "pw", month: "pm", year: "py" }[freshness];
-  const serperFreshness = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" }[freshness];
-  const candidate = (
-    name: string,
-    limitKey: "limit" | "max_results" | "maxResults" | "numResults" | undefined,
-    nativeArguments: Record<string, unknown> = {},
-  ): AutoCandidate => ({
-    name,
-    nativeArguments: {
-      query,
-      ...(limitKey ? { [limitKey]: limit } : {}),
-      ...nativeArguments,
-    },
+function itemsOf(output: unknown): unknown[] | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const data = (output as { structuredContent?: { data?: { items?: unknown } } }).structuredContent?.data;
+  return Array.isArray(data?.items) ? data.items : undefined;
+}
+
+/** Cap the readable text of a result, keeping the route block and any non-text content. */
+export function truncateBody(output: unknown, maxChars: number): unknown {
+  if (!output || typeof output !== "object") return output;
+  const record = output as { content?: unknown };
+  if (!Array.isArray(record.content)) return output;
+  let remaining = maxChars;
+  let dropped = 0;
+  const content = record.content.map((block, index) => {
+    if (index === 0 && isRouteContentBlock(block)) return block;
+    const text = block && typeof block === "object" ? (block as { type?: string; text?: unknown }) : undefined;
+    if (text?.type !== "text" || typeof text.text !== "string") return block;
+    if (text.text.length <= remaining) {
+      remaining -= text.text.length;
+      return block;
+    }
+    dropped += text.text.length - remaining;
+    const kept = text.text.slice(0, Math.max(remaining, 0));
+    remaining = 0;
+    return { ...text, text: kept };
   });
-  switch (mode) {
-    case "exact":
-      return [
-        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
-        candidate("serper_search", "limit"),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, exact_match: true }),
-        candidate("brave_web_search", "limit"),
-      ];
-    case "context":
-      return quality === "max"
-        ? [
-            candidate("parallel_search", "maxResults", { mode: "advanced" }),
-            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
-            candidate("you_search", "limit", { contentLevel: "highlights" }),
-            candidate("tavily_tavily_search", "max_results", { search_depth: "advanced" }),
-          ]
-        : [
-            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
-            candidate("parallel_search", "maxResults", { mode: "basic" }),
-            candidate("you_search", "limit", { contentLevel: "highlights" }),
-            candidate("tavily_tavily_search", "max_results", { search_depth: "basic" }),
-          ];
-    case "current":
-      return [
-        candidate("brave_news_search", "limit", { freshness: braveFreshness }),
-        candidate("serper_news", "limit", { tbs: serperFreshness }),
-        candidate("you_search", "limit", { contentLevel: "snippets", freshness }),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, time_range: freshness }),
-      ];
-    case "official":
-      return [
-        candidate("serper_search", "limit"),
-        candidate("brave_web_search", "limit"),
-        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
-        candidate("you_search", "limit", { contentLevel: "snippets" }),
-      ];
-    default:
-      return [
-        candidate("parallel_search", "maxResults", { mode: parallelMode }),
-        candidate("you_search", "limit", { contentLevel: quality === "max" ? "highlights" : "snippets" }),
-        candidate("brave_web_search", "limit"),
-        candidate("exa_web_search_exa", "numResults"),
-        candidate("querit_search", "limit"),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
-      ];
-  }
-}
-
-export function imageCandidates(args: Record<string, unknown> = {}): AutoCandidate[] {
-  const query = String(args.query ?? "");
-  const limit = Number(args.limit ?? 10);
-  const language = typeof args.language === "string" && args.language ? args.language : undefined;
-  const safesearch = args.safesearch === "off" ? "off" : "strict";
-  return [
-    {
-      name: "brave_image_search",
-      nativeArguments: { query, limit, country: "ALL", ...(language ? { searchLang: language } : {}), safesearch },
-    },
-    {
-      name: "serper_images",
-      nativeArguments: { query, limit, ...(language ? { hl: language } : {}) },
-    },
-  ];
+  if (dropped > 0) content.push({ type: "text", text: `…[truncated: ${dropped} more characters; raise maxChars to read further]` });
+  return { ...(output as object), content };
 }
 
 function autoFailure(error: unknown, attempts: AutoAttempt[], toolName = "search_auto"): Error {
   const summary = attempts
-    .map((attempt) => `${attempt.provider}/${attempt.tool}[${attempt.status ?? "unknown"}]`)
+    .map((attempt) => `${attempt.provider}/${attempt.tool}[${attempt.status ?? attempt.outcome}]`)
     .join(" -> ");
   const wrapped = new Error(`${toolName} failed after ${summary || "no provider attempts"}: ${cleanError(error)}`);
   (wrapped as Error & { attempts: AutoAttempt[] }).attempts = attempts.map((attempt) => ({ ...attempt }));
