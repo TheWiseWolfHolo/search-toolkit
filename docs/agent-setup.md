@@ -9,7 +9,9 @@ npm install
 npm run build
 ```
 
-The Windows default is `%USERPROFILE%/.config/search-toolkit/providers.json`, deliberately outside `AppData/Local` so packaged apps and ordinary CLI processes resolve the same physical file. Pass `--config` explicitly in agent configuration for auditable cross-client setup.
+The Windows default config is `%USERPROFILE%/.config/search-toolkit/providers.json`, deliberately outside `AppData/Local` so packaged apps and ordinary CLI processes resolve the same physical file. Pass `--config` explicitly in agent configuration for an auditable cross-client setup.
+
+Add `--profile lean` to the server arguments for a client that loads every tool schema into every conversation (see the README's "Context cost"). The server then lists seven tools instead of about forty.
 
 ## Codex
 
@@ -54,4 +56,4 @@ Add an STDIO MCP server whose command is `node` and whose only argument is the a
 
 ## Agent Skill
 
-Copy `skills/search-toolkit/` into the agent's supported skill directory. The skill is deliberately provider-aware: it routes exact/code discovery to Exa, current agent research to Tavily, general search to Querit, official/concise lookup to Serper, independent web/news and LLM-ready grounding to Brave, unified Web/News highlights to You.com, semantic objective search to Parallel, sourced research to LinkUp, extraction to Firecrawl, and Doubao only on explicit request.
+Copy `skills/search-toolkit/` into the agent's supported skill directory. The skill routes ordinary lookup to `search_auto`, known URLs to `fetch_auto`, and images to `search_images`; it reaches for provider tools directly only when a specific capability is needed (Brave LLM Context, Firecrawl crawl and map, LinkUp research, AnySearch verticals, Grok X search). Doubao is used only on explicit request. When the MCP tools are not injected, the skill falls back to the `search-toolkit` CLI, so link it with `npm link` or call `node dist/src/cli.js` by absolute path.

@@ -4,71 +4,94 @@
     {
       "id": 1,
       "prompt": "查一下精确字符串 `search_auto_test_on_launch_v1` 最早出自哪个项目，给出 commit-pinned 代码链接并核验 fork/rename 关系。",
-      "expected_output": "Uses Exa exact/code discovery, cites commit-pinned code, resolves or explicitly reports repository-origin ambiguity, and exposes auditable route metadata.",
+      "expected_output": "Uses Exa exact/code discovery, cites commit-pinned code, and resolves or explicitly reports repository-origin ambiguity.",
       "files": [],
       "expectations": [
+        "Uses search_auto with mode exact, or an Exa tool directly.",
         "Provides a commit-pinned source URL containing the exact string.",
         "Checks repository identity or fork/rename ambiguity before naming the original project.",
-        "Reports route.provider as exa and an Exa route.tool from the tool result."
+        "Does not add a routing footer, because the user did not ask for one."
       ]
     },
     {
       "id": 2,
       "prompt": "查一下今天的新加坡 AI 创业新闻，最多给 5 条候选来源，不要使用豆包，也不要启动深度研究。",
-      "expected_output": "Uses compact general/current retrieval, returns at most five sources, avoids Doubao and deep research, and exposes route metadata.",
+      "expected_output": "Uses compact current-mode retrieval, returns at most five sources with their dates, and avoids Doubao and deep research.",
       "files": [],
       "expectations": [
+        "Uses search_auto with mode current, or a Brave/Serper news tool.",
         "Returns no more than five source URLs.",
-        "Does not use or cite Doubao and does not start deep research.",
-        "Reports route.provider and route.tool from the tool result."
+        "Does not use or cite Doubao and does not start deep research."
       ]
     },
     {
       "id": 3,
       "prompt": "直接读取 https://modelcontextprotocol.io/specification/2025-11-25/server/tools 并概括 ToolAnnotations；不要重新搜索这个已知 URL，也不要调用本机不存在的 Jina Reader 或 TinyFish Browser。",
-      "expected_output": "Fetches the known URL directly through an actually exposed fetch/scrape tool, summarizes ToolAnnotations, does not perform a redundant search or invent unavailable tools, and reports returned route provenance.",
+      "expected_output": "Fetches the known URL directly with fetch_auto, summarizes ToolAnnotations, and neither searches the URL nor invents unavailable tools.",
       "files": [],
       "expectations": [
         "Summarizes readOnlyHint and destructiveHint from the requested page.",
-        "Uses a direct fetch or scrape capability rather than a search query.",
-        "Does not claim to call Jina Reader or TinyFish Browser.",
-        "Reports route.provider and route.tool from direct-fetch provenance without being prompted to do so."
+        "Uses fetch_auto, or a direct fetch/scrape tool, rather than a search query.",
+        "Does not claim to call Jina Reader or TinyFish Browser."
       ]
     },
     {
       "id": 4,
       "prompt": "帮我研究一下为什么 AI Agent 的网页回答需要 grounding chunks，而不只是搜索摘要。我想让模型直接基于多来源正文回答，控制在约 4096 token；不要启动深度研究，也不要逐页抓取。",
-      "expected_output": "Uses Brave LLM Context for token-bounded multi-source grounding, avoids separate page fetches and deep research, and reports Brave route provenance.",
+      "expected_output": "Uses Brave LLM Context for token-bounded multi-source grounding and avoids separate page fetches and deep research.",
       "files": [],
       "expectations": [
-        "Uses brave_llm_context directly or search_auto context mode and reports the Brave route.",
-        "Sets the grounding budget to approximately 4096 tokens.",
+        "Uses brave_llm_context directly or search_auto in context mode.",
+        "Keeps the grounding budget at approximately 4096 tokens.",
         "Does not start deep research or separately fetch each result page.",
-        "Uses returned grounding and source metadata as evidence rather than treating snippets as a final generated answer."
+        "Uses the returned per-source grounding as evidence rather than treating snippets as a finished answer."
       ]
     },
     {
       "id": 5,
       "prompt": "快速查一下今天同一个主题的网页资料和新闻报道，希望一次调用拿到两类结果，并返回适合模型引用的相关段落；不要做深度研究。",
-      "expected_output": "Uses You.com unified Web/News search with query-aware highlights, avoids deep research, and reports route provenance.",
+      "expected_output": "Uses You.com unified Web/News search with query-aware highlights and avoids deep research.",
       "files": [],
       "expectations": [
-        "Uses you_search and reports the You.com route.",
+        "Uses you_search.",
         "Requests highlights only because query-aware passages were explicitly requested.",
-        "Uses both Web and News sections when both are returned.",
+        "Uses both Web and News results when both are returned.",
         "Does not start deep research or fetch every result separately."
       ]
     },
     {
       "id": 6,
       "prompt": "我要找一组适合 AI Agent 使用的网页检索服务，目标是比较近期官方能力、延迟取舍和给模型使用的正文片段。请把目标拆成 2 到 3 条短查询后一次检索，不要逐页抓取。",
-      "expected_output": "Uses Parallel Search with a semantic objective and concise search queries, consumes ranked excerpts, and reports route provenance.",
+      "expected_output": "Uses Parallel Search with a semantic objective and concise search queries and consumes the ranked excerpts.",
       "files": [],
       "expectations": [
-        "Uses parallel_search and reports the Parallel route.",
+        "Uses parallel_search.",
         "Supplies a self-contained objective plus 2-3 concise searchQueries.",
         "Uses returned excerpts before considering any page fetch.",
         "Does not start deep research or fetch every result separately."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "有人说某家公司本周宣布了重大收购。我要两个互相独立的检索来源来互相印证，别只信一个搜索引擎，也别做深度研究。",
+      "expected_output": "Runs one cross-checked current search across two independent indexes and reports which results were corroborated.",
+      "files": [],
+      "expectations": [
+        "Uses search_auto with crossCheck true and current mode, rather than two unrelated manual searches.",
+        "Distinguishes results found by both providers from results found by one.",
+        "Does not treat several reposts of one report as independent confirmation.",
+        "Does not start deep research."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "这个页面是重度 JavaScript 渲染的单页应用，普通抓取读不到正文：https://example.com/app 。请把正文读出来，最多 8000 字符。",
+      "expected_output": "Reads the known URL with fetch_auto at max quality and a character cap.",
+      "files": [],
+      "expectations": [
+        "Uses fetch_auto with quality max, or Firecrawl scrape directly.",
+        "Sets the character cap to about 8000.",
+        "Does not search for the URL it already has."
       ]
     }
   ]
