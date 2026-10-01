@@ -22,6 +22,8 @@
   },
   "files": [
     "dist/",
+    "!dist/tests/",
+    "!dist/scripts/",
     "skills/search-toolkit/",
     "config.example.json",
     "README.md",
@@ -29,8 +31,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "clean": "node -e \"import('node:fs').then((fs) => fs.rmSync('dist', { recursive: true, force: true }))\"",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "smoke:mcp": "npm run build && node dist/scripts/smoke-mcp.js",
     "measure": "npm run build && node dist/scripts/measure.js",
