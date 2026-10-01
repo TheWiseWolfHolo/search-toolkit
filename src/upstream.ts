@@ -26,6 +26,8 @@ export const DEFAULT_FIRECRAWL_TOOLS = [
 ] as const;
 
 const DISCOVERY_TIMEOUT_MS = 25_000;
+// Past this many keys, or after a timeout, another key will not help: the upstream itself is unreachable.
+const DISCOVERY_MAX_KEYS = 3;
 
 interface ClientEntry {
   client: Client;
@@ -34,6 +36,7 @@ interface ClientEntry {
 
 export class UpstreamMcpProvider {
   private readonly clients = new Map<string, Promise<ClientEntry>>();
+  private closed = false;
 
   constructor(
     readonly name: string,
@@ -58,6 +61,7 @@ export class UpstreamMcpProvider {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     const entries = await Promise.allSettled(this.clients.values());
     this.clients.clear();
     await Promise.allSettled(entries.flatMap((entry) => entry.status === "fulfilled" ? [entry.value.close()] : []));
@@ -70,7 +74,7 @@ export class UpstreamMcpProvider {
     const usable = this.rotation.usableSlots(this.name, keys);
     const order = usable.length ? usable : keys.map((_, slot) => slot);
     let lastError: unknown;
-    for (const slot of order) {
+    for (const slot of order.slice(0, DISCOVERY_MAX_KEYS)) {
       const key = keys[slot] as string;
       const selection = selectionFor(this.name, slot, key);
       try {
@@ -83,6 +87,7 @@ export class UpstreamMcpProvider {
         if (status === 401 || status === 402 || status === 403 || status === 429) {
           this.rotation.record(selection, { ok: false, latencyMs: 0, httpStatus: status });
         }
+        if (error instanceof Error && /timed out after/.test(error.message)) break;
       }
     }
     throw lastError;
@@ -136,6 +141,7 @@ export class UpstreamMcpProvider {
   }
 
   private clientFor(selection: KeySelection): Promise<ClientEntry> {
+    if (this.closed) return Promise.reject(new Error(`${this.name} upstream is closed`));
     let pending = this.clients.get(selection.fingerprint);
     if (!pending) {
       const created = this.createClient(selection).then((entry) => {
@@ -194,6 +200,8 @@ export class UpstreamMcpProvider {
         stderr: "pipe",
       });
       await client.connect(transport);
+      // Nothing reads the child's stderr; drain it so a chatty server cannot fill the pipe and stall.
+      transport.stderr?.on("data", () => undefined);
       return { client, close: async () => transport.close() };
     }
     throw new Error(`${this.name} is not an MCP integration`);
