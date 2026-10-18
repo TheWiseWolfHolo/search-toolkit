@@ -3,28 +3,42 @@ import type { ProviderConfig } from "../../types.js";
 import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import { arrayArg, collectCitations, extractResponseText, numberArg, stringArg } from "../normalize.js";
 
-const DEFAULT_MODEL = "grok-4.6";
+const DEFAULT_MODEL = "grok-4.7";
 
 export class GrokAdapter implements RestAdapter {
   tools(): Tool[] {
     const common = {
       maxTurns: { type: "integer", minimum: 1, maximum: 20, default: 3 },
     };
+    const webProps = {
+      allowedDomains: { type: "array", maxItems: 5, items: { type: "string" } },
+      excludedDomains: { type: "array", maxItems: 5, items: { type: "string" } },
+      enableImageSearch: { type: "boolean", default: false },
+      enableImageUnderstanding: { type: "boolean", default: false, description: "Allow Grok to inspect images encountered during search" },
+      userLocationCountry: { type: "string", minLength: 2, maxLength: 2, description: "ISO alpha-2 country code for localized web search" },
+    };
+    const xProps = {
+      allowedXHandles: { type: "array", maxItems: 20, items: { type: "string" } },
+      excludedXHandles: { type: "array", maxItems: 20, items: { type: "string" } },
+      fromDate: { type: "string", format: "date" },
+      toDate: { type: "string", format: "date" },
+      enableImageUnderstanding: { type: "boolean", default: false, description: "Allow Grok to inspect images in X posts" },
+      enableVideoUnderstanding: { type: "boolean", default: false, description: "Allow Grok to inspect videos in X posts" },
+    };
     return [
       searchTool("grok_web_search", "Grok Web Search", "Use the configured Grok model with xAI's native web_search tool and citations.", {
         ...common,
-        allowedDomains: { type: "array", items: { type: "string" } },
-        excludedDomains: { type: "array", items: { type: "string" } },
-        enableImageSearch: { type: "boolean", default: false },
+        ...webProps,
       }),
       searchTool("grok_x_search", "Grok X Search", "Use the configured Grok model with xAI's native x_search tool for posts, users, and threads.", {
         ...common,
-        allowedXHandles: { type: "array", items: { type: "string" } },
-        excludedXHandles: { type: "array", items: { type: "string" } },
-        fromDate: { type: "string", format: "date" },
-        toDate: { type: "string", format: "date" },
+        ...xProps,
       }),
-      searchTool("grok_web_x_search", "Grok Web + X Search", "Use both xAI native web_search and x_search in one Responses API request.", common),
+      searchTool("grok_web_x_search", "Grok Web + X Search", "Use both xAI native web_search and x_search in one Responses API request.", {
+        ...common,
+        ...webProps,
+        ...xProps,
+      }),
     ];
   }
 
@@ -37,8 +51,11 @@ export class GrokAdapter implements RestAdapter {
       const allowed = arrayArg(args, "allowedDomains");
       const excluded = arrayArg(args, "excludedDomains");
       if (allowed.length) web.allowed_domains = allowed;
-      if (excluded.length) web.excluded_domains = excluded;
+      else if (excluded.length) web.excluded_domains = excluded;
       if (args.enableImageSearch === true) web.enable_image_search = true;
+      if (args.enableImageUnderstanding === true) web.enable_image_understanding = true;
+      const country = stringArg(args, "userLocationCountry");
+      if (country) web.user_location = { country: country.toUpperCase() };
       tools.push(web);
     }
     if (tool !== "grok_web_search") {
@@ -46,9 +63,11 @@ export class GrokAdapter implements RestAdapter {
       const allowed = arrayArg(args, "allowedXHandles");
       const excluded = arrayArg(args, "excludedXHandles");
       if (allowed.length) x.allowed_x_handles = allowed;
-      if (excluded.length) x.excluded_x_handles = excluded;
+      else if (excluded.length) x.excluded_x_handles = excluded;
       if (stringArg(args, "fromDate")) x.from_date = stringArg(args, "fromDate");
       if (stringArg(args, "toDate")) x.to_date = stringArg(args, "toDate");
+      if (args.enableImageUnderstanding === true) x.enable_image_understanding = true;
+      if (args.enableVideoUnderstanding === true) x.enable_video_understanding = true;
       tools.push(x);
     }
     const systemPrompt = typeof options.systemPrompt === "string" ? options.systemPrompt.trim() : "";

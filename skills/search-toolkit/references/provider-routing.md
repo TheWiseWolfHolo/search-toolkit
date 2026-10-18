@@ -21,9 +21,9 @@ Every result starts with a JSON block, `{"searchToolkitRoute": {...}, "searchToo
 ## CLI
 
 ```text
-search-toolkit search "<query>" [--mode general|exact|current|official|context] [--quality max] [--limit 6] [--freshness week] [--cross]
-search-toolkit fetch <url> [--quality max] [--max-chars 12000]
-search-toolkit tools [--json]        # names; --json for schemas
+search-toolkit search "<query>" [--mode general|exact|current|official|context] [--quality max] [--limit 6] [--freshness week] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars 700] [--cross]
+search-toolkit fetch <url...> [--quality max] [--max-chars 12000] [--offset 0] [--section "Heading"]
+search-toolkit tools [--profile full|curated|lean] [--json]
 search-toolkit call <tool> '<json-arguments>' [--json]
 search-toolkit status [--verbose]
 ```
@@ -36,16 +36,16 @@ Before saying a string "originates from" a project (出自), inspect the matched
 
 ## Which providers automatic routing may use
 
-A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only when its config lists the matching capability in `auto` (`search`, `images`, `fetch`). A provider with an empty `auto` list, such as Doubao, LinkUp, AnySearch, Grok, Jina, and TinyFish in the reference setup, is reachable only by calling its tools directly.
+A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only when its config lists the matching capability in `auto` (`search`, `images`, `fetch`). Providers with currently usable key slots are ordered ahead of providers whose entire key pool is in cooldown. A provider with an empty `auto` list, such as Doubao, LinkUp, AnySearch, Grok, Jina, and TinyFish in the reference setup, is reachable only by calling its tools directly.
 
 ## Automatic routing
 
-Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and one more is tried after an availability failure.
+Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and one more is tried after an availability failure. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave and Serper).
 
 - General: Parallel Fast → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
 - Exact: Exa Search → Serper → Tavily exact/basic → Brave Web.
 - Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
-- Current: Brave News → Serper News → You snippets → Tavily Search. `freshness` (default `week`) maps to Brave `pw`, Serper `qdr:w`, You.com `week`, Tavily `week`; callers can select day, month, or year. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`.
+- Current: Brave News → Serper News → You snippets → Tavily Search. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com `day/week/month/year`, Querit `d/w/m/y`, and Tavily `day/week/month/year`. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`.
 - Official navigation: Serper → Brave Web → Exa Search → You snippets.
 
 Max quality uses Parallel Advanced for General and Context, Exa Advanced for Exact and Official, You.com highlights in General, and Tavily Advanced wherever Tavily appears. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
@@ -54,15 +54,15 @@ An availability failure that allows a second provider is: HTTP 401/402, an authe
 
 ### Cross-checking
 
-`crossCheck: true` runs the first two eligible REST-backed providers of the mode's candidate list concurrently, de-duplicates by canonical URL (scheme, `www`, fragments, trailing slashes, and tracking parameters ignored), and returns corroborated URLs first, then the rest interleaved by rank. Each result lists which providers found it. If one provider fails, the other's results are returned and `searchToolkitAuto.crossCheck.failed` names the failure. It is ignored in context mode, whose results are chunks rather than items, and falls back to a normal search when fewer than two REST providers are eligible.
+`crossCheck: true` runs the first two eligible search providers of the mode's candidate list concurrently (across both REST adapters and normalized MCP upstreams such as Exa and Tavily), de-duplicates by canonical URL (scheme, `www`, fragments, trailing slashes, `.md`/`.html` doc suffixes, and tracking parameters ignored), and returns corroborated URLs first, then the rest interleaved by rank. Each result lists which providers found it. If one provider fails, the other's results are returned and `searchToolkitAuto.crossCheck.failed` names the failure. It is ignored in context mode, whose results are chunks rather than items.
 
 ### Known-URL fetch
 
-`fetch_auto` chain: Exa Fetch → Tavily Extract → Firecrawl Scrape → LinkUp Fetch → AnySearch Extract, subject to which providers list `fetch` in `auto`. With `quality: max` Firecrawl leads (JavaScript rendering), Tavily uses advanced extraction, and LinkUp renders JavaScript. A reader that answers with fewer than 80 characters is treated as empty and the next is tried, up to three providers; if none is substantial the fullest answer is returned. `maxChars` (default 12000) caps the text, with a marker stating how much was dropped.
+`fetch_auto` chain: Exa Fetch → Tavily Extract → Parallel Extract → You.com Contents → Firecrawl Scrape → LinkUp Fetch → AnySearch Extract, subject to which providers list `fetch` in `auto`. Pass `url` for a single page or `urls` for up to 5 pages fetched concurrently. With `quality: max` Firecrawl leads (JavaScript rendering), Tavily uses advanced extraction, Parallel Extract returns full page content, and LinkUp renders JavaScript. A reader that answers with fewer than 80 characters or returns an anti-bot/Cloudflare challenge shell is treated as unusable and the next is tried, up to three providers; if none is substantial the fullest answer is returned. `maxChars` (default 12000) caps the text, `offset` continues from a character offset, and `section` extracts a specific Markdown heading section.
 
 ### Image discovery
 
-`search_images` prefers Brave's independent image index and falls back to Serper's Google Images results only after an availability failure. Country hints are ignored so a narrow regional request cannot displace the stronger primary index; use `brave_image_search` or `serper_images` directly when country targeting or the index itself is the requirement. Tavily images remain available through direct Tavily Search but are not part of the automatic chain because their shape is not a normalized image result. Preserve original image URLs separately from source-page URLs and thumbnails.
+`search_images` prefers Brave's independent image index, then Parallel Image Search, and falls back to Serper's Google Images results only after an availability failure. Country hints are ignored so a narrow regional request cannot displace the stronger primary index; use `brave_image_search`, `parallel_image_search`, or `serper_images` directly when country targeting or the index itself is the requirement. Tavily images remain available through direct Tavily Search but are not part of the automatic chain because their shape is not a normalized image result. Preserve original image URLs separately from source-page URLs and thumbnails.
 
 None of these tools performs reverse image search. An uploaded image can reach a reverse-image provider only if the client exposes an attachment URL or passes supported image bytes to a tool. Captioning the upload and then running text-to-image search is a useful fallback, but it must not be described as visual matching or source tracing.
 
@@ -74,25 +74,27 @@ Compact factual lookup and source discovery. It stays in the general automatic p
 
 ### Exa — precision and long-tail discovery
 
-Exact error messages, identifiers, configuration keys, code strings, obscure repositories, implementation examples, semantic discovery, specialist people, companies and papers. Prefer bounded highlights or context. Use advanced search only for filters, categories, dates, domains, or deeper structured retrieval. Exa Fetch reads pages Exa discovered.
+Exact error messages, identifiers, configuration keys, code strings, obscure repositories, implementation examples, semantic discovery, specialist people, companies and papers. Prefer bounded highlights or context. Use advanced search only for filters, dates, domains, or deeper structured retrieval. Exa Fetch reads pages Exa discovered.
 
 ### Brave — independent grounding
 
-Brave Web for structured independent-index results, Brave News for current or breaking news. Prefer Brave when a consequential claim needs a second retrieval perspective.
+Brave Web for structured independent-index results, Brave News for current or breaking news (`extraSnippets: true` returns up to 5 extra excerpts per result; `goggles` applies custom ranking; `offset` paginates). Prefer Brave when a consequential claim needs a second retrieval perspective.
 
 Brave LLM Context returns pre-extracted text, tables, code, or discussion chunks from several results without a separate fetch. It is controlled by URL, token, per-URL, snippet, freshness, threshold, Goggles, and optional local-recall parameters. Direct calls and `search_auto` requests routed to Brave send 4096 tokens by default; raise `maximumNumberOfTokens` only when the task justifies it. Parallel and You.com fallbacks use their own controls, so that parameter does not apply to them. It returns grounding per source, not a generated answer. Keep URL discovery on Brave Web, known-URL reading on a fetch tool, and multi-step synthesis on Tavily or LinkUp research.
 
-### You.com — unified Web and News with query-aware highlights
+### You.com — unified Web, News, live knowledge cards, and URL extraction
 
-Use when one query should return both Web and News sections, or when query-aware highlights can replace a fetch pass. Keep `contentLevel: snippets` for ordinary discovery; choose `highlights` explicitly for citation chunks or RAG-style grounding, since extraction adds latency and provider charges. The adapter deliberately has no full-page mode.
+Use `you_search` when one query should return both Web and News sections, when `knowledge: true` can attach live licensed data cards (stock/crypto quotes, weather, sports scores, economic indicators) at zero extra cost, or when query-aware highlights (`contentLevel: highlights`, `highlightsMaxTokens`) or full-page Markdown (`contentLevel: full_page`) can replace a separate fetch pass. Keep `contentLevel: snippets` for ordinary discovery; pass `strictOperators: true` when boolean/filetype/site operators must be strictly enforced. Use `you_contents` to extract clean Markdown, HTML, or metadata from 1 to 10 known URLs directly.
 
-### Parallel — semantic objectives and dense excerpts
+### Parallel — semantic objectives, batch URL extraction, and semantic image search
 
-For broad or ambiguous goals where the agent can state what evidence it wants. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts for model context. `fast` suits most interactive retrieval, `basic` returns extended excerpts, `advanced` targets complex multi-hop work, and `turbo` minimises latency for English or Japanese only. Turbo and fast share the lower price tier, basic and advanced the higher one. Parallel documents broad multilingual coverage only for basic and advanced, although `fast` returned useful Chinese results in a live check. Leave `advanced_settings` unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
+For broad or ambiguous goals where the agent can state what evidence it wants. Supply a self-contained objective in `query` and preferably 1-3 short `searchQueries`; Parallel ranks URLs and returns compressed excerpts for model context (`afterDate` filters by publication date `YYYY-MM-DD`). `fast` suits most interactive retrieval, `basic` returns extended excerpts, `advanced` targets complex multi-hop work, and `turbo` minimises latency for English or Japanese only. Turbo and fast share the lower price tier, basic and advanced the higher one. Leave `advanced_settings` unset unless freshness, domains, location, result count, or excerpt size is genuinely constrained, because restrictive settings may reduce quality.
 
-### Serper — concise Google-style SERP
+Use `parallel_extract` to extract query-focused excerpts or full Markdown content from 1 to 20 URLs with an optional `objective` and `searchQueries`. Use `parallel_image_search` (`fast` or `advanced`) for natural-language image discovery with image dimensions and source page metadata.
 
-Locate official sites, known pages, or a small ranked result set. It is not a page reader, crawler, research engine, or browser.
+### Serper — concise Google-style SERP and Google Scholar
+
+Locate official sites, known pages, or a small ranked result set (`serper_search`, `serper_news`, `serper_images`), or search academic papers with publication info, year, and citation counts via `serper_scholar`. It is not a page reader, crawler, research engine, or browser.
 
 ### Tavily — managed web workflow
 
@@ -122,17 +124,17 @@ Use only when their compact search perspective is useful. Jina Reader and TinyFi
 
 Only when the user explicitly requests it or approves consuming its limited quota. Never selected automatically or as a silent fallback.
 
-### Grok / xAI — X-native retrieval
+### Grok / xAI — X-native and multimodal retrieval
 
-When X posts, users, threads, reactions, or X-native breaking signals are central. Corroborate important claims with normal web providers. Do not use it as generic search when X is irrelevant. The configured `systemPrompt` is sent as the request's instructions.
+When X posts, users, threads, reactions, or X-native breaking signals are central (`grok_x_search`, `grok_web_x_search`). Supports `enableImageUnderstanding` (Web & X), `enableVideoUnderstanding` (X), and `userLocationCountry` (Web). Corroborate important claims with normal web providers. Do not use it as generic search when X is irrelevant. The configured `systemPrompt` is sent as the request's instructions.
 
 ## Key health
 
-Keys are tracked by fingerprint, so reordering a pool does not move their history. Authentication failures bench a key for 1 hour, then 6, then 24; quota failures for 30 minutes, then 6 hours, then 24; rate limits for 1, 5, then 15 minutes, or for the provider's `Retry-After`. A success clears the strikes. Server errors and a tool's own errors never bench a key. When every key in a pool is benched the call fails with the time until the first recovers.
+Keys are tracked by fingerprint, so reordering a pool does not move their history. Authentication failures bench a key for 1 hour, then 6, then 24; quota failures for 30 minutes, then 6 hours, then 24; rate limits for 1, 5, then 15 minutes, or for the provider's `Retry-After`. A success clears the strikes. Server errors and a tool's own errors never bench a key; retryable faults try up to 3 healthy keys in the pool before failing. When every key in a pool is benched the call fails with the time until the first recovers.
 
 ## Profiles and context cost
 
-The `full` profile exposes every provider tool; descriptions are trimmed to a configurable length (default 700 characters, 220 per parameter) while input schemas stay intact, and `toolPolicy.descriptions` replaces a tool's text outright. The `lean` profile exposes only the unified tools and `provider_tools`/`provider_call`, which cuts the tool list by more than 90%; use it for clients that load every tool schema into every conversation.
+The `full` profile exposes every provider tool; descriptions are trimmed to a configurable length (default 700 characters, 220 per parameter) while input schemas stay intact, and `toolPolicy.descriptions` replaces a tool's text outright. The `curated` profile keeps the unified tools, the `provider_tools`/`provider_call` gateway, and specialist tools (`exa_web_search_advanced_exa`, `brave_llm_context`, `parallel_extract`, `you_contents`, `serper_scholar`, `firecrawl_*`, `tavily_tavily_research`, `linkup_linkup_research`, `grok_*`, `doubao_search`, `anysearch_batch_search`) while hiding redundant basic search tools. The `lean` profile exposes only the unified tools and `provider_tools`/`provider_call`, which cuts the tool list by more than 80%; use it for clients that load every tool schema into every conversation.
 
 ## Research and verification
 

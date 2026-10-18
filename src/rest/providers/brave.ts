@@ -13,6 +13,15 @@ export class BraveAdapter implements RestAdapter {
         searchLang: { type: "string" },
         freshness: { type: "string" },
         safesearch: { type: "string", enum: ["off", "moderate", "strict"] },
+        extraSnippets: { type: "boolean", description: "Return up to 5 extra text excerpts per result" },
+        offset: { type: "integer", minimum: 0, maximum: 9, description: "Pagination offset (0-9)" },
+        goggles: {
+          oneOf: [
+            { type: "string" },
+            { type: "array", minItems: 1, maxItems: 3, items: { type: "string" } },
+          ],
+          description: "Custom ranking Goggle URL(s)",
+        },
       },
     ));
     const context: Tool = {
@@ -91,6 +100,14 @@ export class BraveAdapter implements RestAdapter {
     url.searchParams.set("count", String(numberArg(args, "limit", 6)));
     for (const [source, target] of [["country", "country"], ["searchLang", "search_lang"], ["freshness", "freshness"], ["safesearch", "safesearch"]] as const) {
       if (stringArg(args, source)) url.searchParams.set(target, stringArg(args, source));
+    }
+    if (typeof args.extraSnippets === "boolean") url.searchParams.set("extra_snippets", String(args.extraSnippets));
+    if (typeof args.offset === "number") url.searchParams.set("offset", String(args.offset));
+    if (typeof args.goggles === "string" && args.goggles) url.searchParams.set("goggles", args.goggles);
+    else if (Array.isArray(args.goggles)) {
+      for (const goggle of args.goggles) {
+        if (typeof goggle === "string" && goggle) url.searchParams.append("goggles", goggle);
+      }
     }
     const data = await requestJson(url.toString(), {
       headers: { Accept: "application/json", "X-Subscription-Token": key },

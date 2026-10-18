@@ -43,7 +43,7 @@ export interface ProviderConfig {
   options?: Record<string, unknown>;
 }
 
-export type ToolkitProfile = "full" | "lean";
+export type ToolkitProfile = "full" | "curated" | "lean";
 
 export interface ShapingConfig {
   /** Longest exposed tool description; 0 keeps upstream text untouched. */

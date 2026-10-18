@@ -159,12 +159,74 @@ test("automatic route profiles keep their intentional provider order", () => {
     time_range: "month",
   });
   assert.equal(autoCandidates("official", "balanced", request)[0]?.name, "serper_search");
+  assert.equal(autoCandidates("official", "max", request)[1]?.nativeArguments?.extraSnippets, true);
   assert.equal(autoCandidates("official", "max", request)[2]?.name, "exa_web_search_advanced_exa");
   assert.deepEqual(imageCandidates({ query: "route contract", limit: 9 }).map((item) => item.name), [
-    "brave_image_search", "serper_images",
+    "brave_image_search", "serper_images", "parallel_image_search",
   ]);
   assert.deepEqual(imageCandidates({ query: "route contract", limit: 9 })[0]?.nativeArguments, {
     query: "route contract", limit: 9, country: "ALL", safesearch: "strict",
   });
   assert.deepEqual(imageCandidates({ query: "route contract", country: "SG" }), imageCandidates({ query: "route contract" }));
 });
+
+test("autoCandidates translates domain filters, freshness, and maxCharsPerResult across providers", () => {
+  const filtered = autoCandidates("general", "balanced", {
+    query: "mcp transport",
+    limit: 5,
+    freshness: "month",
+    includeDomains: ["modelcontextprotocol.io", "https://github.com/modelcontextprotocol"],
+    excludeDomains: ["reddit.com"],
+    maxCharsPerResult: 900,
+  });
+  const byName = new Map(filtered.map((item) => [item.name, item.nativeArguments]));
+  assert.deepEqual(byName.get("parallel_search"), {
+    query: "mcp transport",
+    maxResults: 5,
+    mode: "fast",
+    maxAgeSeconds: 2592000,
+    maxCharsPerResult: 900,
+    includeDomains: ["modelcontextprotocol.io", "github.com"],
+    excludeDomains: ["reddit.com"],
+  });
+  assert.deepEqual(byName.get("exa_web_search_exa"), {
+    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com) -site:reddit.com",
+    numResults: 5,
+  });
+  assert.deepEqual(byName.get("brave_web_search"), {
+    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com) -site:reddit.com",
+    limit: 5,
+    freshness: "pm",
+  });
+  assert.deepEqual(byName.get("querit_search"), {
+    query: "mcp transport",
+    limit: 5,
+    sitesInclude: ["modelcontextprotocol.io", "github.com"],
+    sitesExclude: ["reddit.com"],
+    timeRange: "month",
+  });
+  assert.deepEqual(byName.get("tavily_tavily_search"), {
+    query: "mcp transport",
+    max_results: 5,
+    search_depth: "basic",
+    include_domains: ["modelcontextprotocol.io", "github.com"],
+    exclude_domains: ["reddit.com"],
+    time_range: "month",
+  });
+
+  const exactMax = autoCandidates("exact", "max", {
+    query: "StreamableHTTPServerTransport",
+    limit: 4,
+    includeDomains: ["modelcontextprotocol.io"],
+    excludeDomains: ["legacy.example.com"],
+    maxCharsPerResult: 1200,
+  });
+  assert.deepEqual(exactMax[0]?.nativeArguments, {
+    query: "StreamableHTTPServerTransport",
+    numResults: 4,
+    includeDomains: ["modelcontextprotocol.io"],
+    excludeDomains: ["legacy.example.com"],
+    contextMaxCharacters: 4800,
+  });
+});
+

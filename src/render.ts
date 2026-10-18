@@ -1,14 +1,22 @@
+import { dedupeItems } from "./merge.js";
 import { objectRecord, stringValue } from "./rest/normalize.js";
+import { trimText } from "./shape.js";
+import type { SearchItem } from "./types.js";
+
+export interface RenderOptions {
+  maxCharsPerItem?: number;
+  dedupe?: boolean;
+}
 
 /**
  * Turn a normalized provider payload into compact text for the model. The full
  * payload stays in structuredContent; this is only what the model reads, so it
  * avoids JSON escaping, repeated metadata, and fields the model cannot use.
  */
-export function renderPayload(payload: unknown): string {
+export function renderPayload(payload: unknown, options: RenderOptions = {}): string {
   const record = objectRecord(payload);
   const parts: string[] = [];
-  if (Array.isArray(record.items)) parts.push(renderItems(record.items));
+  if (Array.isArray(record.items)) parts.push(renderItems(record.items, options));
   else if (record.grounding && typeof record.grounding === "object") parts.push(renderGrounding(record));
   else if (typeof record.text === "string") parts.push(renderAnswer(record));
   else return JSON.stringify(payload);
@@ -17,9 +25,11 @@ export function renderPayload(payload: unknown): string {
   return parts.filter(Boolean).join("\n\n");
 }
 
-export function renderItems(items: unknown[]): string {
-  if (!items.length) return "No results.";
-  return items.map((value, index) => {
+export function renderItems(items: unknown[], options: RenderOptions = {}): string {
+  const list = options.dedupe === false ? items : dedupeItems(items as SearchItem[]);
+  if (!list.length) return "No results.";
+  const maxChars = options.maxCharsPerItem && options.maxCharsPerItem > 0 ? options.maxCharsPerItem : 0;
+  return list.map((value, index) => {
     const item = objectRecord(value);
     const title = String(item.title ?? "").trim() || String(item.url ?? "").trim() || "(untitled)";
     const date = stringValue(item.date);
@@ -39,7 +49,8 @@ export function renderItems(items: unknown[]): string {
     const url = stringValue(item.url);
     if (url && url !== title) lines.push(`   ${url}`);
     if (Array.isArray(item.foundBy) && item.foundBy.length) lines.push(`   found by: ${item.foundBy.join(", ")}`);
-    const text = stringValue(item.text)?.trim();
+    const rawText = stringValue(item.text)?.trim();
+    const text = rawText && maxChars > 0 ? trimText(rawText, maxChars) : rawText;
     if (text) lines.push(indent(text));
     return lines.join("\n");
   }).join("\n");

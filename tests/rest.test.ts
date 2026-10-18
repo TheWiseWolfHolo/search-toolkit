@@ -123,3 +123,57 @@ test("image adapters preserve image URLs, dimensions, and source pages", async (
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Serper Scholar, Brave extraSnippets, and Grok Web+X pass native provider features", async () => {
+  const originalFetch = globalThis.fetch;
+  let lastUrl = "";
+  let lastBody: Record<string, unknown> = {};
+  globalThis.fetch = async (input, init) => {
+    lastUrl = String(input);
+    lastBody = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (lastUrl.includes("google.serper.dev/scholar")) {
+      return new Response(JSON.stringify({
+        organic: [{
+          title: "Attention Is All You Need",
+          link: "https://arxiv.org/abs/1706.03762",
+          publicationInfo: "A Vaswani - Advances in neural information processing systems, 2017",
+          year: 2017,
+          citedBy: 120000,
+          snippet: "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks.",
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      web: {
+        results: [{
+          title: "Brave Result",
+          url: "https://example.com/brave",
+          description: "Main snippet.",
+          extra_snippets: ["Extra snippet one.", "Extra snippet two."],
+        }],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const scholar = await new SerperAdapter().call("serper_scholar", {
+      query: "transformer attention",
+      limit: 1,
+      page: 2,
+    }, "key") as { items: Array<Record<string, unknown>> };
+    assert.equal(lastUrl, "https://google.serper.dev/scholar");
+    assert.equal(lastBody.page, 2);
+    assert.equal(scholar.items[0]?.date, "2017");
+    assert.match(String(scholar.items[0]?.text), /Cited by 120000/);
+
+    const brave = await new BraveAdapter().call("brave_web_search", {
+      query: "extra snippets test",
+      extraSnippets: true,
+      offset: 1,
+    }, "key") as { items: Array<Record<string, unknown>> };
+    assert.match(lastUrl, /extra_snippets=true/);
+    assert.match(lastUrl, /offset=1/);
+    assert.match(String(brave.items[0]?.text), /Main snippet\.\nExtra snippet one\.\nExtra snippet two\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

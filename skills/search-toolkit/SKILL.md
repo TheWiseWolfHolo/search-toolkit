@@ -11,18 +11,18 @@ Pick by capability fit and retrieval quality; respect known quota and cost limit
 
 1. Search once, about 5-8 results.
 2. Judge titles, URLs, dates, snippets, and whether the sources are independent.
-3. Read only the pages the answer needs. Use `fetch_auto` for a URL you already have; never search for it.
+3. Read only the pages the answer needs. Use `fetch_auto` for a URL (or up to 5 `urls`) you already have, and pass `section` or `offset` when reading specific headings or paging through long documents; never search for a URL you already have.
 4. Escalate to deep research only for multi-step synthesis, gap analysis, or exhaustive comparison, and to browser automation only when the task needs interaction.
 
 ## Interface
 
-Prefer the native MCP tools: `search_auto` (web), `search_images`, `fetch_auto`, and `search_pool_status`, plus provider tools such as `brave_llm_context` or `firecrawl_crawl` when their specific capability is needed. A `lean` server lists only the unified tools and a gateway: `provider_tools` lists provider tools or returns one's schema, and `provider_call` runs it.
+Prefer the native MCP tools: `search_auto` (web), `search_images`, `fetch_auto`, and `search_pool_status`, plus provider tools such as `brave_llm_context`, `parallel_extract`, `you_contents`, `serper_scholar`, or `firecrawl_crawl` when their specific capability is needed. A `curated` server exposes the unified tools, specialist tools, and a gateway; a `lean` server lists only the unified tools and the gateway: `provider_tools` lists provider tools or returns one's schema, and `provider_call` runs it.
 
-Without MCP, use the `search-toolkit` CLI on the same backend: `search-toolkit search "<query>" [--mode ...] [--quality max] [--cross]`, `search-toolkit fetch <url>`, `search-toolkit call <tool> '<json>'`. If neither interface exists or has the capability, say so and use an available same-capability route; a permission denial is not unavailability. Never open the provider config, pass raw keys, invent tools, or imply a different provider was used.
+Without MCP, use the `search-toolkit` CLI on the same backend: `search-toolkit search "<query>" [--mode ...] [--quality max] [--domains a,b] [--cross]`, `search-toolkit fetch <url...> [--section heading] [--offset n]`, `search-toolkit call <tool> '<json>'`. If neither interface exists or has the capability, say so and use an available same-capability route; a permission denial is not unavailability. Never open the provider config, pass raw keys, invent tools, or imply a different provider was used.
 
 ## Routing rules
 
-- Start with `search_auto`. Use `quality: max` when the question is broad, ambiguous, multi-aspect, or high-value; `mode: exact` for exact strings and code, `current` (with `freshness`) for news, `context` for grounding chunks within a token budget, `official` for official sites.
+- Start with `search_auto`. Use `quality: max` when the question is broad, ambiguous, multi-aspect, or high-value; `mode: exact` for exact strings and code, `current` for news, `context` for grounding chunks within a token budget, `official` for official sites. Pass `includeDomains`, `excludeDomains`, `freshness`, or `maxCharsPerResult` directly on `search_auto` when needed.
 - A claim that matters needs an independent second path: `crossCheck: true`, or Brave. Reposts of one report count as one source.
 - `search_auto` stops at the first provider that answers, so it will not give you a second opinion unless you ask for `crossCheck`.
 - Code that is local or was just pushed: use `rg` or `gh search code`; web indexes lag.

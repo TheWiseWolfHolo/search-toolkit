@@ -91,13 +91,13 @@
     },
     "you": {
       "enabled": true,
-      "auto": ["search"],
+      "auto": ["search", "fetch"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "you" }
     },
     "parallel": {
       "enabled": true,
-      "auto": ["search"],
+      "auto": ["search", "images", "fetch"],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "parallel" }
     },
@@ -111,7 +111,7 @@
         "baseUrl": "https://api.x.ai/v1/responses"
       },
       "options": {
-        "model": "grok-4.6",
+        "model": "grok-4.7",
         "reasoningEffort": "low",
         "systemPrompt": "Search the web and answer concisely with citations."
       }

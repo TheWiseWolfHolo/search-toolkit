@@ -87,7 +87,7 @@ export function shouldFailoverProvider(error: unknown): boolean {
     return status === 401 || status === 402 || status === 408 || status === 425 || status === 429 || status >= 500;
   }
   if (REQUEST_SHAPE_PATTERN.test(text)) return false;
-  return /abort|timeout|timed out|fetch failed|econnreset|econnrefused|enotfound|connection reset|connection closed|rate limit|too many requests|temporar(?:y|ily) unavailable|service unavailable|overloaded|please retry|try again|no healthy key slots/i.test(text);
+  return /abort|timeout|timed out|fetch failed|econnreset|econnrefused|enotfound|connection reset|connection closed|rate limit|too many requests|temporar(?:y|ily) unavailable|service unavailable|overloaded|please retry|try again|no healthy key slots|crawl_not_found|crawl_failed|extract_failed|scrape_failed/i.test(text);
 }
 
 /** Transport-level failures where the cached upstream client should be rebuilt. */

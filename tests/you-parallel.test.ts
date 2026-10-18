@@ -6,13 +6,16 @@ import test from "node:test";
 import { ParallelAdapter, YouAdapter } from "../src/rest/adapters.js";
 import { SearchToolkit } from "../src/toolkit.js";
 
-test("You.com exposes unified Web/News search with opt-in highlights", () => {
-  const tool = new YouAdapter().tools()[0];
+test("You.com exposes unified Web/News/Knowledge search and Contents extraction", () => {
+  const tools = new YouAdapter().tools();
+  assert.deepEqual(tools.map((t) => t.name), ["you_search", "you_contents"]);
+  const tool = tools[0];
   assert.equal(tool?.name, "you_search");
   assert.equal(tool?.annotations?.readOnlyHint, true);
   const schema = tool?.inputSchema as { properties?: Record<string, Record<string, unknown>> };
-  assert.deepEqual(schema.properties?.contentLevel?.enum, ["snippets", "highlights"]);
+  assert.deepEqual(schema.properties?.contentLevel?.enum, ["snippets", "highlights", "full_page"]);
   assert.equal(schema.properties?.includeDomains?.maxItems, 500);
+  assert.equal(schema.properties?.knowledge?.type, "boolean");
 });
 
 test("You.com uses the current POST Search contract and normalizes Web plus News", async () => {
@@ -412,5 +415,146 @@ test("search_auto does not fail over on request-shape errors", async () => {
     await toolkit.close();
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Parallel exposes v1 Extract and Image Search and normalizes their payloads", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push({ url, body });
+    if (url.endsWith("/v1/extract")) {
+      return new Response(JSON.stringify({
+        extract_id: "ext-1",
+        session_id: "sess-1",
+        results: [{
+          url: "https://example.com/guide",
+          title: "Parallel Guide",
+          publish_date: "2026-10-01",
+          excerpts: ["Excerpt one"],
+          full_content: "## Getting Started\nFull markdown content.",
+        }],
+        errors: [],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      search_id: "img-1",
+      session_id: "sess-1",
+      results: [{
+        title: "Architecture diagram",
+        image_url: "https://cdn.example.com/arch.png",
+        source_page_url: "https://example.com/arch",
+        width: 1200,
+        height: 800,
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const adapter = new ParallelAdapter();
+    assert.deepEqual(adapter.tools().map((t) => t.name), ["parallel_search", "parallel_extract", "parallel_image_search"]);
+    const config = {
+      enabled: true,
+      auto: ["search", "images", "fetch"] as Array<"search" | "images" | "fetch">,
+      keys: ["test-key"],
+      integration: { kind: "rest" as const, adapter: "parallel" as const },
+    };
+    const extracted = await adapter.call("parallel_extract", {
+      url: "https://example.com/guide",
+      objective: "Read setup instructions",
+      maxCharsPerResult: 8000,
+    }, "test-key", config) as { text: string; extractId: string };
+    assert.equal(requests[0]?.url, "https://api.parallel.ai/v1/extract");
+    assert.deepEqual(requests[0]?.body, {
+      urls: ["https://example.com/guide"],
+      objective: "Read setup instructions",
+      advanced_settings: { full_content: { max_chars_per_result: 8000 } },
+    });
+    assert.match(extracted.text, /# Parallel Guide/);
+    assert.match(extracted.text, /## Getting Started\nFull markdown content\./);
+
+    const images = await adapter.call("parallel_image_search", {
+      query: "system architecture diagram",
+      limit: 3,
+      mode: "advanced",
+      location: "US",
+    }, "test-key", config) as { items: Array<Record<string, unknown>> };
+    assert.equal(requests[1]?.url, "https://api.parallel.ai/v1/images/search");
+    assert.deepEqual(requests[1]?.body, {
+      objective: "system architecture diagram",
+      search_queries: ["system architecture diagram"],
+      mode: "advanced",
+      advanced_settings: { max_results: 3, location: "us" },
+    });
+    assert.deepEqual(images.items[0], {
+      title: "Architecture diagram",
+      url: "https://example.com/arch",
+      text: "Architecture diagram",
+      imageUrl: "https://cdn.example.com/arch.png",
+      width: 1200,
+      height: 800,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("You.com supports knowledge cards and Contents API extraction", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push({ url, body });
+    if (url.endsWith("/v1/contents")) {
+      return new Response(JSON.stringify([{
+        url: "https://you.com/docs",
+        title: "You Docs",
+        markdown: "## Overview\nClean markdown from You.com.",
+      }]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      results: {
+        knowledge: [{
+          type: "answer",
+          title: "Bitcoin Price",
+          description: "$95,000 USD",
+          as_of: "2026-10-18",
+          attribution: [{ name: "CoinGecko" }],
+        }],
+        web: [{ title: "Market News", url: "https://example.com/market", snippets: ["BTC update"] }],
+        news: [],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const adapter = new YouAdapter();
+    const config = {
+      enabled: true,
+      auto: ["search", "fetch"] as Array<"search" | "fetch">,
+      keys: ["test-key"],
+      integration: { kind: "rest" as const, adapter: "you" as const },
+    };
+    const searchOut = await adapter.call("you_search", {
+      query: "bitcoin price",
+      knowledge: true,
+      includeDomains: ["example.com"],
+      excludeDomains: ["ignored-when-include-present.com"],
+    }, "test-key", config) as { items: Array<Record<string, unknown>> };
+    assert.equal(requests[0]?.body.knowledge, "core");
+    assert.deepEqual(requests[0]?.body.include_domains, ["example.com"]);
+    assert.equal(requests[0]?.body.exclude_domains, undefined);
+    assert.equal(searchOut.items[0]?.section, "knowledge");
+    assert.match(String(searchOut.items[0]?.text), /\$95,000 USD \(Source: CoinGecko\)/);
+
+    const contentsOut = await adapter.call("you_contents", {
+      url: "https://you.com/docs",
+    }, "test-key", config) as { text: string };
+    assert.equal(requests[1]?.url, "https://ydc-index.io/v1/contents");
+    assert.match(contentsOut.text, /# You Docs/);
+    assert.match(contentsOut.text, /## Overview\nClean markdown from You\.com\./);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

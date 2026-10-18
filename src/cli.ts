@@ -2,6 +2,7 @@
 import { copyFileSync, writeFileSync } from "node:fs";
 import { defaultConfigPath, migrateConfig, normalizeConfig, readConfigFile, sanitizedConfig } from "./config.js";
 import { SearchToolkit } from "./toolkit.js";
+import type { ToolkitProfile } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 const BOOLEAN_FLAGS = new Set(["json", "verbose", "write", "cross"]);
@@ -26,7 +27,11 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
     console.log(helpText());
     return;
   }
-  const toolkit = new SearchToolkit(options.string("config"));
+  const profile = options.string("profile");
+  if (profile !== undefined && profile !== "full" && profile !== "curated" && profile !== "lean") {
+    throw new Error(`--profile must be "full", "curated", or "lean", got "${profile}"`);
+  }
+  const toolkit = new SearchToolkit(options.string("config"), profile ? { profile: profile as ToolkitProfile } : {});
   try {
     if (name === "config") {
       console.log(JSON.stringify(sanitizedConfig(toolkit.config), null, 2));
@@ -55,22 +60,34 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       console.log(JSON.stringify(toolkit.status(options.has("verbose")), null, 2));
     } else if (name === "search") {
       const query = args.join(" ").trim();
-      if (!query) throw new Error("Usage: search-toolkit search <query> [--mode general|exact|current|official|context] [--quality balanced|max] [--limit n] [--cross]");
+      if (!query) {
+        throw new Error(
+          "Usage: search-toolkit search <query> [--mode general|exact|current|official|context] [--quality balanced|max] [--limit n] [--freshness day|week|month|year] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars n] [--cross]",
+        );
+      }
+      const includeDomains = csvFlag(options.string("domains"));
+      const excludeDomains = csvFlag(options.string("exclude-domains"));
       show(await toolkit.callTool("search_auto", {
         query,
         ...optional("mode", options.string("mode")),
         ...optional("quality", options.string("quality")),
         ...optional("limit", options.number("limit")),
         ...optional("freshness", options.string("freshness")),
+        ...optional("maxCharsPerResult", options.number("max-chars")),
+        ...(includeDomains.length ? { includeDomains } : {}),
+        ...(excludeDomains.length ? { excludeDomains } : {}),
         ...(options.has("cross") ? { crossCheck: true } : {}),
       }), options);
     } else if (name === "fetch") {
-      const url = args.shift();
-      if (!url) throw new Error("Usage: search-toolkit fetch <url> [--quality max] [--max-chars n]");
+      if (!args.length) {
+        throw new Error("Usage: search-toolkit fetch <url...> [--quality max] [--max-chars n] [--offset n] [--section heading]");
+      }
       show(await toolkit.callTool("fetch_auto", {
-        url,
+        ...(args.length === 1 ? { url: args[0] } : { urls: args }),
         ...optional("quality", options.string("quality")),
         ...optional("maxChars", options.number("max-chars")),
+        ...optional("offset", options.number("offset")),
+        ...optional("section", options.string("section")),
       }), options);
     } else if (name === "call") {
       const tool = args.shift();
@@ -127,6 +144,10 @@ function optional(name: string, value: string | number | undefined): Record<stri
   return value === undefined ? {} : { [name]: value };
 }
 
+function csvFlag(value: string | undefined): string[] {
+  return value ? value.split(",").map((item) => item.trim()).filter(Boolean) : [];
+}
+
 interface Flags {
   has(name: string): boolean;
   string(name: string): string | undefined;
@@ -169,9 +190,9 @@ function helpText(): string {
   return `Search Toolkit ${PACKAGE_VERSION}
 
 Commands:
-  search-toolkit search <query> [--mode m] [--quality q] [--limit n] [--freshness f] [--cross]
-  search-toolkit fetch <url> [--quality max] [--max-chars n]
-  search-toolkit tools [--json]
+  search-toolkit search <query> [--mode m] [--quality q] [--limit n] [--freshness f] [--domains a,b] [--exclude-domains x,y] [--max-chars n] [--cross]
+  search-toolkit fetch <url...> [--quality max] [--max-chars n] [--offset n] [--section heading]
+  search-toolkit tools [--profile full|curated|lean] [--json]
   search-toolkit call <tool> '{"query":"..."}' [--json]
   search-toolkit status [--verbose]
   search-toolkit reset <provider> [slot]       clear key cool-downs
@@ -181,6 +202,7 @@ Commands:
 
 Options:
   --config <path>   Override SEARCH_TOOLKIT_CONFIG
+  --profile <p>     Override SEARCH_TOOLKIT_PROFILE (full, curated, lean)
   --json            Print the complete structured result instead of model-readable text
 `;
 }

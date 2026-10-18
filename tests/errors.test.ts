@@ -30,6 +30,7 @@ test("provider failover recognizes availability failures without hiding code or 
     new Error("exa upstream tool error: Rate limit exceeded, please retry"),
     new Error("tavily upstream tool error: Service temporarily unavailable"),
     new Error("parallel has no healthy key slots available"),
+    new ToolResultError("Error fetching URL(s): CRAWL_NOT_FOUND", []),
   ]) assert.equal(shouldFailoverProvider(error), true, error.message);
 
   for (const error of [

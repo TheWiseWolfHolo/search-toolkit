@@ -6,8 +6,8 @@ import type { ToolkitProfile } from "./types.js";
 
 const configPath = flagValue("--config");
 const profile = flagValue("--profile");
-if (profile !== undefined && profile !== "full" && profile !== "lean") {
-  console.error(`--profile must be "full" or "lean", got "${profile}"`);
+if (profile !== undefined && profile !== "full" && profile !== "curated" && profile !== "lean") {
+  console.error(`--profile must be "full", "curated", or "lean", got "${profile}"`);
   process.exit(2);
 }
 const toolkit = new SearchToolkit(configPath, profile ? { profile: profile as ToolkitProfile } : {});

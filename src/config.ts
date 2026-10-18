@@ -133,8 +133,8 @@ export function validateConfig(config: ToolkitConfig): void {
   if (config.version !== 2) throw new Error(`Unsupported config version: ${String(config.version)}`);
   if (!config.statePath || typeof config.statePath !== "string") throw new Error("statePath is required");
   if (!config.providers || typeof config.providers !== "object") throw new Error("providers is required");
-  if (config.profile !== undefined && config.profile !== "full" && config.profile !== "lean") {
-    throw new Error("profile must be \"full\" or \"lean\"");
+  if (config.profile !== undefined && config.profile !== "full" && config.profile !== "curated" && config.profile !== "lean") {
+    throw new Error("profile must be \"full\", \"curated\", or \"lean\"");
   }
   for (const [name, provider] of Object.entries(config.providers)) validateProvider(name, provider);
 }

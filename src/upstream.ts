@@ -11,6 +11,9 @@ import {
   ToolResultError,
 } from "./errors.js";
 import { callWithRotation } from "./keys.js";
+import { dedupeItems } from "./merge.js";
+import { renderItems } from "./render.js";
+import { extractUpstreamSearchItems } from "./rest/normalize.js";
 import { keyFingerprint, maskKey, type RotationStore } from "./rotation.js";
 import type { KeySelection, ProviderConfig, ToolBinding } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
@@ -285,10 +288,26 @@ export function appendRotationMetadata(
     tool: `${provider}_${sanitizeName(upstreamTool)}`,
     upstreamTool,
   };
-  const content = Array.isArray(record.content) ? record.content : [];
+  const extracted = extractUpstreamSearchItems(upstreamTool, record);
+  const items = extracted ? dedupeItems(extracted) : undefined;
+  const content = items
+    ? [{ type: "text", text: renderItems(items) }]
+    : Array.isArray(record.content) ? record.content : [];
   return {
     ...record,
     content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...content],
+    ...(items
+      ? {
+          structuredContent: {
+            provider,
+            tool: route.tool,
+            route,
+            keySlot: masked,
+            latencyMs,
+            data: { items },
+          },
+        }
+      : {}),
     _meta: {
       ...meta,
       searchToolkit: { ...searchToolkitMeta, provider, upstreamTool, keySlot: masked, latencyMs, route },

@@ -238,3 +238,116 @@ test("the full profile hides the gateway and keeps every provider tool", async (
     assert.equal(names.includes("provider_call"), false);
   });
 });
+
+test("the curated profile exposes unified tools, gateway tools, and high-value specialist tools only", async () => {
+  await withToolkit({
+    brave: restProvider("brave"),
+    serper: restProvider("serper"),
+    exa: upstream("web_search_advanced_exa", "unused", ["search"]),
+  }, async (toolkit) => {
+    const names = toolkit.listTools().map((tool) => tool.name);
+    assert.equal(toolkit.profile, "curated");
+    assert.ok(names.includes("search_auto"));
+    assert.ok(names.includes("fetch_auto"));
+    assert.ok(names.includes("provider_call"));
+    assert.ok(names.includes("brave_llm_context"));
+    assert.ok(names.includes("exa_web_search_advanced_exa"));
+    assert.equal(names.includes("brave_web_search"), false);
+    assert.equal(names.includes("serper_search"), false);
+  }, {}, { profile: "curated" });
+});
+
+test("fetch_auto rejects Cloudflare/JS-challenge interstitial shells and falls through to the next reader", async () => {
+  const challenge = `Just a moment... Enable JavaScript and cookies to continue. ${"padding ".repeat(25)}`;
+  await withToolkit({
+    exa: upstream("web_fetch_exa", challenge),
+    tavily: upstream("tavily_extract", LONG),
+  }, async (toolkit) => {
+    const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/protected" });
+    assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
+    assert.match(text(output), /readable page content/);
+  });
+});
+
+test("fetch_auto supports concurrent batch URLs and per-page section extraction", async () => {
+  const doc = `# Title\nIntro text.\n\n## API Reference\n${LONG}\n\n## Changelog\nOld notes.`;
+  await withToolkit({
+    exa: upstream("web_fetch_exa", doc),
+  }, async (toolkit) => {
+    const output = await toolkit.callTool("fetch_auto", {
+      urls: ["https://example.com/one", "https://example.com/two"],
+      section: "API Reference",
+      maxChars: 800,
+    });
+    const rendered = text(output);
+    assert.match(rendered, /=== \[1\/2\] https:\/\/example\.com\/one \(exa\) ===/);
+    assert.match(rendered, /=== \[2\/2\] https:\/\/example\.com\/two \(exa\) ===/);
+    assert.match(rendered, /## API Reference/);
+    assert.doesNotMatch(rendered, /# Title/);
+    assert.doesNotMatch(rendered, /## Changelog/);
+    const auto = route(output).searchToolkitAuto as { batch: { total: number; succeeded: number } };
+    assert.equal(auto.batch.total, 2);
+    assert.equal(auto.batch.succeeded, 2);
+  });
+});
+
+test("crossCheck merges and corroborates results across REST and MCP providers", async () => {
+  const exaReply = [
+    "Title: Shared Spec",
+    "URL: https://modelcontextprotocol.io/specification/2025-11-25.md",
+    "Published Date: 2025-11-25T00:00:00.000Z",
+    "Highlights: Exa highlight for the shared specification page with extra detail.",
+    "",
+    "Title: Exa Only",
+    "URL: https://exa-only.example/doc",
+    "Highlights: Exa exclusive result.",
+  ].join("\n");
+  const restore = stubSearchFetch({
+    "api.parallel.ai": {
+      results: [
+        { url: "https://modelcontextprotocol.io/specification/2025-11-25", title: "Shared Spec", excerpts: ["short"] },
+        { url: "https://parallel-only.example/doc", title: "Parallel Only", excerpts: ["parallel exclusive"] },
+      ],
+    },
+  });
+  try {
+    await withToolkit({
+      parallel: restProvider("parallel"),
+      exa: upstream("web_search_exa", exaReply, ["search"]),
+    }, async (toolkit) => {
+      const output = await toolkit.callTool("search_auto", { query: "mcp spec", limit: 4, crossCheck: true });
+      const auto = route(output).searchToolkitAuto as { crossCheck: { routes: Json[]; corroborated: number } };
+      assert.deepEqual(auto.crossCheck.routes.map((item) => item.provider), ["parallel", "exa"]);
+      assert.equal(auto.crossCheck.corroborated, 1);
+      const rendered = text(output);
+      assert.match(rendered, /found by: parallel, exa/);
+      assert.match(rendered, /Exa highlight for the shared specification page/);
+    });
+  } finally {
+    restore();
+  }
+});
+
+test("search_auto prioritizes providers with healthy keys over providers whose key pool is in cooldown", async () => {
+  const restore = stubSearchFetch({
+    "api.search.brave.com": { web: { results: [{ url: "https://brave.example/", title: "Brave Hit", description: "healthy brave" }] } },
+  });
+  try {
+    await withToolkit({
+      parallel: restProvider("parallel"),
+      brave: restProvider("brave"),
+    }, async (toolkit) => {
+      // Bench parallel's only key
+      const slot = toolkit.rotation.select("parallel", ["k1"], true);
+      toolkit.rotation.record(slot, { ok: false, latencyMs: 10, httpStatus: 429 });
+      const output = await toolkit.callTool("search_auto", { query: "q" });
+      assert.equal((route(output).searchToolkitRoute as Json).provider, "brave");
+      assert.deepEqual((route(output).searchToolkitAuto as Json).attempts, [
+        { provider: "brave", tool: "brave_web_search", candidateRank: 3, outcome: "success" },
+      ]);
+    });
+  } finally {
+    restore();
+  }
+});
+

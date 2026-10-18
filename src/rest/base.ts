@@ -1,9 +1,10 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError, parseRetryAfter, statusFromError } from "../errors.js";
 import { callWithRotation } from "../keys.js";
+import { dedupeItems } from "../merge.js";
 import { renderPayload } from "../render.js";
 import type { RotationStore } from "../rotation.js";
-import type { KeySelection, ProviderConfig, ToolBinding } from "../types.js";
+import type { KeySelection, ProviderConfig, SearchItem, ToolBinding } from "../types.js";
 
 export interface RestAdapter {
   tools(provider: string): Tool[];
@@ -39,7 +40,10 @@ export class RestProvider {
   ): Promise<unknown> {
     const started = performance.now();
     try {
-      const payload = await this.adapter.call(tool, args, selection.key, this.config);
+      const rawPayload = await this.adapter.call(tool, args, selection.key, this.config);
+      const payload = rawPayload && typeof rawPayload === "object" && Array.isArray((rawPayload as { items?: unknown }).items)
+        ? { ...(rawPayload as Record<string, unknown>), items: dedupeItems((rawPayload as { items: SearchItem[] }).items) }
+        : rawPayload;
       const latencyMs = Math.round(performance.now() - started);
       this.rotation.record(selection, { ok: true, latencyMs, httpStatus: 200 });
       const route = { provider: this.name, tool, upstreamTool: tool };
@@ -47,7 +51,7 @@ export class RestProvider {
         // Model-visible content: one compact route block, then readable text.
         content: [
           { type: "text", text: JSON.stringify({ searchToolkitRoute: route }) },
-          { type: "text", text: renderPayload(payload) },
+          { type: "text", text: renderPayload(payload, { dedupe: false }) },
         ],
         structuredContent: {
           provider: this.name,

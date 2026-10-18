@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { canonicalUrl, mergeItems } from "../src/merge.js";
+import { canonicalUrl, dedupeItems, mergeItems } from "../src/merge.js";
 import { renderPayload } from "../src/render.js";
 import { BraveAdapter, ParallelAdapter, SerperAdapter, YouAdapter } from "../src/rest/adapters.js";
-import { cleanHighlightText, pickDate } from "../src/rest/normalize.js";
+import { cleanHighlightText, extractUpstreamSearchItems, pickDate } from "../src/rest/normalize.js";
 import { shapeTool, trimText } from "../src/shape.js";
 import { truncateBody } from "../src/toolkit.js";
 
@@ -104,10 +104,79 @@ test("search adapters keep publication dates and Brave text is cleaned", async (
   } finally { restore(); }
 });
 
-test("canonical URLs ignore scheme, www, fragments, trailing slashes and tracking parameters", () => {
+test("canonical URLs ignore scheme, www, fragments, trailing slashes, doc suffixes and tracking parameters", () => {
   assert.equal(canonicalUrl("https://www.Example.com/a/?utm_source=x&b=2&a=1#frag"), "example.com/a?a=1&b=2");
   assert.equal(canonicalUrl("http://example.com/a"), "example.com/a");
+  assert.equal(canonicalUrl("https://docs.example.com/guide/intro.md"), "docs.example.com/guide/intro");
+  assert.equal(canonicalUrl("https://docs.example.com/guide/intro.html"), "docs.example.com/guide/intro");
+  assert.equal(canonicalUrl("https://docs.example.com/guide/index.html"), "docs.example.com/guide");
   assert.equal(canonicalUrl("not a url"), "not a url");
+});
+
+test("dedupeItems collapses duplicate URLs from a single provider while preferring clean URLs and richer excerpts", () => {
+  const deduped = dedupeItems([
+    { title: "Spec", url: "https://modelcontextprotocol.io/specification/2025-11-25.md", text: "short" },
+    { title: "Spec Full", url: "https://modelcontextprotocol.io/specification/2025-11-25", text: "much richer excerpt from the canonical page", date: "2025-11-25" },
+    { title: "Other", url: "https://example.com/other", text: "other" },
+  ]);
+  assert.equal(deduped.length, 2);
+  assert.equal(deduped[0]?.url, "https://modelcontextprotocol.io/specification/2025-11-25");
+  assert.equal(deduped[0]?.text, "much richer excerpt from the canonical page");
+  assert.equal(deduped[0]?.date, "2025-11-25");
+});
+
+test("renderPayload caps per-item excerpt length when maxCharsPerItem is set", () => {
+  const text = renderPayload({
+    items: [{
+      title: "Long",
+      url: "https://example.com/long",
+      text: `${"First sentence is concise. ".repeat(5)}${"More details follow here. ".repeat(20)}`,
+    }],
+  }, { maxCharsPerItem: 120 });
+  assert.ok(text.length < 200);
+  assert.match(text, /1\. Long/);
+  assert.match(text, /First sentence is concise\./);
+});
+
+test("extractUpstreamSearchItems normalizes Exa text blocks and JSON search payloads", () => {
+  const exaItems = extractUpstreamSearchItems("web_search_exa", {
+    content: [{
+      type: "text",
+      text: [
+        "Title: Specification - Model Context Protocol",
+        "URL: https://modelcontextprotocol.io/specification/2025-11-25",
+        "Published Date: 2025-11-25T00:00:00.000Z",
+        "Highlights: The Model Context Protocol (MCP) is an open protocol.",
+        "",
+        "Title: Transports",
+        "URL: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports",
+        "Text: MCP supports stdio and Streamable HTTP transports.",
+      ].join("\n"),
+    }],
+  });
+  assert.equal(exaItems?.length, 2);
+  assert.deepEqual(exaItems?.[0], {
+    title: "Specification - Model Context Protocol",
+    url: "https://modelcontextprotocol.io/specification/2025-11-25",
+    text: "The Model Context Protocol (MCP) is an open protocol.",
+    date: "2025-11-25",
+  });
+  assert.equal(exaItems?.[1]?.title, "Transports");
+
+  const tavilyItems = extractUpstreamSearchItems("tavily_search", {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        results: [
+          { title: "Tavily Hit", url: "https://tavily.example/hit", content: "Tavily snippet", published_date: "2026-10-01" },
+        ],
+      }),
+    }],
+  });
+  assert.deepEqual(tavilyItems, [
+    { title: "Tavily Hit", url: "https://tavily.example/hit", text: "Tavily snippet", date: "2026-10-01" },
+  ]);
+  assert.equal(extractUpstreamSearchItems("web_fetch_exa", { content: [{ type: "text", text: "Title: X\nURL: https://x.com" }] }), undefined);
 });
 
 test("merged results put corroborated URLs first, then interleave by rank", () => {
@@ -161,7 +230,7 @@ test("shaping trims descriptions at natural boundaries and leaves schemas functi
   assert.equal(trimText("short", 100), "short");
 });
 
-test("truncation keeps the route block and reports what was dropped", () => {
+test("truncation keeps the route block, supports offset pagination and section extraction", () => {
   const output = truncateBody({
     content: [
       { type: "text", text: JSON.stringify({ searchToolkitRoute: { provider: "exa", tool: "t", upstreamTool: "t" } }) },
@@ -175,6 +244,20 @@ test("truncation keeps the route block and reports what was dropped", () => {
   assert.match(content(output, 3), /truncated: 100 more characters/);
   const intact = truncateBody({ content: [{ type: "text", text: "hello" }] }, 500) as { content: unknown[] };
   assert.equal(intact.content.length, 1);
+
+  const paged = truncateBody({
+    content: [{ type: "text", text: "0123456789abcdefghij" }],
+  }, 6, { offset: 10 }) as { content: Array<{ text?: string }> };
+  assert.equal(content(paged, 0), "abcdef");
+  assert.match(content(paged, 1), /truncated: 4 more characters; pass offset=16/);
+
+  const sectioned = truncateBody({
+    content: [{
+      type: "text",
+      text: "# Intro\nWelcome.\n\n## Rate Limits\n100 requests per minute.\n\n### Burst\nUp to 20 rps.\n\n## Auth\nUse Bearer tokens.",
+    }],
+  }, 500, { section: "Rate Limits" }) as { content: Array<{ text?: string }> };
+  assert.equal(content(sectioned, 0), "## Rate Limits\n100 requests per minute.\n\n### Burst\nUp to 20 rps.");
 });
 
 function content(output: { content: Array<{ text?: string }> }, index: number): string {

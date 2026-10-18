@@ -53,6 +53,19 @@ try {
     const status = await full.client.callTool({ name: "search_pool_status", arguments: {} });
     if (status.isError) throw new Error("search_pool_status returned an error");
 
+    const curated = await connect(["--profile", "curated"]);
+    try {
+      const curatedNames = (await curated.client.listTools()).tools.map((tool) => tool.name);
+      if (!curatedNames.includes("brave_llm_context") || !curatedNames.includes("doubao_search") || !curatedNames.includes("provider_call")) {
+        throw new Error(`Missing expected curated tools: ${curatedNames.join(", ")}`);
+      }
+      if (curatedNames.includes("brave_web_search") || curatedNames.includes("querit_search")) {
+        throw new Error(`Curated profile must omit redundant basic search tools: ${curatedNames.join(", ")}`);
+      }
+    } finally {
+      await curated.transport.close();
+    }
+
     const lean = await connect(["--profile", "lean"]);
     try {
       const leanNames = (await lean.client.listTools()).tools.map((tool) => tool.name).sort();

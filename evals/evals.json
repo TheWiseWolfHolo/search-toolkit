@@ -93,6 +93,29 @@
         "Sets the character cap to about 8000.",
         "Does not search for the URL it already has."
       ]
+    },
+    {
+      "id": 9,
+      "prompt": "只在 modelcontextprotocol.io 和 github.com 这两个域名内搜索 MCP Streamable HTTP 会话管理的资料，排除 reddit.com，返回最多 5 条。",
+      "expected_output": "Uses search_auto with includeDomains and excludeDomains rather than manually calling multiple single-provider tools.",
+      "files": [],
+      "expectations": [
+        "Uses search_auto with includeDomains set to modelcontextprotocol.io and github.com, and excludeDomains set to reddit.com.",
+        "Caps limit at 5.",
+        "Does not start deep research."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "一次性读取 https://modelcontextprotocol.io/specification/2025-11-25/basic/transports 和 https://modelcontextprotocol.io/specification/2025-11-25/server/tools 这两个已知页面的 Security Considerations 章节。",
+      "expected_output": "Uses a single batch fetch_auto call with urls and section filtering.",
+      "files": [],
+      "expectations": [
+        "Calls fetch_auto once with urls containing both known URLs.",
+        "Passes section set to Security Considerations to extract the relevant heading section.",
+        "Does not run a search query for URLs it already has."
+      ]
     }
   ]
 }
+

@@ -19,7 +19,7 @@ export const STATUS_TOOL: Tool = {
 export const AUTO_TOOL: Tool = {
   name: "search_auto",
   title: "Search with the recommended provider",
-  description: "Quality-first web search that picks the provider by mode and quality (Parallel, You.com, Brave, Exa, Querit, Tavily, Serper). balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. On a provider-availability failure it tries one compatible fallback. crossCheck=true queries two independent indexes and merges results by URL. Never selects Doubao, research, crawl, or agentic tools.",
+  description: "Quality-first web search that picks the provider by mode and quality (Parallel, You.com, Brave, Exa, Querit, Tavily, Serper). balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
   inputSchema: {
     type: "object",
     properties: {
@@ -34,8 +34,7 @@ export const AUTO_TOOL: Tool = {
       freshness: {
         type: "string",
         enum: ["day", "week", "month", "year"],
-        default: "week",
-        description: "Time window for current mode, mapped to each provider's native control; ignored by other modes",
+        description: "Time window mapped to each provider's native control (defaults to week in current mode)",
       },
       limit: {
         type: "integer",
@@ -43,6 +42,24 @@ export const AUTO_TOOL: Tool = {
         maximum: 20,
         default: 6,
         description: "Result limit. Brave LLM Context ignores it and keeps a 20-source grounding pool.",
+      },
+      includeDomains: {
+        type: "array",
+        maxItems: 20,
+        items: { type: "string", minLength: 1 },
+        description: "Restrict results to these domains (mapped to native domain filters or site: operators)",
+      },
+      excludeDomains: {
+        type: "array",
+        maxItems: 20,
+        items: { type: "string", minLength: 1 },
+        description: "Exclude results from these domains",
+      },
+      maxCharsPerResult: {
+        type: "integer",
+        minimum: 150,
+        maximum: 10000,
+        description: "Cap each result's rendered excerpt length (defaults to 700 in balanced and 1800 in max)",
       },
       maximumNumberOfTokens: {
         type: "integer",
@@ -66,7 +83,7 @@ export const AUTO_TOOL: Tool = {
 export const IMAGES_TOOL: Tool = {
   name: "search_images",
   title: "Search for images",
-  description: "Text-to-image discovery through Brave Images, with Serper Google Images as the availability fallback. Returns image URLs and source metadata; it cannot inspect an uploaded image or do reverse image search. Use the provider tools directly for country filtering.",
+  description: "Text-to-image discovery through Brave Images, with Serper Google Images and Parallel Image Search as availability fallbacks. Returns image URLs and source metadata; it cannot inspect an uploaded image or do reverse image search. Use the provider tools directly for country filtering.",
   inputSchema: {
     type: "object",
     properties: {
@@ -83,16 +100,24 @@ export const IMAGES_TOOL: Tool = {
 
 export const FETCH_TOOL: Tool = {
   name: "fetch_auto",
-  title: "Read a known URL",
-  description: "Fetch the readable content of one known URL through Exa, Tavily, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable. quality=max leads with Firecrawl (JavaScript rendering). Use instead of searching for a URL you already have.",
+  title: "Read one or more known URLs",
+  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Exa, Tavily, Parallel, You.com, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
   inputSchema: {
     type: "object",
     properties: {
-      url: { type: "string", minLength: 1, description: "http(s) URL to read" },
+      url: { type: "string", minLength: 1, description: "Single http(s) URL to read" },
+      urls: {
+        type: "array",
+        minItems: 1,
+        maxItems: 5,
+        items: { type: "string", minLength: 1 },
+        description: "Batch of up to 5 http(s) URLs to read concurrently",
+      },
       quality: { type: "string", enum: ["balanced", "max"], default: "balanced" },
-      maxChars: { type: "integer", minimum: 500, maximum: 100000, default: 12000, description: "Longest content returned; longer pages are truncated with a marker" },
+      maxChars: { type: "integer", minimum: 500, maximum: 100000, default: 12000, description: "Longest content returned; longer pages are truncated with an offset marker" },
+      offset: { type: "integer", minimum: 0, default: 0, description: "Character offset to start reading from on long pages" },
+      section: { type: "string", description: "Optional heading or keyword filter to extract matching sections before truncating" },
     },
-    required: ["url"],
     additionalProperties: false,
   },
   annotations: READ_ONLY_OPEN,
@@ -119,7 +144,7 @@ export const PROBE_TOOL: Tool = {
 export const GATEWAY_LIST_TOOL: Tool = {
   name: "provider_tools",
   title: "List or describe provider tools",
-  description: "Lean profile only. Without arguments, list every provider tool by name with a one-line summary; filter with provider. With name, return that tool's full description and input schema, which provider_call requires.",
+  description: "Lean/curated profiles. Without arguments, list every provider tool by name with a one-line summary; filter with provider. With name, return that tool's full description and input schema, which provider_call requires.",
   inputSchema: {
     type: "object",
     properties: {
@@ -134,7 +159,7 @@ export const GATEWAY_LIST_TOOL: Tool = {
 export const GATEWAY_CALL_TOOL: Tool = {
   name: "provider_call",
   title: "Call a provider tool",
-  description: "Lean profile only. Call any provider tool by its exposed name. Read its schema with provider_tools first. Tools that crawl, research, or modify state keep their own side effects: only call those when the user asked for them.",
+  description: "Lean/curated profiles. Call any provider tool by its exposed name. Read its schema with provider_tools first. Tools that crawl, research, or modify state keep their own side effects: only call those when the user asked for them.",
   inputSchema: {
     type: "object",
     properties: {
@@ -152,3 +177,22 @@ export const MANAGEMENT_TOOL_NAMES = new Set([
   STATUS_TOOL.name, AUTO_TOOL.name, IMAGES_TOOL.name, FETCH_TOOL.name, PROBE_TOOL.name,
   GATEWAY_LIST_TOOL.name, GATEWAY_CALL_TOOL.name,
 ]);
+/** Specialist tools with capabilities not covered by search_auto/fetch_auto/search_images, exposed directly in the curated profile. */
+export const CURATED_SPECIALIST_TOOLS = new Set([
+  "brave_llm_context",
+  "parallel_search",
+  "parallel_extract",
+  "you_search",
+  "you_contents",
+  "serper_scholar",
+  "exa_web_search_advanced_exa",
+  "grok_x_search",
+  "grok_web_x_search",
+  "doubao_search",
+  "anysearch_batch_search",
+  "firecrawl_firecrawl_map",
+  "firecrawl_firecrawl_crawl",
+  "linkup_linkup_research",
+  "tavily_tavily_research",
+]);
+

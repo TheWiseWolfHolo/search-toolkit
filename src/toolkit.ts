@@ -16,10 +16,10 @@ import {
 } from "./routes.js";
 import { shapeTool } from "./shape.js";
 import {
-  AUTO_TOOL, FETCH_TOOL, GATEWAY_CALL_TOOL, GATEWAY_LIST_TOOL, GATEWAY_TOOL_NAMES,
+  AUTO_TOOL, CURATED_SPECIALIST_TOOLS, FETCH_TOOL, GATEWAY_CALL_TOOL, GATEWAY_LIST_TOOL, GATEWAY_TOOL_NAMES,
   IMAGES_TOOL, MANAGEMENT_TOOL_NAMES, PROBE_TOOL, STATUS_TOOL,
 } from "./tools.js";
-import type { AutoCapability, ProviderConfig, ToolBinding, ToolkitConfig, ToolkitProfile } from "./types.js";
+import type { AutoCapability, ProviderConfig, SearchItem, ToolBinding, ToolkitConfig, ToolkitProfile } from "./types.js";
 import { UpstreamMcpProvider } from "./upstream.js";
 
 export { attachRouteMetadata } from "./provenance.js";
@@ -48,10 +48,20 @@ export interface ToolkitOptions {
   profile?: ToolkitProfile;
 }
 
+export interface TruncateOptions {
+  offset?: number;
+  section?: string;
+}
+
 type Validator = ReturnType<AjvJsonSchemaValidator["getValidator"]>;
 
 const MIN_FETCH_CHARS = 80;
+const DEFAULT_BALANCED_EXCERPT_CHARS = 700;
+const DEFAULT_MAX_EXCERPT_CHARS = 1_800;
 const LEAN_TOOL_NAMES = new Set(MANAGEMENT_TOOL_NAMES);
+const CURATED_TOOL_NAMES = new Set([...MANAGEMENT_TOOL_NAMES, ...CURATED_SPECIALIST_TOOLS]);
+
+const INTERSTITIAL_PAGE_PATTERN = /just a moment[\s\S]{0,160}enable javascript and cookies|attention required!\s*\|\s*cloudflare|please enable js and disable any ad blocker|verify you are human|cf-browser-verification|checking your browser before accessing/i;
 
 export class SearchToolkit {
   readonly config: ToolkitConfig;
@@ -104,9 +114,9 @@ export class SearchToolkit {
   /** Tools visible to MCP clients under the active profile. */
   listTools(): Tool[] {
     const exposed = Array.from(this.bindings.values(), (binding) => binding.exposed);
-    return this.profile === "lean"
-      ? exposed.filter((tool) => LEAN_TOOL_NAMES.has(tool.name))
-      : exposed.filter((tool) => !GATEWAY_TOOL_NAMES.has(tool.name));
+    if (this.profile === "lean") return exposed.filter((tool) => LEAN_TOOL_NAMES.has(tool.name));
+    if (this.profile === "curated") return exposed.filter((tool) => CURATED_TOOL_NAMES.has(tool.name));
+    return exposed.filter((tool) => !GATEWAY_TOOL_NAMES.has(tool.name));
   }
 
   /** Subscribe to tool-catalog changes (an upstream's tools changed after a background refresh). */
@@ -238,6 +248,10 @@ export class SearchToolkit {
   private async callAuto(args: Record<string, unknown>): Promise<unknown> {
     const mode = autoMode(args.mode);
     const quality: AutoQuality = args.quality === "max" ? "max" : "balanced";
+    const limit = Number(args.limit ?? 6);
+    const maxCharsPerItem = typeof args.maxCharsPerResult === "number"
+      ? args.maxCharsPerResult
+      : quality === "max" ? DEFAULT_MAX_EXCERPT_CHARS : DEFAULT_BALANCED_EXCERPT_CHARS;
     const candidates = autoCandidates(mode, quality, args);
     const spec: ChainSpec = {
       tool: "search_auto",
@@ -247,10 +261,11 @@ export class SearchToolkit {
       emptyError: `No automatic provider is available for mode ${mode}`,
     };
     if (args.crossCheck === true && mode !== "context") {
-      const merged = await this.crossCheck(candidates, spec, Number(args.limit ?? 6));
+      const merged = await this.crossCheck(candidates, spec, limit, maxCharsPerItem);
       if (merged) return merged;
     }
-    return this.runChain(candidates, spec);
+    const output = await this.runChain(candidates, spec);
+    return mode === "context" ? output : capSearchOutput(output, maxCharsPerItem, limit);
   }
 
   private callImageSearch(args: Record<string, unknown>): Promise<unknown> {
@@ -264,34 +279,62 @@ export class SearchToolkit {
   }
 
   private async callFetch(args: Record<string, unknown>): Promise<unknown> {
-    const url = String(args.url ?? "").trim();
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw new Error("fetch_auto requires an absolute http(s) URL");
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("fetch_auto requires an http(s) URL");
+    const urls = parseFetchUrls(args);
     const quality: AutoQuality = args.quality === "max" ? "max" : "balanced";
     const maxChars = typeof args.maxChars === "number" ? args.maxChars : 12_000;
-    const output = await this.runChain(fetchCandidates(quality, { url: parsed.toString(), maxChars }), {
+    const offset = typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
+    const section = typeof args.section === "string" && args.section.trim() ? args.section.trim() : undefined;
+    const truncateOpts: TruncateOptions = {
+      ...(offset > 0 ? { offset } : {}),
+      ...(section ? { section } : {}),
+    };
+    if (urls.length === 1) {
+      return this.fetchSingleUrl(urls[0] as string, quality, maxChars, truncateOpts);
+    }
+    const perUrlChars = Math.max(500, Math.floor(maxChars / urls.length));
+    const settled = await Promise.allSettled(
+      urls.map((url) => this.fetchSingleUrl(url, quality, perUrlChars, truncateOpts)),
+    );
+    return combineBatchFetch(urls, settled, quality);
+  }
+
+  private async fetchSingleUrl(
+    url: string,
+    quality: AutoQuality,
+    maxChars: number,
+    truncateOpts: TruncateOptions,
+  ): Promise<unknown> {
+    const baseChars = truncateOpts.offset ? maxChars + truncateOpts.offset : maxChars;
+    const requestChars = truncateOpts.section ? Math.max(baseChars, 24_000) : baseChars;
+    const output = await this.runChain(fetchCandidates(quality, { url, maxChars: requestChars }), {
       tool: "fetch_auto",
       capability: "fetch",
       maxProviders: 3,
       meta: { mode: "fetch", quality },
       emptyError: "No automatic fetch provider is available",
-      usable: (candidate) => bodyText(candidate).trim().length >= MIN_FETCH_CHARS,
+      usable: (candidate) => isUsableFetchText(bodyText(candidate)),
     });
-    return truncateBody(output, maxChars);
+    return truncateBody(output, maxChars, truncateOpts);
   }
 
   private eligible(candidates: AutoCandidate[], capability: AutoCapability) {
-    return candidates
+    const matched = candidates
       .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
       .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
         if (!entry.binding) return false;
         return this.config.providers[entry.binding.provider]?.auto.includes(capability) === true;
       });
+    const ready: typeof matched = [];
+    const cooling: typeof matched = [];
+    for (const entry of matched) {
+      const keys = this.config.providers[entry.binding.provider]?.keys ?? [];
+      if (keys.length === 0 || this.rotation.usableSlots(entry.binding.provider, keys).length > 0) {
+        ready.push(entry);
+      } else {
+        cooling.push(entry);
+      }
+    }
+    return [...ready, ...cooling];
   }
 
   /** Try candidates in order; move on only after a recognised availability failure or an unusable answer. */
@@ -340,12 +383,17 @@ export class SearchToolkit {
     throw autoFailure(lastError ?? new Error(spec.emptyError), attempts, spec.tool);
   }
 
-  /** Query two independent REST-backed indexes concurrently and merge by URL. Returns undefined when a pair is not available. */
-  private async crossCheck(candidates: AutoCandidate[], spec: ChainSpec, limit: number): Promise<unknown | undefined> {
+  /** Query two independent indexes concurrently and merge by URL. Returns undefined when a pair is not available. */
+  private async crossCheck(
+    candidates: AutoCandidate[],
+    spec: ChainSpec,
+    limit: number,
+    maxCharsPerItem = DEFAULT_BALANCED_EXCERPT_CHARS,
+  ): Promise<unknown | undefined> {
     const seen = new Set<string>();
     const pair = this.eligible(candidates, spec.capability).filter((entry) => {
       const provider = entry.binding.provider;
-      if (seen.has(provider) || this.config.providers[provider]?.integration.kind !== "rest") return false;
+      if (seen.has(provider)) return false;
       seen.add(provider);
       return true;
     }).slice(0, 2);
@@ -376,7 +424,7 @@ export class SearchToolkit {
     return {
       content: [
         { type: "text", text: JSON.stringify({ searchToolkitRoute: route, searchToolkitAuto: auto }) },
-        { type: "text", text: renderItems(merged) },
+        { type: "text", text: renderItems(merged, { maxCharsPerItem, dedupe: false }) },
       ],
       structuredContent: { route, searchAuto: auto, result: { items: merged } },
       _meta: { searchToolkit: { route, auto } },
@@ -437,7 +485,7 @@ export class SearchToolkit {
 
 function profileFromEnv(): ToolkitProfile | undefined {
   const value = process.env.SEARCH_TOOLKIT_PROFILE;
-  return value === "full" || value === "lean" ? value : undefined;
+  return value === "full" || value === "curated" || value === "lean" ? value : undefined;
 }
 
 function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
@@ -507,33 +555,181 @@ function bodyText(output: unknown): string {
   return textOfContent(bodyBlocks(output));
 }
 
-function itemsOf(output: unknown): unknown[] | undefined {
-  if (!output || typeof output !== "object") return undefined;
-  const data = (output as { structuredContent?: { data?: { items?: unknown } } }).structuredContent?.data;
-  return Array.isArray(data?.items) ? data.items : undefined;
+export function isUsableFetchText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < MIN_FETCH_CHARS) return false;
+  if (trimmed.length < 1_200 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
+  return true;
 }
 
-/** Cap the readable text of a result, keeping the route block and any non-text content. */
-export function truncateBody(output: unknown, maxChars: number): unknown {
+function parseFetchUrls(args: Record<string, unknown>): string[] {
+  const raw: string[] = [];
+  if (typeof args.url === "string" && args.url.trim()) raw.push(args.url.trim());
+  if (Array.isArray(args.urls)) {
+    for (const item of args.urls) {
+      const trimmed = String(item ?? "").trim();
+      if (trimmed) raw.push(trimmed);
+    }
+  }
+  if (raw.length === 0) throw new Error("fetch_auto requires an absolute http(s) URL");
+  const normalized: string[] = [];
+  for (const candidate of raw) {
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      throw new Error("fetch_auto requires an absolute http(s) URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("fetch_auto requires an http(s) URL");
+    }
+    const href = parsed.toString();
+    if (!normalized.includes(href)) normalized.push(href);
+  }
+  return normalized.slice(0, 5);
+}
+
+function combineBatchFetch(
+  urls: string[],
+  settled: PromiseSettledResult<unknown>[],
+  quality: AutoQuality,
+): unknown {
+  const routes: Array<Record<string, unknown>> = [];
+  const failed: Array<{ url: string; error: string }> = [];
+  const sections: string[] = [];
+  settled.forEach((outcome, index) => {
+    const url = urls[index] as string;
+    if (outcome.status === "rejected") {
+      failed.push({ url, error: cleanError(outcome.reason) });
+      sections.push(`=== [${index + 1}/${urls.length}] ${url} [error] ===\n${cleanError(outcome.reason)}`);
+      return;
+    }
+    const value = outcome.value as {
+      content?: Array<{ type: string; text?: string }>;
+      structuredContent?: { route?: Record<string, unknown> };
+    };
+    const route = value?.structuredContent?.route ?? { provider: "unknown", tool: "fetch_auto", upstreamTool: "fetch_auto" };
+    routes.push({ url, ...route });
+    const text = bodyText(value).trim();
+    sections.push(`=== [${index + 1}/${urls.length}] ${url} (${String(route.provider ?? "unknown")}) ===\n${text}`);
+  });
+  if (routes.length === 0) {
+    throw new Error(`fetch_auto failed for all ${urls.length} URLs: ${failed.map((f) => `${f.url}: ${f.error}`).join("; ")}`);
+  }
+  const primaryRoute = routes[0] as Record<string, unknown>;
+  const auto = { mode: "fetch", quality, batch: { total: urls.length, succeeded: routes.length, routes, failed } };
+  return {
+    content: [
+      { type: "text", text: JSON.stringify({ searchToolkitRoute: primaryRoute, searchToolkitAuto: auto }) },
+      { type: "text", text: sections.join("\n\n") },
+    ],
+    structuredContent: { route: primaryRoute, searchAuto: auto, result: { urls, routes, failed } },
+    _meta: { searchToolkit: { route: primaryRoute, auto } },
+  };
+}
+
+function itemsOf(output: unknown): unknown[] | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const structured = (output as {
+    structuredContent?: { data?: { items?: unknown }; result?: { data?: { items?: unknown }; items?: unknown } };
+  }).structuredContent;
+  const items = structured?.data?.items ?? structured?.result?.data?.items ?? structured?.result?.items;
+  return Array.isArray(items) ? items : undefined;
+}
+
+function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number): unknown {
+  const items = itemsOf(output);
+  if (!items || !output || typeof output !== "object") return output;
+  const record = output as { content?: unknown };
+  if (!Array.isArray(record.content)) return output;
+  const capped = (items as SearchItem[]).slice(0, limit);
+  const routeBlock = isRouteContentBlock(record.content[0]) ? [record.content[0]] : [];
+  return {
+    ...(output as object),
+    content: [...routeBlock, { type: "text", text: renderItems(capped, { maxCharsPerItem }) }],
+  };
+}
+
+function filterTextBySection(text: string, sectionQuery: string): string {
+  const needle = sectionQuery.toLowerCase();
+  const lines = text.split("\n");
+  let startLine = -1;
+  let startLevel = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = (lines[i] ?? "").match(/^(#{1,6})\s+(.+)$/);
+    if (match && (match[2] ?? "").toLowerCase().includes(needle)) {
+      startLine = i;
+      startLevel = (match[1] ?? "#").length;
+      break;
+    }
+  }
+  if (startLine >= 0) {
+    let endLine = lines.length;
+    for (let i = startLine + 1; i < lines.length; i += 1) {
+      const match = (lines[i] ?? "").match(/^(#{1,6})\s+/);
+      if (match && (match[1] ?? "#").length <= startLevel) {
+        endLine = i;
+        break;
+      }
+    }
+    return lines.slice(startLine, endLine).join("\n").trim();
+  }
+  const blocks = text.split(/\n{2,}/);
+  const matchingIndices: number[] = [];
+  blocks.forEach((block, index) => {
+    if (block.toLowerCase().includes(needle)) matchingIndices.push(index);
+  });
+  if (matchingIndices.length === 0) {
+    return `[section "${sectionQuery}" not found; showing start of page]\n\n${text}`;
+  }
+  const picked = new Set<number>();
+  for (const hit of matchingIndices) {
+    for (let idx = Math.max(0, hit - 1); idx <= Math.min(blocks.length - 1, hit + 3); idx += 1) {
+      picked.add(idx);
+    }
+  }
+  return Array.from(picked)
+    .sort((a, b) => a - b)
+    .map((idx) => blocks[idx])
+    .join("\n\n");
+}
+
+/** Cap the readable text of a result, supporting optional section filtering and character offset. */
+export function truncateBody(output: unknown, maxChars: number, options: TruncateOptions = {}): unknown {
   if (!output || typeof output !== "object") return output;
   const record = output as { content?: unknown };
   if (!Array.isArray(record.content)) return output;
+  let skip = options.offset && options.offset > 0 ? Math.floor(options.offset) : 0;
   let remaining = maxChars;
   let dropped = 0;
+  const sectionQuery = options.section?.trim();
   const content = record.content.map((block, index) => {
     if (index === 0 && isRouteContentBlock(block)) return block;
     const text = block && typeof block === "object" ? (block as { type?: string; text?: unknown }) : undefined;
     if (text?.type !== "text" || typeof text.text !== "string") return block;
-    if (text.text.length <= remaining) {
-      remaining -= text.text.length;
-      return block;
+    const sourceText = sectionQuery ? filterTextBySection(text.text, sectionQuery) : text.text;
+    if (skip >= sourceText.length) {
+      skip -= sourceText.length;
+      return { ...text, text: "" };
     }
-    dropped += text.text.length - remaining;
-    const kept = text.text.slice(0, Math.max(remaining, 0));
+    const sliced = skip > 0 ? sourceText.slice(skip) : sourceText;
+    skip = 0;
+    if (sliced.length <= remaining) {
+      remaining -= sliced.length;
+      return { ...text, text: sliced };
+    }
+    dropped += sliced.length - remaining;
+    const kept = sliced.slice(0, Math.max(remaining, 0));
     remaining = 0;
     return { ...text, text: kept };
   });
-  if (dropped > 0) content.push({ type: "text", text: `…[truncated: ${dropped} more characters; raise maxChars to read further]` });
+  if (dropped > 0) {
+    const nextOffset = (options.offset && options.offset > 0 ? Math.floor(options.offset) : 0) + maxChars;
+    content.push({
+      type: "text",
+      text: `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`,
+    });
+  }
   return { ...(output as object), content };
 }
 

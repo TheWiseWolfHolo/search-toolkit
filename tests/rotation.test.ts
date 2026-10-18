@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { HttpError } from "../src/errors.js";
+import { callWithRotation } from "../src/keys.js";
 import { keyFingerprint, penaltyFor, RotationStore } from "../src/rotation.js";
 
 function withStore(run: (store: RotationStore, dir: string) => void): void {
@@ -141,6 +143,30 @@ test("reset clears cool-downs for one slot or the whole pool", () => {
   });
 });
 
+test("callWithRotation retries up to 3 keys when multiple keys hit retryable rate limits", async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "search-toolkit-multikey-"));
+  const store = new RotationStore(resolve(dir, "state.db"));
+  try {
+    const keys = ["key-one-123456", "key-two-123456", "key-three-123456"];
+    const tried: number[] = [];
+    const result = await callWithRotation(store, "exa", keys, async (selected) => {
+      tried.push(selected.slot);
+      if (selected.slot < 2) {
+        store.record(selected, { ok: false, latencyMs: 5, httpStatus: 429 });
+        throw new HttpError("Too Many Requests", 429);
+      }
+      store.record(selected, { ok: true, latencyMs: 5, httpStatus: 200 });
+      return `ok-${selected.slot}`;
+    });
+    assert.equal(result, "ok-2");
+    assert.deepEqual(tried, [0, 1, 2]);
+    assert.deepEqual(store.usableSlots("exa", keys), [2]);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("v1 slot-indexed health is adopted once and re-keyed by fingerprint", () => {
   const dir = mkdtempSync(resolve(tmpdir(), "search-toolkit-legacy-"));
   try {
@@ -174,3 +200,4 @@ test("v1 slot-indexed health is adopted once and re-keyed by fingerprint", () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
