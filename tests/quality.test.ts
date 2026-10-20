@@ -185,3 +185,36 @@ test("Octen sends its native filters, restores spacing, and treats a business er
     globalThis.fetch = original;
   }
 });
+
+test("search_images searches by image through Google Lens and explains an empty answer", async () => {
+  const { imageCandidates } = await import("../src/routes.js");
+  assert.deepEqual(imageCandidates({ imageUrl: " https://example.com/a.jpg ", limit: 5 }), [
+    { name: "serper_lens", nativeArguments: { url: "https://example.com/a.jpg", limit: 5 } },
+  ]);
+  assert.equal(imageCandidates({ query: "pier" })[0]?.name, "brave_image_search");
+  const { SerperAdapter, LENS_NO_MATCHES } = await import("../src/rest/providers/serper.js");
+  const original = globalThis.fetch;
+  const sent: Array<{ url: string; body: Record<string, unknown> }> = [];
+  let organic: unknown[] = [
+    { title: "Pier at dusk", source: "Example News", link: "https://news.example/pier", imageUrl: "x-raw-image:///abc", thumbnailUrl: "https://gstatic.example/t.jpg" },
+    { title: "Pier photo", source: "Photos", link: "https://photos.example/p", imageUrl: "https://photos.example/p.jpg", thumbnailUrl: "https://gstatic.example/u.jpg" },
+  ];
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+    return new Response(JSON.stringify({ organic, credits: 3 }), { status: 200 });
+  };
+  try {
+    const adapter = new SerperAdapter();
+    assert.ok(adapter.tools().some((tool) => tool.name === "serper_lens"));
+    const found = await adapter.call("serper_lens", { url: "https://example.com/a.jpg", limit: 5 }, "k") as { items: Array<{ url: string; imageUrl: string; source?: string }> };
+    assert.deepEqual(sent[0], { url: "https://google.serper.dev/lens", body: { url: "https://example.com/a.jpg" } });
+    assert.deepEqual(found.items.map((item) => [item.url, item.imageUrl, item.source]), [
+      ["https://news.example/pier", "https://gstatic.example/t.jpg", "Example News"],
+      ["https://photos.example/p", "https://photos.example/p.jpg", "Photos"],
+    ]);
+    organic = [];
+    assert.deepEqual(await adapter.call("serper_lens", { url: "https://example.com/b.jpg" }, "k"), { items: [], warnings: [LENS_NO_MATCHES] });
+  } finally {
+    globalThis.fetch = original;
+  }
+});

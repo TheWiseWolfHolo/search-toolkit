@@ -69,7 +69,7 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       const query = args.join(" ").trim();
       if (!query) {
         throw new Error(
-          "Usage: search-toolkit search <query> [--mode general|exact|current|official|context] [--quality balanced|max] [--limit n] [--freshness day|week|month|year] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars n] [--cross]",
+          "Usage: search-toolkit search <query> [--mode general|exact|current|official|scholar|code|context] [--quality balanced|max] [--limit n] [--freshness day|week|month|year] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars n] [--cross]",
         );
       }
       const includeDomains = csvFlag(options.string("domains"));
@@ -84,6 +84,15 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
         ...(includeDomains.length ? { includeDomains } : {}),
         ...(excludeDomains.length ? { excludeDomains } : {}),
         ...(options.has("cross") ? { crossCheck: true } : {}),
+      }), options);
+    } else if (name === "images") {
+      const input = args.join(" ").trim();
+      if (!input) throw new Error("Usage: search-toolkit images <query | image-url> [--limit n]");
+      // A lone http(s) URL is an image to search by; anything else is a text query.
+      const byImage = /^https?:\/\/\S+$/i.test(input);
+      show(await toolkit.callTool("search_images", {
+        ...(byImage ? { imageUrl: input } : { query: input }),
+        ...optional("limit", options.number("limit")),
       }), options);
     } else if (name === "fetch") {
       if (!args.length) {
@@ -198,6 +207,7 @@ function helpText(): string {
 
 Commands:
   search-toolkit search <query> [--mode m] [--quality q] [--limit n] [--freshness f] [--domains a,b] [--exclude-domains x,y] [--max-chars n] [--cross]
+  search-toolkit images <query | image-url> [--limit n]   an image URL searches by image (Google Lens)
   search-toolkit fetch <url...> [--quality max] [--max-chars n] [--offset n] [--section heading]
   search-toolkit tools [--profile full|curated|lean] [--json]
   search-toolkit call <tool> '{"query":"..."}' [--json]

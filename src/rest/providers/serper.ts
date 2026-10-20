@@ -2,9 +2,29 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { requestJson, searchTool, type RestAdapter } from "../base.js";
 import { normalizeItem, normalizeSerperImage, numberArg, stringArg } from "../normalize.js";
 
+const LENS_TOOL: Tool = {
+  name: "serper_lens",
+  title: "Serper Lens",
+  description: "Reverse image search through Google Lens: pages showing the same or a visually similar image, with page link, publisher, and image URLs. Needs a publicly reachable image URL; costs 3 Serper credits.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      url: { type: "string", minLength: 1, description: "Public http(s) URL of the image" },
+      limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+      gl: { type: "string", description: "Country code" },
+      hl: { type: "string", description: "Language code" },
+    },
+    required: ["url"],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true, openWorldHint: true },
+};
+
+export const LENS_NO_MATCHES = "Google Lens found no matches. Some image hosts, Wikimedia originals among them, do not serve Google's fetcher; a smaller or re-hosted copy of the same image usually works.";
+
 export class SerperAdapter implements RestAdapter {
   tools(): Tool[] {
-    return ["search", "news", "images", "scholar"].map((kind) => searchTool(
+    return [...["search", "news", "images", "scholar"].map((kind) => searchTool(
       `serper_${kind}`,
       `Serper ${kind[0]?.toUpperCase()}${kind.slice(1)}`,
       kind === "images"
@@ -19,11 +39,12 @@ export class SerperAdapter implements RestAdapter {
         page: { type: "integer", minimum: 1, description: "1-based result page number" },
         autocorrect: { type: "boolean", description: "Enable Google query autocorrect" },
       },
-    ));
+    )), LENS_TOOL];
   }
 
   async call(tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
     const kind = tool.replace("serper_", "");
+    if (kind === "lens") return this.lens(args, key);
     const body: Record<string, unknown> = { q: stringArg(args, "query"), num: numberArg(args, "limit", 6) };
     for (const name of ["gl", "hl", "tbs"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
     if (typeof args.page === "number") body.page = args.page;
@@ -37,5 +58,22 @@ export class SerperAdapter implements RestAdapter {
     const dateKeys = kind === "scholar" ? ["year", "date"] : ["date"];
     const normalize = kind === "images" ? normalizeSerperImage : (row: unknown) => normalizeItem(row, { dateKeys });
     return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalize) : [] };
+  }
+
+  private async lens(args: Record<string, unknown>, key: string): Promise<unknown> {
+    const body: Record<string, unknown> = { url: stringArg(args, "url") };
+    for (const name of ["gl", "hl"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
+    const data = await requestJson("https://google.serper.dev/lens", {
+      method: "POST",
+      headers: { "X-API-KEY": key, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 30_000);
+    const rows = Array.isArray(data.organic) ? data.organic.slice(0, numberArg(args, "limit", 10)) : [];
+    // Lens sometimes names the matched image with an internal x-raw-image:// reference; the thumbnail is the usable copy.
+    const items = rows.map((row) => {
+      const item = normalizeSerperImage(row);
+      return item.imageUrl.startsWith("x-raw-image:") ? { ...item, imageUrl: item.thumbnailUrl ?? "" } : item;
+    });
+    return items.length ? { items } : { items, warnings: [LENS_NO_MATCHES] };
   }
 }

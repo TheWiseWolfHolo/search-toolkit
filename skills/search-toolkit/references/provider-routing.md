@@ -66,9 +66,11 @@ An availability failure that allows a second provider is: HTTP 401/402, an authe
 
 ### Image discovery
 
-`search_images` prefers Brave's independent image index, then Parallel Image Search, and falls back to Serper's Google Images results only after an availability failure. Country hints are ignored so a narrow regional request cannot displace the stronger primary index; use `brave_image_search`, `parallel_image_search`, or `serper_images` directly when country targeting or the index itself is the requirement. Tavily images remain available through direct Tavily Search but are not part of the automatic chain because their shape is not a normalized image result. Preserve original image URLs separately from source-page URLs and thumbnails.
+With `query`, `search_images` prefers Brave's independent image index, then Serper's Google Images, then Parallel Image Search, moving on only after an availability failure. Country hints are ignored so a narrow regional request cannot displace the stronger primary index; use `brave_image_search`, `parallel_image_search`, or `serper_images` directly when country targeting or the index itself is the requirement. Tavily images remain available through direct Tavily Search but are not part of the automatic chain because their shape is not a normalized image result. Preserve original image URLs separately from source-page URLs and thumbnails.
 
-None of these tools performs reverse image search. An uploaded image can reach a reverse-image provider only if the client exposes an attachment URL or passes supported image bytes to a tool. Captioning the upload and then running text-to-image search is a useful fallback, but it must not be described as visual matching or source tracing.
+With `imageUrl`, it runs a Google Lens reverse search (`serper_lens`, 3 Serper credits): pages that show the same or a visually similar picture, each with page link, publisher, image, and thumbnail. Use it to identify what a picture shows, find a larger or original copy, or trace where an image has been published. Lens gives no dates, so it cannot prove which copy came first; fetch the candidate pages and compare their dates when the origin matters.
+
+The image must be reachable at a public http(s) URL. Some hosts, Wikimedia originals among them, do not serve Google's fetcher and return no matches; a resized or re-hosted copy usually works. A local file or a chat upload without a URL cannot be searched by image. Describing the picture and running a text search is a fallback, but say that it is a text search, not visual matching.
 
 ## Provider roles
 

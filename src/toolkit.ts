@@ -301,8 +301,14 @@ export class SearchToolkit {
   }
 
   private async callImageSearch(args: Record<string, unknown>): Promise<unknown> {
+    const imageUrl = typeof args.imageUrl === "string" ? args.imageUrl.trim() : "";
+    const query = typeof args.query === "string" ? args.query.trim() : "";
+    if (!imageUrl && !query) throw new Error("Invalid arguments for search_images: provide query (text) or imageUrl (an image to search by)");
+    if (imageUrl && !/^https?:\/\//i.test(imageUrl)) {
+      throw new Error("Invalid arguments for search_images: imageUrl must be a public http(s) URL; local files cannot be searched by image");
+    }
     const key = cacheKey("search_images", {
-      query: String(args.query ?? "").trim(), limit: args.limit, language: args.language, safesearch: args.safesearch,
+      query: imageUrl ? undefined : query, imageUrl: imageUrl || undefined, limit: args.limit, language: args.language, safesearch: args.safesearch,
     });
     const hit = this.fromCache(key);
     if (hit) return hit;
@@ -310,7 +316,7 @@ export class SearchToolkit {
       tool: "search_images",
       capability: "images",
       maxProviders: 2,
-      meta: { mode: "images" },
+      meta: { mode: imageUrl ? "reverse-image" : "images" },
       emptyError: "No automatic image-search provider is available",
     }), this.cacheTtl.search);
   }

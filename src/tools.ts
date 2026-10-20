@@ -88,16 +88,16 @@ export const AUTO_TOOL: Tool = {
 export const IMAGES_TOOL: Tool = {
   name: "search_images",
   title: "Search for images",
-  description: "Text-to-image discovery through Brave Images, with Serper Google Images and Parallel Image Search as availability fallbacks. Returns image URLs and source metadata; it cannot inspect an uploaded image or do reverse image search. Use the provider tools directly for country filtering.",
+  description: "Find images by text (`query`: Brave Images, then Serper Google Images and Parallel), or by image (`imageUrl`: Google Lens reverse search for pages showing the same or a similar picture, to identify it or trace where it came from). Returns image URLs, source pages, and publishers. imageUrl must be publicly reachable; local files are not supported.",
   inputSchema: {
     type: "object",
     properties: {
-      query: { type: "string", minLength: 1 },
+      query: { type: "string", minLength: 1, description: "Text describing the images to find" },
+      imageUrl: { type: "string", minLength: 1, description: "Public http(s) URL of an image to search by, instead of query" },
       limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
       language: { type: "string", description: "Optional language preference for Brave/Serper" },
       safesearch: { type: "string", enum: ["strict", "off"], default: "strict", description: "Applied by Brave; the fallback uses its own safety behavior" },
     },
-    required: ["query"],
     additionalProperties: false,
   },
   annotations: READ_ONLY_OPEN,

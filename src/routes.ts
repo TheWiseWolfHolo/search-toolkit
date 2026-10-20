@@ -227,6 +227,9 @@ export function imageCandidates(args: Record<string, unknown> = {}): AutoCandida
   const query = String(args.query ?? "");
   const limit = Number(args.limit ?? 10);
   const language = typeof args.language === "string" && args.language ? args.language : undefined;
+  if (typeof args.imageUrl === "string" && args.imageUrl.trim()) {
+    return [{ name: "serper_lens", nativeArguments: { url: args.imageUrl.trim(), limit, ...(language ? { hl: language } : {}) } }];
+  }
   const safesearch = args.safesearch === "off" ? "off" : "strict";
   return [
     {

@@ -28,7 +28,7 @@ Without MCP, use the `search-toolkit` CLI on the same backend: `search-toolkit s
 - A claim that matters needs an independent second path: `crossCheck: true`, or Brave. Reposts of one report count as one source.
 - `search_auto` stops at the first provider that answers, so it will not give you a second opinion unless you ask for `crossCheck`.
 - Code that is local or was just pushed: use `rg` or `gh search code`; web indexes lag.
-- `search_images` is text-to-image only: no uploads, no reverse search.
+- `search_images` finds images by `query`, or by image with `imageUrl` (Google Lens): pages showing the same or a similar picture, to identify it or trace its source. The image needs a public URL; a local file or chat upload without one cannot be searched by image.
 - Crawl, map, and structured extraction belong to Firecrawl or Tavily, and long sourced research to LinkUp, only when the task needs more than lookup.
 - AnySearch is manual; call `get_sub_domains` before any vertical search. Grok X Search only when X itself matters. Jina and TinyFish are search-only.
 - Doubao only when the user explicitly asks or approves its quota, never as a fallback.

@@ -1,42 +1,56 @@
 # Search Toolkit
 
-Official-first web tools for AI agents, with persistent multi-key rotation, MCP over STDIO or Streamable HTTP, a CLI, and an Agent Skill.
+Web search, image search, and page reading for AI agents, routed across many providers by measured quality, with persistent multi-key rotation. Runs as an MCP server (STDIO or Streamable HTTP), a CLI, and an Agent Skill.
 
 [简体中文](README.zh-CN.md)
 
-## Design
+## What it gives an agent
 
-Search Toolkit preserves provider-specific capabilities instead of flattening every backend into one generic search endpoint.
+Three tools cover almost every lookup. Each picks a provider, falls back when one fails, and says which one answered.
 
-- Official Remote MCP proxy: Exa, Tavily, LinkUp, and AnySearch.
-- Official STDIO MCP proxy: Firecrawl.
-- Thin official-API adapters: Querit, Serper (Web/News/Images/Scholar), Brave Web/News/Images/LLM Context, You.com Search/Contents, Parallel Search/Extract/Images, Octen Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
-- Persistent per-provider key pools in SQLite, tracked by key fingerprint so reordering a pool never moves history.
-- Upstream tool names and schemas are discovered from the official MCP servers, cached on disk, and filtered by an optional per-provider tool policy.
-- Raw keys stay outside the repository in a local JSON file.
+| Tool | Does | How it routes |
+| --- | --- | --- |
+| `search_auto` | Web search | Seven modes, each with a provider order measured on real queries (see below). Chinese queries switch to Chinese-market settings automatically. |
+| `search_images` | Images by text, or by image | Text: Brave Images → Serper Images → Parallel Images. Image URL: Google Lens reverse search, to identify a picture or trace where it appears. |
+| `fetch_auto` | Read 1 to 5 known URLs | Exa → Tavily → Parallel Extract → You.com Contents → Firecrawl → LinkUp → AnySearch, skipping readers that return challenge pages, almost nothing, or a refusal. |
 
-Official references used by the implementation include the [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Exa MCP](https://exa.ai/docs/reference/exa-mcp), [Tavily MCP](https://docs.tavily.com/documentation/mcp), [LinkUp MCP](https://docs.linkup.so/pages/integrations/mcp/mcp), [AnySearch MCP](https://github.com/anysearch-ai/anysearch-mcp-server), [Firecrawl MCP](https://docs.firecrawl.dev/use-cases/developers-mcp), [You.com Search API](https://you.com/docs/api-reference/search/v1-search), and [Parallel Search API](https://docs.parallel.ai/api-reference/search/search).
+`search_auto` modes, in balanced quality:
 
-## Provider capabilities
+| Mode | For | English order | Chinese order |
+| --- | --- | --- | --- |
+| `general` | Everyday lookup | Parallel → Serper → Exa → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
+| `exact` | Quoted strings, error messages | Parallel → Brave → Serper → You.com → Tavily | Brave → Serper → You.com → Parallel |
+| `official` | Vendor, product, or government sites | Exa → Brave → Serper → You.com | Exa → Serper → Parallel → Brave |
+| `current` | News | You.com → Octen → Serper News → Brave News → Tavily news | same, with Chinese settings |
+| `scholar` | Papers, preprints, reviews | Exa (research objective) → Parallel → You.com → Serper Scholar | same |
+| `code` | Repositories, examples, API usage | Exa (GitHub category) → Parallel → Serper → Exa | same |
+| `context` | Grounding chunks within a token budget | Brave LLM Context → Parallel → You.com → Tavily | same |
+
+`quality: max` is for broad or multi-hop questions: English general starts with Exa Advanced with highlights, and Parallel, You.com, Brave, and Tavily switch to their deeper settings. Every mode accepts `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult`, translated into each provider's own parameters. `crossCheck: true` asks two independent indexes at once and marks which found each result.
+
+### Where the orders come from
+
+`npm run eval:search` runs the queries in `evals/search-queries.json` (English and Chinese, across web, news, scholar, and code) on every provider variant and scores, without an LLM judge, whether an authoritative source is in the top three, the share of authoritative sources, language match, dates, freshness, duplicates, and latency. It spends real quota. The October 2026 run, the end-to-end check of the shipped routes, and a comparison with the Artificial Analysis Search Index are in [docs/search-eval-2026-10.md](docs/search-eval-2026-10.md).
+
+## Providers
 
 | Intent | Provider or tool family |
 | --- | --- |
-| General quality-oriented lookup | `search_auto`: modes general, exact, current, official, scholar, code, and context, each with a measured provider order; Chinese queries use Brave and Serper with Chinese-market settings |
-| Exact strings, semantic discovery, code and page content | Exa official MCP |
-| Current news and fast-changing facts | Brave News, You.com, Tavily, and Serper News |
-| Independent confirmation | `search_auto` with `crossCheck: true` |
-| Read one or up to 5 known URLs | `fetch_auto`: Exa → Tavily → Parallel Extract → You.com Contents → Firecrawl → LinkUp → AnySearch |
-| Worldwide text-to-image discovery with original image and source metadata | `search_images`: Brave Images → Parallel Images → Serper Images |
-| Concise Google results, news, images, and Scholar papers | Serper (`serper_search`, `serper_news`, `serper_images`, `serper_scholar`) |
-| Independent web/news index (`extraSnippets`, `goggles`) and LLM-ready grounding chunks | Brave Web, News, and LLM Context |
-| Unified Web + News results, live `knowledge` cards, `full_page` markdown, and URL extraction | You.com Search & Contents (`you_search`, `you_contents`) |
-| Semantic objectives with ranked excerpts, batch URL extraction, and semantic image search | Parallel Search, Extract, and Images (`parallel_search`, `parallel_extract`, `parallel_image_search`) |
+| Semantic discovery, official sites, papers, code repositories, page content | Exa official MCP |
+| Concise Google results, news, images, Scholar papers, and Google Lens | Serper (`serper_search`, `serper_news`, `serper_images`, `serper_scholar`, `serper_lens`) |
+| Independent web and news index (`extraSnippets`, `goggles`) and LLM-ready grounding chunks | Brave Web, News, Images, and LLM Context |
+| Web + News in one call, live `knowledge` cards, `full_page` Markdown, URL extraction | You.com Search and Contents |
+| Natural-language objectives with ranked excerpts, batch URL extraction, semantic image search | Parallel Search, Extract, and Images |
+| Fast search with long query-relevant highlights | Octen Search |
+| Managed extraction, mapping, crawling, and research | Tavily official MCP |
+| Search, scrape, crawl, map, and structured extraction | Firecrawl official MCP |
 | Sourced answers and research jobs | LinkUp official MCP |
-| Manual general/vertical search, parallel batches, and URL extraction | AnySearch official MCP |
-| Search, scrape, crawl, map and structured extraction | Firecrawl official MCP |
-| Compact search (manual) | Querit, TinyFish Search, Jina Search |
-| Chinese-local search with explicit quota use | Doubao, manual-only |
-| Native Web + X search with model synthesis and image/video understanding | Grok / xAI Responses |
+| Manual general or vertical search, parallel batches, URL extraction | AnySearch official MCP |
+| Native Web + X search with model synthesis and image or video understanding | Grok / xAI Responses |
+| Compact search, manual only | Querit, TinyFish Search, Jina Search |
+| Chinese local search with explicit quota use, manual only | Doubao |
+
+Remote MCP servers (Exa, Tavily, LinkUp, AnySearch) and the STDIO Firecrawl server are proxied with their official tool names and schemas. Everything else is a thin adapter over the provider's official REST API.
 
 ## Install
 
@@ -47,17 +61,11 @@ npm install
 npm run build
 ```
 
-Node.js 22 or newer is required. Node.js 24 is recommended because the persistent rotation store uses the built-in `node:sqlite` module.
+Node.js 22 or newer is required; Node.js 24 is recommended. Key health, the result cache, and provider health live in a SQLite file through the built-in `node:sqlite`.
 
 ## Configure
 
-Copy `config.example.json` to a private path outside the repository and replace the placeholder keys:
-
-```powershell
-$env:SEARCH_TOOLKIT_CONFIG = "$HOME/.config/search-toolkit/providers.json"
-```
-
-On Windows the default is `%USERPROFILE%/.config/search-toolkit/providers.json`, which avoids MSIX `AppData/Local` virtualization so packaged apps and ordinary CLI processes read the same physical file.
+Copy `config.example.json` to a private path outside the repository and replace the placeholder keys. The default path is `%USERPROFILE%/.config/search-toolkit/providers.json` on Windows (outside `AppData/Local`, so MSIX-packaged apps and ordinary processes read the same file) and `~/.config/search-toolkit/providers.json` elsewhere. `SEARCH_TOOLKIT_CONFIG` or `--config` points somewhere else.
 
 A provider entry lists what it may be chosen for without being named:
 
@@ -65,101 +73,109 @@ A provider entry lists what it may be chosen for without being named:
 "brave": {
   "enabled": true,
   "auto": ["search", "images"],
-  "keys": ["..."],
+  "keys": ["key-1", "key-2"],
   "integration": { "kind": "rest", "adapter": "brave" }
 }
 ```
 
-`auto` is any of `search`, `images`, `fetch`. An empty list makes a provider manual-only: it is reachable by calling its tools directly and is never picked by `search_auto`, `search_images`, or `fetch_auto`, nor used as a fallback. Doubao ships that way.
+`auto` holds any of `search`, `images`, `fetch`. An empty list makes a provider manual-only: its tools can still be called directly, but `search_auto`, `search_images`, and `fetch_auto` never pick it, not even as a fallback. Doubao ships that way.
 
 Optional top-level settings:
 
-- `profile`: `full` (default), `curated`, or `lean`, see [Context cost](#context-cost). The `--profile` flag and the `SEARCH_TOOLKIT_PROFILE` variable override it.
+- `profile`: `full` (default), `curated`, or `lean`; see [Context cost](#context-cost). `--profile` and `SEARCH_TOOLKIT_PROFILE` override it.
+- `cache`: `enabled` (default `true`), `searchTtlSeconds` (900), `newsTtlSeconds` (300, for `mode: current`), `fetchTtlSeconds` (1800); see [Cache](#cache).
 - `shaping`: `maxDescriptionChars` (default 700) and `maxParamDescriptionChars` (default 220); `0` keeps upstream text untouched.
-- `cache`: `enabled` (default `true`), `searchTtlSeconds` (900), `newsTtlSeconds` (300, for `mode: current`), and `fetchTtlSeconds` (1800); see [Cache](#cache).
-- Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (a replacement description keyed by upstream tool name).
+- Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (replacement descriptions keyed by upstream tool name). Firecrawl defaults to seven retrieval tools; `toolPolicy.allow: ["*"]` exposes its whole catalog.
 
-Version 1 configs (`automatic` / `manualOnly`) still load. Upgrade one with:
+Version 1 configs (`automatic` / `manualOnly`) still load. To upgrade one:
 
 ```powershell
 node dist/src/cli.js migrate-config           # dry run: lists the changes
 node dist/src/cli.js migrate-config --write   # backs the file up, then writes v2
 ```
 
-The migration also drops provider `options` that no adapter reads. Only Grok reads any (`model`, `reasoningEffort`, `systemPrompt`, `customUrl`).
-
 ## CLI
 
 ```powershell
 node dist/src/cli.js search "MCP session management" --quality max --domains modelcontextprotocol.io,github.com --cross
+node dist/src/cli.js search "台风 预警" --mode current
+node dist/src/cli.js images "Shorncliffe pier at sunset"
+node dist/src/cli.js images https://example.com/photo.jpg   # search by image
 node dist/src/cli.js fetch https://example.com/article --section "Rate Limits" --max-chars 8000
 node dist/src/cli.js fetch https://example.com/a https://example.com/b --max-chars 6000
+node dist/src/cli.js call serper_scholar '{"query":"retrieval augmented generation survey","limit":5}'
 node dist/src/cli.js tools --profile curated  # names; --json for full schemas
-node dist/src/cli.js call querit_search '{"query":"latest AI agent news","limit":5}'
-node dist/src/cli.js status                   # masked key health, cool-downs, warnings
-node dist/src/cli.js reset brave              # clear key cool-downs (optionally a slot)
-node dist/src/cli.js probe querit "Search Toolkit rotation probe"
+node dist/src/cli.js status --verbose         # masked key health, cool-downs, last errors
+node dist/src/cli.js reset brave              # clear key cool-downs (optionally one slot)
+node dist/src/cli.js cache-clear
 ```
 
-`search`, `fetch`, and `call` print what a model would read: a route line, then the results. Add `--json` for the complete structured result.
+`search`, `images`, `fetch`, and `call` print what a model would read. `--json` prints the complete structured result, `--no-cache` skips the cache.
 
 ## MCP
 
-Build first, then add the local STDIO server to your client, for example Codex:
+Build first, then register the STDIO server with your client. Claude Code:
+
+```powershell
+claude mcp add searchToolkit --scope user -- node C:/path/to/search-toolkit/dist/src/mcp-server.js --config C:/Users/you/.config/search-toolkit/providers.json
+```
+
+Codex (`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.searchToolkit]
 command = "C:/path/to/node.exe"
-args = ["C:/path/to/search-toolkit/dist/src/mcp-server.js", "--config", "C:/Users/you/.config/search-toolkit/providers.json"]
+args = ["C:/path/to/search-toolkit/dist/src/mcp-server.js", "--config", "C:/Users/you/.config/search-toolkit/providers.json", "--profile", "lean"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
-enabled = true
 default_tools_approval_mode = "writes"
 ```
 
-The server exposes:
-
-- Provider-prefixed official upstream tools selected by each provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its whole management catalog.
-- Every configured REST adapter tool (or only specialist tools under `--profile curated`).
-- `search_auto`: quality-first routing with `balanced` and `max` profiles, plus `includeDomains`, `excludeDomains`, universal `freshness`, and `maxCharsPerResult`. It prioritizes providers with currently healthy key slots, de-duplicates canonical URLs (including `.md` / `.html` documentation mirrors), and caps per-result excerpts so routine lookups stay compact and inline-friendly. `crossCheck: true` queries two independent search providers (REST or normalized MCP such as Exa and Tavily) concurrently and merges them by canonical URL, listing which providers found each result.
-- `fetch_auto`: reads one `url` or up to five `urls` concurrently through Exa, Tavily, Parallel Extract, You.com Contents, Firecrawl, LinkUp, or AnySearch (those whose `auto` includes `fetch`). Readers that return almost nothing, return anti-bot/Cloudflare challenge shells, or are refused by the site (403/429/5xx) are skipped automatically, up to three are tried, a missing page (404/410) ends the chain, and `maxChars`, `offset`, and `section` support pagination and Markdown heading extraction. `quality: max` leads with Firecrawl for JavaScript-heavy pages.
-- `search_images`: quality-first worldwide text-to-image discovery through Brave Images, Parallel Image Search, and Serper Images on availability failure. It is not reverse image search and does not receive chat attachments by itself.
-- `search_pool_status`: masked key-pool diagnostics, including cool-downs.
-- `search_rotation_probe`: a live, quota-consuming rotation proof.
-
-### Routing evidence
-
-Provider orders are measured, not guessed. `npm run eval:search` runs the queries in `evals/search-queries.json` (English and Chinese, across web, news, scholar, and code) on every provider variant and scores gold-source hits, language match, dates, freshness, duplicates, and latency without an LLM judge. It spends real quota. The October 2026 run behind the current orders is summarized in [docs/search-eval-2026-10.md](docs/search-eval-2026-10.md).
+Besides the three unified tools, the server exposes `search_pool_status` (masked key diagnostics), `search_rotation_probe` (a live, quota-consuming rotation proof), and, depending on the profile, the provider tools directly or through the `provider_tools` / `provider_call` gateway. Tools that create, update, start jobs, or send feedback are not marked read-only, and delete tools are marked destructive.
 
 ### What the model reads
 
-Results carry one leading route block, `{"searchToolkitRoute": {provider, tool}}` (plus `searchToolkitAuto` with mode and quality for the unified tools, and an `attempts` list such as `["parallel_search:429", "you_search:success"]` only when a fallback happened), then compact text: numbered results with the provider's publication date, a bounded excerpt (page furniture such as copy buttons, anchors, and table rules removed; when an excerpt is too long, the sentences that mention the query are kept instead of only its head), and for cross-checks the providers that found each result. Upstream MCP search tools (such as Exa and Tavily) are normalized into the same compact numbered format. Over MCP only `content` and `_meta` are sent: Claude Code and other clients show `structuredContent` to the model instead of `content` when both are present, which would replace the readable text with raw JSON. Upstream `outputSchema` declarations are dropped for the same reason. The full structured result is still available from the CLI with `--json`. Brave LLM Context renders grounding per source; Grok answers list their citations.
+Each result starts with one compact route block, then readable text:
+
+```text
+{"searchToolkitRoute":{"provider":"parallel","tool":"parallel_search"},"searchToolkitAuto":{"mode":"general","quality":"balanced"}}
+
+1. Page title (2026-10-15)
+   https://example.com/page
+   Excerpt with the sentences that mention the query…
+```
+
+`attempts` (such as `["parallel_search:429", "you_search:success"]`) appears only when a fallback happened, and `"cached":"4m"` only when the answer was reused. Excerpts are bounded, lose page furniture (copy buttons, anchors, table rules, image and link syntax), and keep the sentences that mention the query when they are too long. Image results list the image, thumbnail, source page, and publisher.
+
+Over MCP only `content` and `_meta` are sent. Claude Code and other clients show `structuredContent` to the model instead of `content` when both are present, which would replace the readable text with raw JSON, and upstream `outputSchema` declarations are dropped for the same reason. The full structured result is available from the CLI with `--json`.
 
 ### Cache
 
-`search_auto`, `search_images`, and `fetch_auto` keep successful answers for a short time in the shared state database, so a search or page repeated by another turn, agent, or client within the window is answered without a provider call. A reused answer says so in its route block, for example `"cached":"4m"`. A cached page also serves later `offset` and `section` reads of the same document. Failures and thin fetch fallbacks are never cached. Turn it off with `cache.enabled: false`, `SEARCH_TOOLKIT_CACHE=off`, or `--no-cache` on the CLI; `search-toolkit cache-clear` empties it.
+`search_auto`, `search_images`, and `fetch_auto` keep successful answers for a short time in the shared state database, so a search or page repeated by another turn, agent, or client within the window costs no provider call. A cached page also serves later `offset` and `section` reads of the same document. Failures and thin fetch fallbacks are never cached. Turn it off with `cache.enabled: false`, `SEARCH_TOOLKIT_CACHE=off`, or `--no-cache`.
 
-### Same-site duplicates and provider health
+### Result hygiene and provider health
 
-Within one result list, the same page in another release or mirror (same site, same title once `x.y.z` version numbers are dropped) keeps only its best-ranked copy, and providers are asked for two more results than shown so the list stays full. A provider whose automatic calls failed twice in a row is tried after its healthy peers; one success or a quiet half hour restores its place. `search_pool_status` shows the score as `recentFailure`.
+Within one result list, duplicate URLs (including `.md` / `.html` documentation mirrors) and the same page in another release (same site, same title once `x.y.z` versions are dropped) keep only their best-ranked copy, and providers are asked for two extra results so the list stays full. A provider whose automatic calls failed twice in a row is tried after its healthy peers until one success or a quiet half hour; `search_pool_status` shows the score as `recentFailure`.
 
 ### Context cost
 
-Every tool schema a client loads costs context. By default descriptions are trimmed at a paragraph or sentence boundary and parameter descriptions are capped, while types, enums, defaults, and required lists are left as the upstream defined them:
+Every tool schema a client loads costs context. Descriptions are trimmed at a sentence boundary and parameter descriptions are capped; types, enums, defaults, and required lists stay as the upstream defined them. With every provider in the example config enabled:
 
-- `full` (default): exposes all unified tools and every enabled provider tool (~42 tools).
-- `curated`: exposes the unified tools, the `provider_tools`/`provider_call` gateway, and high-value specialist tools (`exa_web_search_advanced_exa`, `brave_llm_context`, `parallel_extract`, `you_contents`, `serper_scholar`, `firecrawl_*`, `tavily_tavily_research`, `linkup_linkup_research`, `grok_*`, `doubao_search`, `anysearch_batch_search`) while omitting redundant single-provider basic search tools.
-- `lean`: exposes only `search_auto`, `search_images`, `fetch_auto`, `search_pool_status`, `search_rotation_probe`, and the `provider_tools`/`provider_call` gateway (7 tools total).
+| Profile | Exposes | Tools | Schema tokens |
+| --- | --- | --- | --- |
+| `full` (default) | Unified tools and every provider tool | 49 | about 20,000 |
+| `curated` | Unified tools, the gateway, and specialist tools (`exa_web_search_advanced_exa`, `brave_llm_context`, `parallel_extract`, `you_contents`, `serper_scholar`, `firecrawl_*`, `tavily_tavily_research`, `linkup_linkup_research`, `grok_*`, `doubao_search`, `anysearch_batch_search`) | 22 | about 9,400 |
+| `lean` | Unified tools, status, probe, and the gateway | 7 | about 2,100 |
 
-`npm run measure` reports startup time and tool-list size for any profile.
+`npm run measure -- --profile lean` reports startup time and tool-list size.
 
 ### Startup
 
-Providers are discovered concurrently, and each upstream's tool catalog is cached beside the state database. Later starts are ready immediately and connect to an upstream (including spawning Firecrawl) only when one of its tools is first called. A catalog older than 12 hours is refreshed in the background and, if it changed, announced with `notifications/tools/list_changed`.
+Providers are discovered concurrently and each upstream's tool catalog is cached beside the state database, so later starts are ready in under half a second and connect to an upstream (including spawning Firecrawl) only when one of its tools is first called. A catalog older than 12 hours is refreshed in the background and announced with `notifications/tools/list_changed` when it changed.
 
 ## Streamable HTTP
 
-For mobile or remote clients, start the same toolkit over stateful Streamable HTTP. Store only SHA-256 client-token hashes on the server:
+For mobile or remote clients, serve the same toolkit over stateful Streamable HTTP. The server stores only SHA-256 hashes of client tokens:
 
 ```powershell
 $env:SEARCH_TOOLKIT_HTTP_TOKENS = '[{"hash":"<owner-sha256-hex>"},{"hash":"<guest-sha256-hex>","tools":["search_auto","search_images"],"requestsPerMinute":30,"maxSessions":8}]'
@@ -167,28 +183,27 @@ $env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
 node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
-Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token; shared tokens should use an explicit tool allowlist, a `requestsPerMinute` limit, and an optional `maxSessions` cap. Owner tokens remain uncapped unless they set `maxSessions`. STDIO and HTTP use the same provider config, rotation state, and routing; HTTP only adds transport-level access policy. Put public deployments behind HTTPS and keep provider keys server-side.
+Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. Put public deployments behind HTTPS; provider keys stay on the server.
 
 ## Key rotation
 
-Each request selects one healthy key from the provider's pool. The cursor persists across restarts and is coordinated across concurrent agent processes through SQLite. Health is recorded per key fingerprint, so reordering or trimming a pool does not misattribute history.
+Each request takes one healthy key from the provider's pool. The cursor persists across restarts and is shared by concurrent processes through SQLite. Health is recorded per key fingerprint, so reordering or trimming a pool does not misattribute history.
 
-- Success: clear the key's strikes.
-- `401` or `403`: bench the key for 1 hour, then 6, then 24 on repeated faults. Never permanent: when the window ends the key is tried again.
-- `402`: bench for 30 minutes, then 6 hours, then 24.
-- `429`: bench for 1, 5, then 15 minutes, or for the provider's `Retry-After`.
-- `401`/`402`/`403`/`429` try up to 3 healthy keys per pool.
-- `5xx` or a dropped connection tries one more healthy key; neither benches the key.
-- A timeout is not retried on another key: the automatic route moves on to the next provider instead.
-- `400`, `404`, `422`, an upstream MCP tool's own error, and the status of a page being read (for example a site answering Parallel Extract with 403) are not blamed on a key and do not retry. Only error text that is clearly about the key (invalid key, quota, rate limit) counts as a key fault.
-- `search-toolkit status --verbose` shows each key's last error and when it happened.
-- A pool whose keys are all benched fails closed and says when the first recovers. `search-toolkit reset <provider>` clears the benches by hand.
+| Outcome | Effect on the key | Retry |
+| --- | --- | --- |
+| Success | Strikes cleared | |
+| `401` / `403` | Benched 1 h, then 6 h, then 24 h | Up to 3 keys |
+| `402` | Benched 30 min, then 6 h, then 24 h | Up to 3 keys |
+| `429` | Benched 1, 5, then 15 min, or for `Retry-After` | Up to 3 keys |
+| `5xx` or dropped connection | Not benched | One more key |
+| Timeout | Not benched | None; the route moves to the next provider |
+| `400` / `404` / `422`, an upstream tool's own error, or the status of a page being read | Not benched | None |
 
-`providers.json`, raw keys, and rotation state are ignored by Git. Command output and MCP metadata show only masked key slots.
+Benches are never permanent. Only error text clearly about the key (invalid key, quota, balance, rate limit) counts as a key fault; a site answering a reader with 403 does not. A pool whose keys are all benched fails at once and says when the first recovers; `reset <provider>` clears benches by hand. `providers.json`, raw keys, and state are ignored by Git, and output shows only masked key slots.
 
 ## Skill
 
-The reusable skill is under `skills/search-toolkit/`. Copy or link it into your agent's skill directory. It routes normal research directly to Search Toolkit and keeps deep-research orchestration for genuinely multi-stage work.
+`skills/search-toolkit/` is an Agent Skill: copy or link it into your agent's skill directory. `SKILL.md` holds the routing rules an agent needs on every search; `references/provider-routing.md` holds provider roles, mode details, and how to read results.
 
 ## Development
 
@@ -196,6 +211,7 @@ The reusable skill is under `skills/search-toolkit/`. Copy or link it into your 
 npm test
 npm run smoke:mcp
 npm run measure
+npm run eval:search -- --variants auto          # spends quota
 npm run smoke:http -- https://search-mcp.example.com/mcp C:/private/client-token.txt
 npm pack --dry-run
 ```
