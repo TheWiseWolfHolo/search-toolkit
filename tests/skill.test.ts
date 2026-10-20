@@ -20,7 +20,7 @@ test("the skill has valid frontmatter and its reference file exists", () => {
 
 test("every unified tool is described in the skill, and the skill names no phantom unified tool", () => {
   for (const name of MANAGEMENT_TOOL_NAMES) assert.ok(skill.includes(name), `${name} is described in the skill`);
-  const unified = /(?:search|fetch|provider)_[a-z_]+/g;
+  const unified = /\b(?:search|fetch|provider)_[a-z_]+\b/g;
   for (const hit of skill.matchAll(unified)) {
     const name = hit[0];
     // `search_toolkit`-style words and CLI/provider names are fine; an unknown unified-looking tool is a typo.
