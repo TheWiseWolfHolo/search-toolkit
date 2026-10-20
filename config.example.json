@@ -73,7 +73,7 @@
     },
     "querit": {
       "enabled": true,
-      "auto": ["search"],
+      "auto": [],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "querit" }
     },

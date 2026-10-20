@@ -69,6 +69,7 @@ export function normalizeConfig(raw: unknown): LoadedConfig {
   const config: ToolkitConfig = { version: 2, statePath: record.statePath as string, providers };
   if (record.profile !== undefined) config.profile = record.profile as NonNullable<ToolkitConfig["profile"]>;
   if (record.shaping !== undefined) config.shaping = record.shaping as NonNullable<ToolkitConfig["shaping"]>;
+  if (record.cache !== undefined) config.cache = record.cache as NonNullable<ToolkitConfig["cache"]>;
   validateConfig(config);
   return { config, notes };
 }
@@ -123,6 +124,7 @@ export function migrateConfig(raw: unknown): { document: Record<string, unknown>
       statePath: config.statePath,
       ...(config.profile ? { profile: config.profile } : {}),
       ...(config.shaping ? { shaping: config.shaping } : {}),
+      ...(config.cache ? { cache: config.cache } : {}),
       providers,
     },
     changes,
@@ -136,7 +138,19 @@ export function validateConfig(config: ToolkitConfig): void {
   if (config.profile !== undefined && config.profile !== "full" && config.profile !== "curated" && config.profile !== "lean") {
     throw new Error("profile must be \"full\", \"curated\", or \"lean\"");
   }
+  if (config.cache !== undefined) validateCache(config.cache);
   for (const [name, provider] of Object.entries(config.providers)) validateProvider(name, provider);
+}
+
+function validateCache(cache: NonNullable<ToolkitConfig["cache"]>): void {
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) throw new Error("cache must be an object");
+  if (cache.enabled !== undefined && typeof cache.enabled !== "boolean") throw new Error("cache.enabled must be a boolean");
+  for (const field of ["searchTtlSeconds", "newsTtlSeconds", "fetchTtlSeconds"] as const) {
+    const value = cache[field];
+    if (value !== undefined && (!Number.isInteger(value) || value < 0 || value > 86_400)) {
+      throw new Error(`cache.${field} must be an integer from 0 to 86400`);
+    }
+  }
 }
 
 function validateProvider(name: string, provider: ProviderConfig): void {

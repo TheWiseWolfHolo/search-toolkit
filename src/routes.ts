@@ -1,4 +1,4 @@
-export type AutoMode = "general" | "exact" | "current" | "official" | "context";
+export type AutoMode = "general" | "exact" | "current" | "official" | "context" | "scholar" | "code";
 export type AutoQuality = "balanced" | "max";
 export type AutoFreshness = "day" | "week" | "month" | "year";
 
@@ -8,7 +8,7 @@ export interface AutoCandidate {
 }
 
 export function autoMode(value: unknown): AutoMode {
-  return value === "exact" || value === "current" || value === "official" || value === "context"
+  return value === "exact" || value === "current" || value === "official" || value === "context" || value === "scholar" || value === "code"
     ? value
     : "general";
 }
@@ -39,6 +39,8 @@ function queryWithSiteOperators(query: string, include: string[], exclude: strin
 export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown> = {}): AutoCandidate[] {
   const query = String(args.query ?? "");
   const limit = Number(args.limit ?? 6);
+  // Ask for a little more than shown: duplicates and mirrors are dropped before the list is capped to `limit`.
+  const requested = Math.min(limit + 2, 20);
   const parallelMode = quality === "max" ? "advanced" : "fast";
   const tavilyDepth = quality === "max" ? "advanced" : "basic";
   const braveTokens = typeof args.maximumNumberOfTokens === "number" ? args.maximumNumberOfTokens : 4096;
@@ -106,7 +108,9 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
       name,
       nativeArguments: {
         query: usesSiteQuery ? siteQuery : query,
-        ...(limitKey ? { [limitKey]: limit } : {}),
+        ...(limitKey ? { [limitKey]: requested } : {}),
+        // Exa ranks by a stated goal; its schema requires one.
+        ...(name === "exa_web_search_exa" ? { objective: query } : {}),
         ...domainArgsFor(name),
         ...timeArgsFor(name),
         ...budgetArgsFor(name),
@@ -115,52 +119,103 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
     };
   };
   const braveMax = quality === "max" ? { extraSnippets: true } : {};
+  const youLevel = quality === "max" ? "highlights" : "snippets";
+  // Chinese queries get Chinese-market parameters; the 2026-10 eval showed Parallel and You.com
+  // mixing in English pages for them while Brave and Serper with zh settings stayed on target.
+  const zh = isChineseQuery(query);
+  const braveLang = zh ? { searchLang: "zh-hans", country: "CN" } : {};
+  const serperLang = zh ? { gl: "cn", hl: "zh-cn" } : {};
+  const exa = quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa";
+  // Orders follow evals/search-queries.json results (gold-source hits, language match, dates, latency).
   switch (mode) {
     case "exact":
-      return [
-        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
-        candidate("serper_search", "limit"),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, exact_match: true }),
-        candidate("brave_web_search", "limit", braveMax),
-      ];
+      return zh
+        ? [
+            candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
+            candidate("serper_search", "limit", serperLang),
+            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("parallel_search", "maxResults", { mode: parallelMode }),
+          ]
+        : [
+            candidate("parallel_search", "maxResults", { mode: parallelMode }),
+            candidate("brave_web_search", "limit", braveMax),
+            candidate("serper_search", "limit"),
+            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, exact_match: true }),
+          ];
     case "context":
       return quality === "max"
         ? [
             candidate("parallel_search", "maxResults", { mode: "advanced" }),
-            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
+            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens, ...(zh ? { searchLang: "zh-hans" } : {}) }),
             candidate("you_search", "limit", { contentLevel: "highlights" }),
             candidate("tavily_tavily_search", "max_results", { search_depth: "advanced" }),
           ]
         : [
-            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens }),
+            candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens, ...(zh ? { searchLang: "zh-hans" } : {}) }),
             candidate("parallel_search", "maxResults", { mode: "basic" }),
             candidate("you_search", "limit", { contentLevel: "highlights" }),
             candidate("tavily_tavily_search", "max_results", { search_depth: "basic" }),
           ];
     case "current":
       return [
-        candidate("brave_news_search", "limit", { freshness: braveFreshness, ...braveMax }),
-        candidate("serper_news", "limit", { tbs: serperFreshness }),
-        candidate("you_search", "limit", { contentLevel: "snippets", freshness }),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, time_range: freshness }),
+        candidate("you_search", "limit", { contentLevel: youLevel, freshness }),
+        candidate("serper_news", "limit", { tbs: serperFreshness, ...serperLang }),
+        candidate("brave_news_search", "limit", { freshness: braveFreshness, ...braveLang, ...braveMax }),
+        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, topic: "news", time_range: freshness }),
       ];
     case "official":
+      return zh
+        ? [
+            candidate(exa, "numResults"),
+            candidate("serper_search", "limit", serperLang),
+            candidate("parallel_search", "maxResults", { mode: parallelMode }),
+            candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
+          ]
+        : [
+            candidate(exa, "numResults"),
+            candidate("brave_web_search", "limit", braveMax),
+            candidate("serper_search", "limit"),
+            candidate("you_search", "limit", { contentLevel: youLevel }),
+          ];
+    case "scholar":
       return [
+        candidate("exa_web_search_exa", "numResults", { objective: `Research papers, preprints, and scholarly reviews about: ${query}` }),
+        candidate("parallel_search", "maxResults", { mode: parallelMode }),
+        candidate("you_search", "limit", { contentLevel: youLevel }),
+        candidate("serper_scholar", "limit"),
+      ];
+    case "code":
+      return [
+        candidate("exa_web_search_advanced_exa", "numResults", { category: "github" }),
+        candidate("parallel_search", "maxResults", { mode: parallelMode }),
         candidate("serper_search", "limit"),
-        candidate("brave_web_search", "limit", braveMax),
-        candidate(quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa", "numResults"),
-        candidate("you_search", "limit", { contentLevel: "snippets" }),
+        candidate("exa_web_search_exa", "numResults"),
       ];
     default:
-      return [
-        candidate("parallel_search", "maxResults", { mode: parallelMode }),
-        candidate("you_search", "limit", { contentLevel: quality === "max" ? "highlights" : "snippets" }),
-        candidate("brave_web_search", "limit", braveMax),
-        candidate("exa_web_search_exa", "numResults"),
-        candidate("querit_search", "limit"),
-        candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
-      ];
+      return zh
+        ? [
+            candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
+            candidate("serper_search", "limit", serperLang),
+            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("parallel_search", "maxResults", { mode: parallelMode }),
+            candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
+          ]
+        : [
+            candidate("parallel_search", "maxResults", { mode: parallelMode }),
+            candidate("serper_search", "limit"),
+            candidate("exa_web_search_exa", "numResults"),
+            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("brave_web_search", "limit", braveMax),
+            candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
+          ];
   }
+}
+
+/** Han characters with no kana: Japanese text is left on the default routes. */
+export function isChineseQuery(query: string): boolean {
+  const han = query.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  return han >= 2 && !/[\u3040-\u30ff]/.test(query);
 }
 
 export function imageCandidates(args: Record<string, unknown> = {}): AutoCandidate[] {

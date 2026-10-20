@@ -22,7 +22,9 @@ Without MCP, use the `search-toolkit` CLI on the same backend: `search-toolkit s
 
 ## Routing rules
 
-- Start with `search_auto`. Use `quality: max` when the question is broad, ambiguous, multi-aspect, or high-value; `mode: exact` for exact strings and code, `current` for news, `context` for grounding chunks within a token budget, `official` for official sites. Pass `includeDomains`, `excludeDomains`, `freshness`, or `maxCharsPerResult` directly on `search_auto` when needed.
+- Start with `search_auto`. Use `quality: max` when the question is broad, ambiguous, multi-aspect, or high-value; `mode: exact` for quoted strings and error messages, `current` for news, `official` for official sites, `scholar` for papers, `code` for repositories and code examples, `context` for grounding chunks within a token budget. Pass `includeDomains`, `excludeDomains`, `freshness`, or `maxCharsPerResult` directly on `search_auto` when needed.
+- Search Chinese topics in Chinese; such queries are routed to Chinese-market settings, so do not translate them to English first.
+- `"cached":"4m"` in the route block means the answer was reused from the last few minutes. For news that must be newer, say so or rephrase.
 - A claim that matters needs an independent second path: `crossCheck: true`, or Brave. Reposts of one report count as one source.
 - `search_auto` stops at the first provider that answers, so it will not give you a second opinion unless you ask for `crossCheck`.
 - Code that is local or was just pushed: use `rg` or `gh search code`; web indexes lag.

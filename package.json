@@ -38,7 +38,8 @@
     "measure": "npm run build && node dist/scripts/measure.js",
     "smoke:http": "npm run build && node dist/scripts/smoke-http.js",
     "probe:all": "npm run build && node dist/scripts/probe-all.js",
-    "prepack": "npm test"
+    "prepack": "npm test",
+    "eval:search": "npm run build && node dist/scripts/eval-search.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.31.0",

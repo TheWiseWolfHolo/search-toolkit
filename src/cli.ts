@@ -5,7 +5,7 @@ import { SearchToolkit } from "./toolkit.js";
 import type { ToolkitProfile } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
 
-const BOOLEAN_FLAGS = new Set(["json", "verbose", "write", "cross"]);
+const BOOLEAN_FLAGS = new Set(["json", "verbose", "write", "cross", "no-cache"]);
 
 const argv = process.argv.slice(2);
 const flags = takeFlags(argv);
@@ -31,7 +31,10 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
   if (profile !== undefined && profile !== "full" && profile !== "curated" && profile !== "lean") {
     throw new Error(`--profile must be "full", "curated", or "lean", got "${profile}"`);
   }
-  const toolkit = new SearchToolkit(options.string("config"), profile ? { profile: profile as ToolkitProfile } : {});
+  const toolkit = new SearchToolkit(options.string("config"), {
+    ...(profile ? { profile: profile as ToolkitProfile } : {}),
+    ...(options.has("no-cache") ? { cache: false } : {}),
+  });
   try {
     if (name === "config") {
       console.log(JSON.stringify(sanitizedConfig(toolkit.config), null, 2));
@@ -45,6 +48,10 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       if (slot !== undefined && !Number.isInteger(slot)) throw new Error("slot must be an integer");
       const cleared = toolkit.rotation.reset(provider, config.keys, slot);
       console.log(`${provider}: cleared ${cleared} key${cleared === 1 ? "" : "s"}`);
+      return;
+    }
+    if (name === "cache-clear") {
+      console.log(`cleared ${toolkit.cache?.clear() ?? 0} cached results`);
       return;
     }
     await toolkit.initialize();
@@ -197,6 +204,7 @@ Commands:
   search-toolkit status [--verbose]
   search-toolkit reset <provider> [slot]       clear key cool-downs
   search-toolkit config                        sanitized config summary
+  search-toolkit cache-clear                   drop cached search and fetch results
   search-toolkit migrate-config [--write]      upgrade a v1 config (dry run by default)
   search-toolkit probe <provider> <query>      live rotation test; consumes quota
 
@@ -204,5 +212,6 @@ Options:
   --config <path>   Override SEARCH_TOOLKIT_CONFIG
   --profile <p>     Override SEARCH_TOOLKIT_PROFILE (full, curated, lean)
   --json            Print the complete structured result instead of model-readable text
+  --no-cache        Skip the result cache for this run (or set SEARCH_TOOLKIT_CACHE=off)
 `;
 }

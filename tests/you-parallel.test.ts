@@ -181,7 +181,7 @@ test("search_auto context mode falls back to Parallel when Brave is unavailable"
       tool: "parallel_search",
       upstreamTool: "parallel_search",
     });
-    assert.equal((requestBody.advanced_settings as Record<string, unknown>).max_results, 4);
+    assert.equal((requestBody.advanced_settings as Record<string, unknown>).max_results, 6);
     assert.equal(requestBody.mode, "basic");
   } finally {
     await toolkit.close();
@@ -282,7 +282,7 @@ test("search_auto max quality uses Parallel Advanced and reports the auto route"
       limit: 5,
     }) as Record<string, unknown>;
     assert.equal(requestBody.mode, "advanced");
-    assert.equal((requestBody.advanced_settings as Record<string, unknown>).max_results, 5);
+    assert.equal((requestBody.advanced_settings as Record<string, unknown>).max_results, 7);
     assert.deepEqual((output.structuredContent as Record<string, unknown>).searchAuto, {
       mode: "general",
       quality: "max",
@@ -345,7 +345,7 @@ test("search_auto tries one compatible retrieval provider after an availability 
       limit: 4,
     }) as Record<string, unknown>;
     assert.deepEqual(urls, ["https://api.parallel.ai/v1/search", "https://ydc-index.io/v1/search"]);
-    assert.equal(youBody.count, 4);
+    assert.equal(youBody.count, 6);
     assert.equal(youBody.extraction, undefined);
     assert.deepEqual((output.structuredContent as Record<string, unknown>).route, {
       provider: "you",
@@ -356,7 +356,7 @@ test("search_auto tries one compatible retrieval provider after an availability 
     assert.equal(auto.providerAttempt, 2);
     assert.deepEqual(auto.attempts, [
       { provider: "parallel", tool: "parallel_search", candidateRank: 1, outcome: "error", status: 503 },
-      { provider: "you", tool: "you_search", candidateRank: 2, outcome: "success" },
+      { provider: "you", tool: "you_search", candidateRank: 4, outcome: "success" },
     ]);
 
     urls.length = 0;

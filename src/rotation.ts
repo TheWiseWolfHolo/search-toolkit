@@ -7,6 +7,10 @@ import type { KeySelection } from "./types.js";
 const SCHEMA_VERSION = 2;
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const HEALTH_STEP = 0.4;
+const HEALTH_HALF_LIFE_MS = 15 * MINUTE;
+/** A provider at or above this recent failure score is tried after its healthy peers. */
+export const FLAKY_SCORE = 0.5;
 
 export function maskKey(key: string): string {
   const value = key.trim();
@@ -83,6 +87,43 @@ export class RotationStore {
     `);
     this.addColumn("last_error", "TEXT");
     this.addColumn("last_error_at", "INTEGER");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS provider_health (
+        provider TEXT PRIMARY KEY,
+        failure_score REAL NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  /**
+   * Fold one automatic-route outcome into the provider's recent failure score.
+   * Each failure moves the score 40% of the way to 1, each success 40% toward 0,
+   * and the score halves every 15 minutes without news, so two failures in a
+   * row mark a provider flaky and one success or a quiet half hour clears it.
+   */
+  recordProviderOutcome(provider: string, failed: boolean): void {
+    const now = Date.now();
+    const current = this.decayedScore(this.statement("SELECT failure_score, updated_at FROM provider_health WHERE provider = ?")
+      .get(provider) as { failure_score: number; updated_at: number } | undefined, now);
+    const next = current * (1 - HEALTH_STEP) + (failed ? HEALTH_STEP : 0);
+    this.statement(`
+      INSERT INTO provider_health(provider, failure_score, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET failure_score = excluded.failure_score, updated_at = excluded.updated_at
+    `).run(provider, next, now);
+  }
+
+  /** Recent failure score per provider, 0 (healthy) to 1 (failing every time), decayed to now. */
+  providerFailureScores(): Map<string, number> {
+    const now = Date.now();
+    const rows = this.statement("SELECT provider, failure_score, updated_at FROM provider_health").all() as
+      Array<{ provider: string; failure_score: number; updated_at: number }>;
+    return new Map(rows.map((row) => [row.provider, this.decayedScore(row, now)]));
+  }
+
+  private decayedScore(row: { failure_score: number; updated_at: number } | undefined, now: number): number {
+    if (!row) return 0;
+    return row.failure_score * 0.5 ** (Math.max(0, now - row.updated_at) / HEALTH_HALF_LIFE_MS);
   }
 
   /** Columns added after a state file was first created. Older processes keep working: they name their columns. */

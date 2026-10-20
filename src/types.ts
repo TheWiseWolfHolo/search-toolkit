@@ -52,11 +52,20 @@ export interface ShapingConfig {
   maxParamDescriptionChars?: number;
 }
 
+/** Short-lived reuse of unified-tool results. Seconds; 0 turns that kind off. */
+export interface CacheConfig {
+  enabled?: boolean;
+  searchTtlSeconds?: number;
+  newsTtlSeconds?: number;
+  fetchTtlSeconds?: number;
+}
+
 export interface ToolkitConfig {
   version: 2;
   statePath: string;
   profile?: ToolkitProfile;
   shaping?: ShapingConfig;
+  cache?: CacheConfig;
   providers: Record<string, ProviderConfig>;
 }
 

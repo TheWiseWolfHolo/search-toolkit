@@ -15,7 +15,7 @@
 
 | 需求 | 首选 |
 | --- | --- |
-| 普通质量优先 Web 搜索 | `search_auto`，由 Parallel、You.com、Brave、Exa、Querit、Tavily 按能力路由 |
+| 普通质量优先 Web 搜索 | `search_auto`：general、exact、current、official、scholar、code、context 七种模式，各自按实测排序；中文查询走带中文参数的 Brave 和 Serper |
 | 精确字符串、代码、语义搜索、网页正文 | Exa 官方 MCP |
 | 当前新闻与快速变化事实 | Brave News、You.com、Tavily、Serper News |
 | 独立来源互相印证 | `search_auto` + `crossCheck: true` |
@@ -28,7 +28,7 @@
 | 带来源答案和研究任务 | LinkUp 官方 MCP |
 | 手动通用/垂直搜索、并行批量查询与 URL 提取 | AnySearch 官方 MCP |
 | 搜索、抓取、爬取、站点 Map、结构化提取 | Firecrawl 官方 MCP |
-| 紧凑搜索 | Jina Search、TinyFish Search |
+| 紧凑搜索（手动） | Querit、TinyFish Search、Jina Search |
 | 中文本地搜索且明确同意消耗次数 | 豆包 |
 | Web + X 原生搜索、图片/视频理解与模型综合 | Grok / xAI Responses |
 
@@ -106,9 +106,21 @@ MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 2
 - `search_pool_status`：查看脱敏 Key 池、冷却和轮询状态。
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
 
+### 路由依据
+
+各模式的 Provider 顺序来自实测。`npm run eval:search` 会把 `evals/search-queries.json` 里的中英文查询（覆盖网页、新闻、论文、代码）在每个 Provider 变体上跑一遍，不用模型打分，只统计权威来源命中、语言一致、日期、时效、重复和延迟。它会消耗真实额度。2026 年 10 月那次评测是现在排序的依据，摘要见 [docs/search-eval-2026-10.md](docs/search-eval-2026-10.md)。
+
 ### 模型读到什么
 
-每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool}}`（统一工具另带 `searchToolkitAuto`，记录 mode 和 quality；只有发生降级时才附 `attempts`，形如 `["parallel_search:429", "you_search:success"]`），后面是紧凑文本：带发布日期的编号结果、受控长度摘录，以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式，同时在 `structuredContent` 保留结构化结果。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
+每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool}}`（统一工具另带 `searchToolkitAuto`，记录 mode 和 quality；只有发生降级时才附 `attempts`，形如 `["parallel_search:429", "you_search:success"]`），后面是紧凑文本：带发布日期的编号结果、受控长度摘录（去掉复制按钮、锚点、表格分隔线这类页面残渣；摘录过长时优先保留含查询词的句子，不只截开头），以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式，同时在 `structuredContent` 保留结构化结果。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
+
+### 缓存
+
+`search_auto`、`search_images`、`fetch_auto` 的成功结果会在共享状态库里保留一小段时间。窗口内另一轮对话、另一个 agent 或另一个客户端重复同样的搜索或抓取，直接复用，不再调用 Provider。复用的结果会在路由块里写明，例如 `"cached":"4m"`。抓过的页面还能直接服务同一文档后续的 `offset` 和 `section` 读取。失败和内容过少的抓取不会缓存。默认窗口是普通搜索 15 分钟、`mode: current` 5 分钟、抓取 30 分钟，可在配置的 `cache` 里调整或用 `enabled: false` 关闭；也可以设 `SEARCH_TOOLKIT_CACHE=off`，或在 CLI 加 `--no-cache`；`search-toolkit cache-clear` 清空缓存。
+
+### 同站重复与 Provider 健康度
+
+同一份结果里，同一页面的其他版本或镜像（同一站点，标题去掉 `x.y.z` 版本号后相同）只留排名最靠前的一条。为了去重后条数不缩水，会向 Provider 多要两条。自动路由里连续失败两次的 Provider 会暂时排到健康的 Provider 后面，成功一次或安静半小时后恢复原位。`search_pool_status` 里的 `recentFailure` 就是这个分数。
 
 ### 上下文成本
 

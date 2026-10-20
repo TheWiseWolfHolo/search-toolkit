@@ -8,7 +8,7 @@ export class QueritAdapter implements RestAdapter {
     return [searchTool(
       "querit_search",
       "Querit Search",
-      "Search with Querit's filtered web search API. Best general-purpose default in Search Toolkit.",
+      "Search with Querit's filtered web search API. Compact English results; pass languages for other languages.",
       {
         sitesInclude: { type: "array", items: { type: "string" } },
         sitesExclude: { type: "array", items: { type: "string" } },

@@ -21,7 +21,7 @@ Official references used by the implementation include the [MCP TypeScript SDK](
 
 | Intent | Provider or tool family |
 | --- | --- |
-| General quality-oriented lookup | `search_auto` with Parallel, You.com, Brave, Exa, Querit, and Tavily |
+| General quality-oriented lookup | `search_auto`: modes general, exact, current, official, scholar, code, and context, each with a measured provider order; Chinese queries use Brave and Serper with Chinese-market settings |
 | Exact strings, semantic discovery, code and page content | Exa official MCP |
 | Current news and fast-changing facts | Brave News, You.com, Tavily, and Serper News |
 | Independent confirmation | `search_auto` with `crossCheck: true` |
@@ -34,7 +34,7 @@ Official references used by the implementation include the [MCP TypeScript SDK](
 | Sourced answers and research jobs | LinkUp official MCP |
 | Manual general/vertical search, parallel batches, and URL extraction | AnySearch official MCP |
 | Search, scrape, crawl, map and structured extraction | Firecrawl official MCP |
-| Compact search | Jina Search, TinyFish Search |
+| Compact search (manual) | Querit, TinyFish Search, Jina Search |
 | Chinese-local search with explicit quota use | Doubao, manual-only |
 | Native Web + X search with model synthesis and image/video understanding | Grok / xAI Responses |
 
@@ -76,6 +76,7 @@ Optional top-level settings:
 
 - `profile`: `full` (default), `curated`, or `lean`, see [Context cost](#context-cost). The `--profile` flag and the `SEARCH_TOOLKIT_PROFILE` variable override it.
 - `shaping`: `maxDescriptionChars` (default 700) and `maxParamDescriptionChars` (default 220); `0` keeps upstream text untouched.
+- `cache`: `enabled` (default `true`), `searchTtlSeconds` (900), `newsTtlSeconds` (300, for `mode: current`), and `fetchTtlSeconds` (1800); see [Cache](#cache).
 - Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (a replacement description keyed by upstream tool name).
 
 Version 1 configs (`automatic` / `manualOnly`) still load. Upgrade one with:
@@ -126,9 +127,21 @@ The server exposes:
 - `search_pool_status`: masked key-pool diagnostics, including cool-downs.
 - `search_rotation_probe`: a live, quota-consuming rotation proof.
 
+### Routing evidence
+
+Provider orders are measured, not guessed. `npm run eval:search` runs the queries in `evals/search-queries.json` (English and Chinese, across web, news, scholar, and code) on every provider variant and scores gold-source hits, language match, dates, freshness, duplicates, and latency without an LLM judge. It spends real quota. The October 2026 run behind the current orders is summarized in [docs/search-eval-2026-10.md](docs/search-eval-2026-10.md).
+
 ### What the model reads
 
-Results carry one leading route block, `{"searchToolkitRoute": {provider, tool}}` (plus `searchToolkitAuto` with mode and quality for the unified tools, and an `attempts` list such as `["parallel_search:429", "you_search:success"]` only when a fallback happened), then compact text: numbered results with the provider's publication date, a bounded excerpt, and for cross-checks the providers that found each result. Upstream MCP search tools (such as Exa and Tavily) are normalized into the same compact numbered format while preserving structured items in `structuredContent`. Brave LLM Context renders grounding per source; Grok answers list their citations.
+Results carry one leading route block, `{"searchToolkitRoute": {provider, tool}}` (plus `searchToolkitAuto` with mode and quality for the unified tools, and an `attempts` list such as `["parallel_search:429", "you_search:success"]` only when a fallback happened), then compact text: numbered results with the provider's publication date, a bounded excerpt (page furniture such as copy buttons, anchors, and table rules removed; when an excerpt is too long, the sentences that mention the query are kept instead of only its head), and for cross-checks the providers that found each result. Upstream MCP search tools (such as Exa and Tavily) are normalized into the same compact numbered format while preserving structured items in `structuredContent`. Brave LLM Context renders grounding per source; Grok answers list their citations.
+
+### Cache
+
+`search_auto`, `search_images`, and `fetch_auto` keep successful answers for a short time in the shared state database, so a search or page repeated by another turn, agent, or client within the window is answered without a provider call. A reused answer says so in its route block, for example `"cached":"4m"`. A cached page also serves later `offset` and `section` reads of the same document. Failures and thin fetch fallbacks are never cached. Turn it off with `cache.enabled: false`, `SEARCH_TOOLKIT_CACHE=off`, or `--no-cache` on the CLI; `search-toolkit cache-clear` empties it.
+
+### Same-site duplicates and provider health
+
+Within one result list, the same page in another release or mirror (same site, same title once `x.y.z` version numbers are dropped) keeps only its best-ranked copy, and providers are asked for two more results than shown so the list stays full. A provider whose automatic calls failed twice in a row is tried after its healthy peers; one success or a quiet half hour restores its place. `search_pool_status` shows the score as `recentFailure`.
 
 ### Context cost
 

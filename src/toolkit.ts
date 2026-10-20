@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import { cacheKey, ResultCache } from "./cache.js";
 import { integrationFingerprint, ToolCatalogCache, toolsFingerprint } from "./catalog.js";
 import { loadConfigWithNotes } from "./config.js";
 import { isPageFailure, shouldFailoverProvider, statusFromError, textOfContent, ToolResultError } from "./errors.js";
@@ -14,7 +15,7 @@ import {
 import { renderItems } from "./render.js";
 import { RestProvider } from "./rest/base.js";
 import { adapterFor } from "./rest/adapters.js";
-import { RotationStore } from "./rotation.js";
+import { FLAKY_SCORE, RotationStore } from "./rotation.js";
 import {
   autoCandidates, autoMode, fetchCandidates, imageCandidates,
   type AutoCandidate, type AutoQuality,
@@ -54,6 +55,8 @@ interface ChainSpec {
 
 export interface ToolkitOptions {
   profile?: ToolkitProfile;
+  /** false turns the result cache off for this process, whatever the config says. */
+  cache?: boolean;
 }
 
 type Validator = ReturnType<AjvJsonSchemaValidator["getValidator"]>;
@@ -68,6 +71,8 @@ export class SearchToolkit {
   readonly rotation: RotationStore;
   readonly warnings: string[] = [];
   readonly profile: ToolkitProfile;
+  readonly cache: ResultCache | undefined;
+  private readonly cacheTtl: { search: number; news: number; fetch: number };
   private readonly bindings = new Map<string, ToolBinding>();
   private readonly fullTools = new Map<string, Tool>();
   private readonly owned = new Map<string, string[]>();
@@ -88,6 +93,14 @@ export class SearchToolkit {
     ));
     this.profile = options.profile ?? profileFromEnv() ?? this.config.profile ?? "full";
     this.catalog = new ToolCatalogCache(join(dirname(this.config.statePath), "tool-catalog.json"));
+    const cache = this.config.cache ?? {};
+    const cacheOn = options.cache ?? (process.env.SEARCH_TOOLKIT_CACHE !== "off" && cache.enabled !== false);
+    this.cache = cacheOn ? new ResultCache(this.config.statePath) : undefined;
+    this.cacheTtl = {
+      search: (cache.searchTtlSeconds ?? 900) * 1000,
+      news: (cache.newsTtlSeconds ?? 300) * 1000,
+      fetch: (cache.fetchTtlSeconds ?? 1800) * 1000,
+    };
   }
 
   async initialize(): Promise<void> {
@@ -153,10 +166,12 @@ export class SearchToolkit {
     this.listeners.clear();
     await Promise.allSettled(Array.from(this.upstreams.values(), (provider) => provider.close()));
     this.rotation.close();
+    this.cache?.close();
   }
 
   status(verbose = false): unknown {
     const tools = this.listTools();
+    const failureScores = this.rotation.providerFailureScores();
     return {
       version: 2,
       profile: this.profile,
@@ -166,11 +181,13 @@ export class SearchToolkit {
         enabled: config.enabled,
         auto: config.auto,
         integration: config.integration.kind,
+        ...((failureScores.get(name) ?? 0) >= 0.05 ? { recentFailure: Number((failureScores.get(name) ?? 0).toFixed(2)) } : {}),
         rotation: verbose
           ? this.rotation.status(name, config.keys)
           : compactRotation(this.rotation.status(name, config.keys)),
       })),
       toolCount: tools.length,
+      cache: this.cache ? { entries: this.cache.entries() } : { enabled: false },
       ...(verbose ? { tools: tools.map((tool) => tool.name) } : {}),
       warnings: this.warnings,
     };
@@ -252,6 +269,15 @@ export class SearchToolkit {
     const maxCharsPerItem = typeof args.maxCharsPerResult === "number"
       ? args.maxCharsPerResult
       : quality === "max" ? DEFAULT_MAX_EXCERPT_CHARS : DEFAULT_BALANCED_EXCERPT_CHARS;
+    const query = String(args.query ?? "");
+    const key = cacheKey("search_auto", {
+      query: query.trim(), mode, quality, limit, freshness: args.freshness,
+      includeDomains: args.includeDomains, excludeDomains: args.excludeDomains, maxCharsPerResult: args.maxCharsPerResult,
+      maximumNumberOfTokens: mode === "context" ? args.maximumNumberOfTokens : undefined, crossCheck: args.crossCheck === true,
+    });
+    const hit = this.fromCache(key);
+    if (hit) return hit;
+    const ttl = mode === "current" ? this.cacheTtl.news : this.cacheTtl.search;
     const candidates = autoCandidates(mode, quality, args);
     const spec: ChainSpec = {
       tool: "search_auto",
@@ -262,8 +288,8 @@ export class SearchToolkit {
     };
     let remaining = candidates;
     if (args.crossCheck === true && mode !== "context") {
-      const checked = await this.crossCheck(candidates, spec, limit, maxCharsPerItem);
-      if (checked.output) return checked.output;
+      const checked = await this.crossCheck(candidates, spec, limit, maxCharsPerItem, query);
+      if (checked.output) return this.remember(key, checked.output, ttl);
       // Both sides failed: carry on down the list without calling them again.
       remaining = candidates.filter((candidate) => {
         const provider = this.bindings.get(candidate.name)?.provider;
@@ -271,17 +297,22 @@ export class SearchToolkit {
       });
     }
     const output = await this.runChain(remaining, spec);
-    return mode === "context" ? output : capSearchOutput(output, maxCharsPerItem, limit);
+    return this.remember(key, mode === "context" ? output : capSearchOutput(output, maxCharsPerItem, limit, query), ttl);
   }
 
-  private callImageSearch(args: Record<string, unknown>): Promise<unknown> {
-    return this.runChain(imageCandidates(args), {
+  private async callImageSearch(args: Record<string, unknown>): Promise<unknown> {
+    const key = cacheKey("search_images", {
+      query: String(args.query ?? "").trim(), limit: args.limit, language: args.language, safesearch: args.safesearch,
+    });
+    const hit = this.fromCache(key);
+    if (hit) return hit;
+    return this.remember(key, await this.runChain(imageCandidates(args), {
       tool: "search_images",
       capability: "images",
       maxProviders: 2,
       meta: { mode: "images" },
       emptyError: "No automatic image-search provider is available",
-    });
+    }), this.cacheTtl.search);
   }
 
   private async callFetch(args: Record<string, unknown>): Promise<unknown> {
@@ -312,6 +343,13 @@ export class SearchToolkit {
   ): Promise<unknown> {
     const baseChars = truncateOpts.offset ? maxChars + truncateOpts.offset : maxChars;
     const requestChars = truncateOpts.section ? Math.max(baseChars, 24_000) : baseChars;
+    // One cached read serves later pages and sections of the same document while it covers them.
+    const key = cacheKey("fetch_auto", { url, quality });
+    const hit = this.cache?.get(key);
+    const cached = hit?.value as { output?: unknown; requestChars?: number } | undefined;
+    if (hit && cached?.output && coversRequest(cached.output, cached.requestChars ?? 0, requestChars)) {
+      return truncateBody(markCached(cached.output, hit.ageMs), maxChars, truncateOpts);
+    }
     const output = await this.runChain(fetchCandidates(quality, { url, maxChars: requestChars }), {
       tool: "fetch_auto",
       capability: "fetch",
@@ -321,6 +359,7 @@ export class SearchToolkit {
       usable: (candidate) => isUsableFetchText(bodyText(candidate)),
       failover: isPageFailure,
     });
+    if (succeeded(output)) this.cache?.set(key, { output, requestChars }, this.cacheTtl.fetch);
     return truncateBody(output, maxChars, truncateOpts);
   }
 
@@ -331,17 +370,18 @@ export class SearchToolkit {
         if (!entry.binding) return false;
         return this.config.providers[entry.binding.provider]?.auto.includes(capability) === true;
       });
+    // Healthy providers first, then ones failing repeatedly right now, then ones with every key benched.
+    const scores = this.rotation.providerFailureScores();
     const ready: typeof matched = [];
+    const flaky: typeof matched = [];
     const cooling: typeof matched = [];
     for (const entry of matched) {
       const keys = this.config.providers[entry.binding.provider]?.keys ?? [];
-      if (keys.length === 0 || this.rotation.usableSlots(entry.binding.provider, keys).length > 0) {
-        ready.push(entry);
-      } else {
-        cooling.push(entry);
-      }
+      if (keys.length > 0 && this.rotation.usableSlots(entry.binding.provider, keys).length === 0) cooling.push(entry);
+      else if ((scores.get(entry.binding.provider) ?? 0) >= FLAKY_SCORE) flaky.push(entry);
+      else ready.push(entry);
     }
-    return [...ready, ...cooling];
+    return [...ready, ...flaky, ...cooling];
   }
 
   /** Try candidates in order; move on only after a recognised availability failure or an unusable answer. */
@@ -365,6 +405,7 @@ export class SearchToolkit {
           continue;
         }
         attempts.push({ ...base, outcome: "success" });
+        this.noteOutcome(entry.binding.provider, false);
         return attachRouteMetadata(entry.binding, output, {
           ...spec.meta,
           candidateRank: entry.candidateRank,
@@ -375,6 +416,7 @@ export class SearchToolkit {
         lastError = error;
         const status = statusFromError(error);
         attempts.push({ ...base, outcome: "error", ...(status ? { status } : {}) });
+        if (shouldFailoverProvider(error) && !isPageFailure(error)) this.noteOutcome(entry.binding.provider, true);
         if (!shouldFailoverProvider(error) && !spec.failover?.(error)) throw autoFailure(error, attempts, spec.tool);
       }
     }
@@ -399,7 +441,8 @@ export class SearchToolkit {
     candidates: AutoCandidate[],
     spec: ChainSpec,
     limit: number,
-    maxCharsPerItem = DEFAULT_BALANCED_EXCERPT_CHARS,
+    maxCharsPerItem: number,
+    query: string,
   ): Promise<{ output?: unknown; failed: string[] }> {
     const seen = new Set<string>();
     const pair = this.eligible(candidates, spec.capability).filter((entry) => {
@@ -437,12 +480,32 @@ export class SearchToolkit {
       output: {
         content: [
           routeBlock(route, auto),
-          { type: "text", text: renderItems(merged, { maxCharsPerItem, dedupe: false }) },
+          { type: "text", text: renderItems(merged, { maxCharsPerItem, dedupe: false, query }) },
         ],
         structuredContent: { route, searchAuto: auto, result: { items: merged } },
         _meta: { searchToolkit: { route, auto } },
       },
     };
+  }
+
+  private fromCache(key: string): unknown | undefined {
+    const hit = this.cache?.get(key);
+    return hit ? markCached(hit.value, hit.ageMs) : undefined;
+  }
+
+  /** Cache an answer that came from a provider that actually succeeded, then hand it back. */
+  private remember(key: string, output: unknown, ttlMs: number): unknown {
+    if (succeeded(output)) this.cache?.set(key, output, ttlMs);
+    return output;
+  }
+
+  /** Provider health is advisory: a busy state file must not fail the call. */
+  private noteOutcome(provider: string, failed: boolean): void {
+    try {
+      this.rotation.recordProviderOutcome(provider, failed);
+    } catch {
+      // ordering falls back to the configured order
+    }
   }
 
   private gatewayList(args: Record<string, unknown>): unknown {
@@ -504,6 +567,32 @@ function profileFromEnv(): ToolkitProfile | undefined {
 
 function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
   return { exposed: tool, provider: "search_toolkit", upstreamName: tool.name, call };
+}
+
+/** A routed answer whose last attempt succeeded; thin fetch fallbacks and failures are not reused. */
+function succeeded(output: unknown): boolean {
+  const structured = (output as { structuredContent?: { route?: unknown; searchAuto?: { attempts?: unknown } } })?.structuredContent;
+  if (!structured?.route) return false;
+  const attempts = structured.searchAuto?.attempts;
+  return !Array.isArray(attempts) || (attempts.at(-1) as { outcome?: string } | undefined)?.outcome === "success";
+}
+
+/** A cached page serves a request when it was fetched with at least as much room, or already holds the whole page. */
+function coversRequest(output: unknown, cachedChars: number, wantedChars: number): boolean {
+  if (cachedChars >= wantedChars) return true;
+  const length = bodyText(output).length;
+  return length >= wantedChars || length < cachedChars * 0.9;
+}
+
+/** Say in the route block that this answer was reused, and how old it is. */
+function markCached(output: unknown, ageMs: number): unknown {
+  const record = output as { content?: unknown[]; structuredContent?: { route?: Route; searchAuto?: Record<string, unknown> } };
+  const route = record?.structuredContent?.route;
+  if (!route || !Array.isArray(record.content)) return output;
+  const seconds = Math.round(ageMs / 1000);
+  const auto = { ...(record.structuredContent?.searchAuto ?? {}), cached: seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m` };
+  const body = isRouteContentBlock(record.content[0]) ? record.content.slice(1) : record.content;
+  return { ...record, content: [routeBlock(route, auto), ...body], structuredContent: { ...record.structuredContent, searchAuto: auto } };
 }
 
 function compactRotation(rotation: ReturnType<RotationStore["status"]>): unknown {
@@ -574,7 +663,7 @@ function itemsOf(output: unknown): unknown[] | undefined {
   return Array.isArray(items) ? items : undefined;
 }
 
-function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number): unknown {
+function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number, query: string): unknown {
   const items = itemsOf(output);
   if (!items || !output || typeof output !== "object") return output;
   const record = output as { content?: unknown };
@@ -583,7 +672,7 @@ function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number
   const routeBlock = isRouteContentBlock(record.content[0]) ? [record.content[0]] : [];
   return {
     ...(output as object),
-    content: [...routeBlock, { type: "text", text: renderItems(capped, { maxCharsPerItem }) }],
+    content: [...routeBlock, { type: "text", text: renderItems(capped, { maxCharsPerItem, query }) }],
   };
 }
 

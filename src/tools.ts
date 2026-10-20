@@ -19,12 +19,17 @@ export const STATUS_TOOL: Tool = {
 export const AUTO_TOOL: Tool = {
   name: "search_auto",
   title: "Search with the recommended provider",
-  description: "Quality-first web search that picks the provider by mode and quality (Parallel, You.com, Brave, Exa, Querit, Tavily, Serper). balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
+  description: "Quality-first web search that picks the provider by mode, quality, and query language (Parallel, Serper, Exa, You.com, Brave, Tavily); Chinese queries use Chinese-market settings. Repeats within a few minutes are served from cache and marked cached. balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
   inputSchema: {
     type: "object",
     properties: {
       query: { type: "string", minLength: 1 },
-      mode: { type: "string", enum: ["general", "exact", "current", "official", "context"], default: "general" },
+      mode: {
+        type: "string",
+        enum: ["general", "exact", "current", "official", "context", "scholar", "code"],
+        default: "general",
+        description: "exact: quoted strings and error messages; current: news (past week by default); official: vendor or government sites; context: grounding chunks; scholar: papers; code: repositories and code examples",
+      },
       quality: {
         type: "string",
         enum: ["balanced", "max"],

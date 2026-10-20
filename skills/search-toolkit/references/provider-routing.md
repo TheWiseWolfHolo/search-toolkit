@@ -14,7 +14,7 @@ Choose providers by capability and task intent. Prefer strong retrieval that fit
 
 ## Reading a result
 
-Every result starts with a compact JSON block, `{"searchToolkitRoute": {"provider", "tool"}, "searchToolkitAuto": {"mode", "quality"}}`, followed by readable text: numbered results with the provider's publication date in parentheses when it reports one. When a fallback happened, `searchToolkitAuto.attempts` lists each try as `tool:outcome`, for example `["parallel_search:429", "you_search:success"]`; a first-try success omits it. The upstream tool name, candidate rank, and full attempt records are in `structuredContent` and `_meta`.
+Every result starts with a compact JSON block, `{"searchToolkitRoute": {"provider", "tool"}, "searchToolkitAuto": {"mode", "quality"}}`, followed by readable text: numbered results with the provider's publication date in parentheses when it reports one. When a fallback happened, `searchToolkitAuto.attempts` lists each try as `tool:outcome`, for example `["parallel_search:429", "you_search:success"]`; a first-try success omits it. `"cached":"4m"` means the unified tool reused a successful answer from the last few minutes (15 for search, 5 for `mode: current`, 30 for fetch) instead of calling a provider; for news that must be newer than that, say so or narrow the query. The upstream tool name, candidate rank, and full attempt records are in `structuredContent` and `_meta`.
 
 `search_auto` stops at the first provider that answers and tries one more only after an availability failure. `fetch_auto` also moves on when a reader returns almost no text, up to three providers. Nothing is merged unless `crossCheck` is set.
 
@@ -36,19 +36,23 @@ Before saying a string "originates from" a project (出自), inspect the matched
 
 ## Which providers automatic routing may use
 
-A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only when its config lists the matching capability in `auto` (`search`, `images`, `fetch`). Providers with currently usable key slots are ordered ahead of providers whose entire key pool is in cooldown. A provider with an empty `auto` list, such as Doubao, LinkUp, AnySearch, Grok, Jina, and TinyFish in the reference setup, is reachable only by calling its tools directly.
+A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only when its config lists the matching capability in `auto` (`search`, `images`, `fetch`). Within a candidate list, healthy providers come first, then any provider whose automatic calls just failed twice in a row (`recentFailure` in `search_pool_status`; one success or a quiet half hour restores it), then providers whose entire key pool is in cooldown. A provider with an empty `auto` list, such as Doubao, LinkUp, AnySearch, Grok, Querit, and TinyFish in the reference setup, is reachable only by calling its tools directly.
 
 ## Automatic routing
 
-Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and up to two more are tried after availability failures. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave and Serper).
+Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and up to two more are tried after availability failures. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave, Serper, and Exa Search). The orders come from a 461-call comparison on 42 real English and Chinese queries (`npm run eval:search`, summarized in `docs/search-eval-2026-10.md`).
 
-- General: Parallel Fast → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
-- Exact: Exa Search → Serper → Tavily exact/basic → Brave Web.
+A query with at least two Han characters and no kana counts as Chinese. Chinese queries send Brave `searchLang: zh-hans, country: CN` and Serper `gl: cn, hl: zh-cn`, and lead with them, because Parallel and You.com mixed English pages into Chinese results.
+
+- General: Parallel Fast → Serper → Exa Search → You snippets → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
+- Exact (quoted strings, error messages): Parallel → Brave Web → Serper → You → Tavily exact. Chinese: Brave → Serper → You → Parallel. Exa ranks semantically and was weakest here.
+- Official (vendor, product, or government sites): Exa Search → Brave Web → Serper → You. Chinese: Exa → Serper → Parallel → Brave. Exa returned the highest share of official pages in both languages.
+- Current (news): You.com with `freshness` → Serper News → Brave News → Tavily news topic, with Chinese-market settings for Chinese queries. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com and Tavily `day/week/month/year`, and Parallel `maxAgeSeconds`.
+- Scholar (papers, preprints, reviews): Exa Search with a research-paper objective → Parallel → You → Serper Scholar. Call `serper_scholar` directly when citation counts matter.
+- Code (repositories, examples, API usage): Exa Advanced `category: github` → Parallel → Serper → Exa Search.
 - Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
-- Current: Brave News → Serper News → You snippets → Tavily Search. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com `day/week/month/year`, Querit `d/w/m/y`, and Tavily `day/week/month/year`. The live Tavily MCP schema fixes `topic` to general, so do not send `topic: news`.
-- Official navigation: Serper → Brave Web → Exa Search → You snippets.
 
-Max quality uses Parallel Advanced for General and Context, Exa Advanced for Exact and Official, You.com highlights in General, and Tavily Advanced wherever Tavily appears. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
+Max quality uses Parallel Advanced wherever Parallel appears, Exa Advanced for Official, You.com highlights, Brave extra snippets, and Tavily Advanced. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
 
 An availability failure that allows a second provider is: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, provider 5xx, or a clear statusless message such as a rate limit, temporary unavailability, or no healthy key slots. Request or schema errors, policy or safety blocks, local code errors, and unknown failures end the chain. An explicit HTTP status outranks error-body keyword guesses. An upstream tool's own error is the tool's verdict and is returned to a direct caller. Inside `fetch_auto`, a reader that could not get the page (the site answered 403, 429, or 5xx, or showed a block or captcha) hands over to the next reader; a missing page (404/410) or a malformed request ends the chain.
 
@@ -68,9 +72,9 @@ None of these tools performs reverse image search. An uploaded image can reach a
 
 ## Provider roles
 
-### Querit — balanced compact retrieval
+### Querit — compact English retrieval, manual
 
-Compact factual lookup and source discovery. It stays in the general automatic pool and for direct calls but is not the unconditional first hop.
+Compact factual lookup in English. It left the automatic routes after the 2026-10 comparison: Chinese queries came back mostly in English, and exact-string lookups rarely surfaced the right source. Call `querit_search` directly (with `languages` when the language matters).
 
 ### Exa — precision and long-tail discovery
 
@@ -98,11 +102,11 @@ Locate official sites, known pages, or a small ranked result set (`serper_search
 
 ### Tavily — managed web workflow
 
-When the task extends from search into extraction, mapping, crawling, or multi-source research. Do not use Tavily Research for a lookup that ordinary search can answer.
+When the task extends from search into extraction, mapping, crawling, or multi-source research. Do not use Tavily Research for a lookup that ordinary search can answer. As plain search it ranked last or near last in every 2026-10 category and reports no dates, so it is only the final automatic fallback. Its search accepts `topic: news` again, which the Current route uses.
 
 ### LinkUp — sourced synthesis and research
 
-Sourced synthesized answers, sequential retrieval, structured research, and long-running tasks. Prefer raw results for downstream synthesis when possible; deep modes are slower and more expensive.
+Its plain search ranked last in the 2026-10 comparison, so keep it for what it is built for: sourced synthesized answers, sequential retrieval, structured research, and long-running tasks. Prefer raw results for downstream synthesis when possible; deep modes are slower and more expensive.
 
 ### AnySearch — manual multi-interface retrieval
 
@@ -118,7 +122,7 @@ The default tool policy exposes scrape, map, search, crawl, crawl status, develo
 
 ### Jina and TinyFish — search-only in this server
 
-Use only when their compact search perspective is useful. Jina Reader and TinyFish Agent/Browser are real provider capabilities elsewhere but are not exposed here and must not be invented.
+TinyFish search returned results nearly identical to Serper's in the 2026-10 comparison; it is a second route to the same kind of index, not an independent one. Jina search timed out on a quarter of calls with a 13-second median and is disabled in the reference setup. Jina Reader and TinyFish Agent/Browser are real provider capabilities elsewhere but are not exposed here and must not be invented.
 
 ### Doubao — Chinese-local, quota-sensitive
 

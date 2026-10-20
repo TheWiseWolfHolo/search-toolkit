@@ -23,6 +23,26 @@ export function canonicalUrl(value: string): string {
   }
 }
 
+const RELEASE_VERSION = /\bv?\d+\.\d+\.\d+\b/g;
+
+/**
+ * Identity for "the same page in another version or mirror": the same site and
+ * the same title once x.y.z release numbers are dropped. Node's v24.13.1 and
+ * v24.17.0 docs for one module collapse; two forum questions about V4.1 and
+ * V4.2 do not, because two-part versions are kept.
+ */
+export function nearDuplicateKey(item: { title?: string; url?: string }): string {
+  const url = item.url ?? "";
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return canonicalUrl(url);
+  }
+  const title = (item.title ?? "").toLowerCase().replace(RELEASE_VERSION, "").replace(/[\s|·:_\-–]+/g, " ").trim();
+  return title.length >= 8 ? `${host}|${title}` : canonicalUrl(url);
+}
+
 /**
  * De-duplicate items within a single provider response by canonical URL (or imageUrl for images),
  * keeping the richer excerpt, preserving dates, and preferring cleaner canonical URLs.
@@ -50,7 +70,16 @@ export function dedupeItems<T extends SearchItem>(items: T[], limit?: number): T
       existing.url = item.url;
     }
   }
-  const result = Array.from(seen.values());
+  // Second pass: the same page in another version or mirror keeps only its best-ranked copy.
+  const pages = new Set<string>();
+  const result = Array.from(seen.values()).filter((item) => {
+    if ("imageUrl" in item && item.imageUrl) return true;
+    if (!item?.url) return true;
+    const key = nearDuplicateKey(item);
+    if (pages.has(key)) return false;
+    pages.add(key);
+    return true;
+  });
   return limit !== undefined ? result.slice(0, limit) : result;
 }
 

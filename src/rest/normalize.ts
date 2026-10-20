@@ -178,7 +178,26 @@ export function extractUpstreamSearchItems(upstreamTool: string, output: unknown
   const combined = texts
     .filter((text) => !text.startsWith('{"searchToolkitRoute"'))
     .join("\n\n");
-  return parseTitleUrlBlocks(combined);
+  return parseTitleUrlBlocks(combined) ?? parseMarkdownResultBlocks(combined);
+}
+
+/** AnySearch-style Markdown: `### 1. Title`, then `- **URL**: …`, then bullet text ending in `date: …`. */
+function parseMarkdownResultBlocks(text: string): SearchItem[] | undefined {
+  const blocks = text.split(/\r?\n(?=###\s+\d+\.\s)/).filter((block) => /^###\s+\d+\.\s/.test(block.trim()));
+  const items: SearchItem[] = [];
+  for (const block of blocks) {
+    const match = block.trim().match(/^###\s+\d+\.\s+([^\r\n]+)\r?\n-\s+\*\*URL\*\*:\s*(https?:\/\/\S+)([\s\S]*)$/);
+    if (!match) continue;
+    let body = (match[3] ?? "").split(/\r?\n/).map((line) => line.replace(/^\s*-\s+/, "").trim()).filter(Boolean).join("\n");
+    let date: string | undefined;
+    const dated = body.match(/\s*date:\s*([^\n]+)$/i);
+    if (dated?.[1]) {
+      date = /^\d{4}-\d{2}-\d{2}/.test(dated[1]) ? dated[1].slice(0, 10) : dated[1].trim().slice(0, 40);
+      body = body.slice(0, dated.index).trim();
+    }
+    items.push({ title: (match[1] ?? "").trim(), url: (match[2] ?? "").trim(), text: body.slice(0, 4_000), ...(date ? { date } : {}) });
+  }
+  return items.length ? items : undefined;
 }
 
 function itemsFromObject(value: unknown): SearchItem[] | undefined {

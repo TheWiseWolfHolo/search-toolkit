@@ -1,11 +1,13 @@
+import { cleanExcerpt, focusExcerpt } from "./excerpt.js";
 import { dedupeItems } from "./merge.js";
 import { objectRecord, stringValue } from "./rest/normalize.js";
-import { trimText } from "./shape.js";
 import type { SearchItem } from "./types.js";
 
 export interface RenderOptions {
   maxCharsPerItem?: number;
   dedupe?: boolean;
+  /** The search query; long excerpts keep the sentences that mention it. */
+  query?: string;
 }
 
 /**
@@ -49,8 +51,8 @@ export function renderItems(items: unknown[], options: RenderOptions = {}): stri
     const url = stringValue(item.url);
     if (url && url !== title) lines.push(`   ${url}`);
     if (Array.isArray(item.foundBy) && item.foundBy.length) lines.push(`   found by: ${item.foundBy.join(", ")}`);
-    const rawText = stringValue(item.text)?.trim();
-    const text = rawText && maxChars > 0 ? trimText(rawText, maxChars) : rawText;
+    const cleaned = cleanExcerpt(stringValue(item.text) ?? "");
+    const text = cleaned && maxChars > 0 ? focusExcerpt(cleaned, options.query, maxChars) : cleaned;
     if (text) lines.push(indent(text));
     return lines.join("\n");
   }).join("\n");
