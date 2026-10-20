@@ -11,6 +11,18 @@ interface ProtocolServerOptions {
   beforeCall?: (toolName: string) => void;
 }
 
+/**
+ * Clients such as Claude Code hand the model structuredContent instead of
+ * content when both are present. None of these tools declares an
+ * outputSchema, and the readable text lives in content, so structuredContent
+ * stays inside the process (CLI --json, routing) and never crosses MCP.
+ */
+function forModel(output: unknown): unknown {
+  if (!output || typeof output !== "object" || !("structuredContent" in output)) return output;
+  const { structuredContent: _internal, ...visible } = output as Record<string, unknown>;
+  return visible;
+}
+
 export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolServerOptions = {}): Server {
   const server = new Server(
     { name: "search-toolkit", version: PACKAGE_VERSION },
@@ -23,7 +35,7 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
       const tool = visibleTools().find((candidate) => candidate.name === request.params.name);
       if (!tool) throw new Error("Tool is not available for this token");
       options.beforeCall?.(tool.name);
-      return await toolkit.callTool(tool.name, request.params.arguments ?? {}) as never;
+      return forModel(await toolkit.callTool(tool.name, request.params.arguments ?? {})) as never;
     } catch (error) {
       const text = redact(error instanceof Error ? error.message : String(error)).slice(0, 1_000);
       return { content: [{ type: "text", text }], isError: true };

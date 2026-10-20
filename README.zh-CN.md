@@ -112,7 +112,7 @@ MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 2
 
 ### 模型读到什么
 
-每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool}}`（统一工具另带 `searchToolkitAuto`，记录 mode 和 quality；只有发生降级时才附 `attempts`，形如 `["parallel_search:429", "you_search:success"]`），后面是紧凑文本：带发布日期的编号结果、受控长度摘录（去掉复制按钮、锚点、表格分隔线这类页面残渣；摘录过长时优先保留含查询词的句子，不只截开头），以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式，同时在 `structuredContent` 保留结构化结果。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
+每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool}}`（统一工具另带 `searchToolkitAuto`，记录 mode 和 quality；只有发生降级时才附 `attempts`，形如 `["parallel_search:429", "you_search:success"]`），后面是紧凑文本：带发布日期的编号结果、受控长度摘录（去掉复制按钮、锚点、表格分隔线这类页面残渣；摘录过长时优先保留含查询词的句子，不只截开头），以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式。通过 MCP 只发送 `content` 和 `_meta`：Claude Code 等客户端在两者都有时会把 `structuredContent` 交给模型、丢掉 `content`，可读正文就变成了原始 JSON。上游声明的 `outputSchema` 也因此去掉。完整的结构化结果仍可用 CLI 的 `--json` 查看。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
 
 ### 缓存
 

@@ -24,7 +24,9 @@ try {
   const status = poolStatusVisible
     ? await client.callTool({ name: "search_pool_status", arguments: {} })
     : undefined;
-  const structured = status?.structuredContent as Record<string, unknown> | undefined;
+  // Only content crosses MCP; structuredContent stays inside the server.
+  const text = (output: unknown, index: number) => ((output as { content?: Array<{ text?: string }> })?.content?.[index]?.text ?? "");
+  const structured = status ? JSON.parse(text(status, 0) || "{}") as Record<string, unknown> : undefined;
   const warnings = Array.isArray(structured?.warnings) ? structured.warnings.length : null;
   const imageSearch = await client.callTool({
     name: "search_images",
@@ -34,11 +36,8 @@ try {
     name: "search_images",
     arguments: { query: "", limit: 9_999, bogusField: true },
   });
-  const imageStructured = imageSearch.structuredContent as Record<string, unknown> | undefined;
-  const route = imageStructured?.route as Record<string, unknown> | undefined;
-  const providerResult = imageStructured?.result as Record<string, unknown> | undefined;
-  const imageData = providerResult?.data as Record<string, unknown> | undefined;
-  const imageItems = Array.isArray(imageData?.items) ? imageData.items.length : 0;
+  const route = (JSON.parse(text(imageSearch, 0) || "{}") as { searchToolkitRoute?: Record<string, unknown> }).searchToolkitRoute;
+  const imageItems = (text(imageSearch, 1).match(/^\d+\. /gm) ?? []).length;
   console.log(JSON.stringify({
     connected: true,
     toolCount: tools.tools.length,

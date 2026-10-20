@@ -50,7 +50,8 @@ export class UpstreamMcpProvider {
 
   /** Wrap discovered upstream tools as exposed bindings; descriptions are shaped later by the toolkit. */
   bindingsFor(discovered: Tool[]): ToolBinding[] {
-    return filterUpstreamTools(this.name, this.config, discovered).map((tool) => ({
+    // outputSchema is dropped: results are rewritten into this server's own shape, which would not match it.
+    return filterUpstreamTools(this.name, this.config, discovered).map(({ outputSchema: _upstreamShape, ...tool }) => ({
       provider: this.name,
       upstreamName: tool.name,
       exposed: {

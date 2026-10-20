@@ -50,3 +50,39 @@ test("shared MCP server enforces tool input schemas", async () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("results cross MCP as readable content only, because clients show structuredContent instead", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-server-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: { brave: { enabled: true, auto: ["search"], keys: ["test-key"], integration: { kind: "rest", adapter: "brave" } } },
+  }));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    web: { results: [{ url: "https://example.com/", title: "Example", description: "Readable excerpt" }] },
+  }), { status: 200 });
+  const toolkit = new SearchToolkit(configPath);
+  await toolkit.initialize();
+  const server = createProtocolServer(toolkit);
+  const client = new Client({ name: "search-toolkit-content-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const result = await client.callTool({ name: "search_auto", arguments: { query: "example" } });
+    assert.equal(result.structuredContent, undefined);
+    const content = result.content as Array<{ text?: string }>;
+    assert.match(String(content[0]?.text), /"searchToolkitRoute":\{"provider":"brave"/);
+    assert.match(String(content[1]?.text), /1\. Example\n {3}https:\/\/example\.com\/\n {3}Readable excerpt/);
+    const status = await client.callTool({ name: "search_pool_status", arguments: {} });
+    assert.equal((JSON.parse(String((status.content as Array<{ text?: string }>)[0]?.text)) as { version: number }).version, 2);
+  } finally {
+    globalThis.fetch = original;
+    await client.close();
+    await server.close();
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

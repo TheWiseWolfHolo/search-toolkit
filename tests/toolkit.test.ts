@@ -133,7 +133,13 @@ test("automatic route profiles keep their measured provider order", () => {
   assert.deepEqual(autoCandidates("general", "balanced", request)[2]?.nativeArguments, {
     query: "route contract", numResults: 9, objective: "route contract",
   });
-  assert.equal(autoCandidates("general", "max", request)[0]?.nativeArguments?.mode, "advanced");
+  assert.deepEqual(names("general", "max"), [
+    "exa_web_search_advanced_exa", "parallel_search", "serper_search", "you_search", "brave_web_search", "tavily_tavily_search",
+  ]);
+  assert.deepEqual(autoCandidates("general", "max", request)[0]?.nativeArguments, {
+    query: "route contract", numResults: 9, type: "auto", enableHighlights: true,
+  });
+  assert.equal(autoCandidates("general", "max", request)[1]?.nativeArguments?.mode, "advanced");
   assert.equal(autoCandidates("general", "max", request)[3]?.nativeArguments?.contentLevel, "highlights");
   assert.deepEqual(names("exact"), ["parallel_search", "brave_web_search", "serper_search", "you_search", "tavily_tavily_search"]);
   assert.deepEqual(autoCandidates("exact", "max", request)[4]?.nativeArguments, {

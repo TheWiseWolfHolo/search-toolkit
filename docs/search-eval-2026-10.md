@@ -32,6 +32,12 @@ Three queries per news, scholar, and code bucket is a small sample. Read those r
 
 After the change, all 42 queries went through `search_auto` in their own mode (the `auto` variant, cache off). Taking each old route's first provider from the comparison as the baseline, the mean score rose from 0.80 to 0.89. The largest gains were exact mode (English 0.66 to 0.90, Chinese 0.35 to 0.88), Chinese titles in Chinese general results (78% to 98%), and English news (0.80 to 0.94). Every query put a gold source in the top three except one Chinese news query, whose top results (iyiou, DataLearner, mobile Sina) were relevant but outside its gold list. That run also showed You.com returning a few English titles for Chinese news; sending it `language: zh-hans, country: CN` made them all Chinese and raised Chinese news from 0.78 to 0.81.
 
+## Against the Artificial Analysis Search Index
+
+Artificial Analysis (artificialanalysis.ai/agents/search-api, data of 2026-10-19) measures something different: one answer model searching as many times as it likes on hard English research questions (DeepSearchQA, BrowseComp, AA-Omniscience), scored on the final answer. It ranks Exa with dynamic highlights first (80), then Perplexity Search (80), Exa lite (79), Octen (77), Parallel advanced and Brave LLM Context (75), and You.com highlights (74). It does not measure Chinese queries, first-page source authority, or dates, which is what this comparison measures.
+
+The two agree where they overlap: Exa, Parallel, Brave, and You.com are the strong providers, and Tavily and LinkUp are not among the leaders. Its multi-hop result changed one route: English General max now starts with Exa Advanced (`type: auto`, highlights) instead of Parallel Advanced; on its BrowseComp example (a pier in Brisbane rebuilt in 2016 that hosts a yearly dinner) Exa's first result named Shorncliffe Pier. Perplexity Search and Octen are not integrated here; Octen in particular scored near the top at about a sixth of Exa's search cost and the lowest latency per query.
+
 ## Tables
 
 `p50 ms` is the median latency of successful calls. Variants ending in `-zh` add Chinese-market parameters; `-news` variants add a one-week window.

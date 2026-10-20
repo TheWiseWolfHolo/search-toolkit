@@ -203,9 +203,11 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
           ]
         : [
+            // Max serves multi-hop questions, where Exa with highlights led the Artificial Analysis Search Index (2026-10).
+            ...(quality === "max" ? [candidate("exa_web_search_advanced_exa", "numResults", { type: "auto", enableHighlights: true })] : []),
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("serper_search", "limit"),
-            candidate("exa_web_search_exa", "numResults"),
+            ...(quality === "max" ? [] : [candidate("exa_web_search_exa", "numResults")]),
             candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("brave_web_search", "limit", braveMax),
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),

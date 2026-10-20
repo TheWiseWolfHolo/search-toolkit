@@ -248,7 +248,7 @@ test("search_auto honors automatic and manualOnly provider policy", async () => 
   }
 });
 
-test("search_auto max quality uses Parallel Advanced and reports the auto route", async () => {
+test("search_auto max quality falls to Parallel Advanced without Exa and reports the auto route", async () => {
   const directory = mkdtempSync(join(tmpdir(), "search-toolkit-parallel-quality-"));
   const configPath = join(directory, "providers.json");
   writeFileSync(configPath, JSON.stringify({
@@ -286,12 +286,12 @@ test("search_auto max quality uses Parallel Advanced and reports the auto route"
     assert.deepEqual((output.structuredContent as Record<string, unknown>).searchAuto, {
       mode: "general",
       quality: "max",
-      candidateRank: 1,
+      candidateRank: 2,
       providerAttempt: 1,
       attempts: [{
         provider: "parallel",
         tool: "parallel_search",
-        candidateRank: 1,
+        candidateRank: 2,
         outcome: "success",
       }],
     });
