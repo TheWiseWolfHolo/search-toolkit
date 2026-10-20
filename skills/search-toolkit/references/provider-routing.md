@@ -42,7 +42,7 @@ A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only 
 
 Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and up to two more are tried after availability failures. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave, Serper, and Exa Search). The orders come from a 461-call comparison on 42 real English and Chinese queries (`npm run eval:search`, summarized in `docs/search-eval-2026-10.md`).
 
-A query with at least two Han characters and no kana counts as Chinese. Chinese queries send Brave `searchLang: zh-hans, country: CN` and Serper `gl: cn, hl: zh-cn`, and lead with them, because Parallel and You.com mixed English pages into Chinese results.
+A query with at least two Han characters and no kana counts as Chinese. Chinese queries send Brave `searchLang: zh-hans, country: CN`, Serper `gl: cn, hl: zh-cn`, and You.com `language: zh-hans, country: CN`, and lead with Brave and Serper, because Parallel and You.com mixed English pages into Chinese results.
 
 - General: Parallel Fast → Serper → Exa Search → You snippets → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
 - Exact (quoted strings, error messages): Parallel → Brave Web → Serper → You → Tavily exact. Chinese: Brave → Serper → You → Parallel. Exa ranks semantically and was weakest here.

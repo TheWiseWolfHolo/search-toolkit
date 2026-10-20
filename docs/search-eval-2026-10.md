@@ -28,6 +28,10 @@ Three queries per news, scholar, and code bucket is a small sample. Read those r
 - Querit left the automatic routes. Tavily stays only as the last fallback: it ranked last or near last in every bucket and returns no dates.
 - Jina is disabled in the reference setup: 8 of its 33 calls timed out and its median latency was 13 seconds. TinyFish returned results nearly identical to Serper's, so it adds no independent perspective; it stays manual.
 
+## End-to-end check
+
+After the change, all 42 queries went through `search_auto` in their own mode (the `auto` variant, cache off). Taking each old route's first provider from the comparison as the baseline, the mean score rose from 0.80 to 0.89. The largest gains were exact mode (English 0.66 to 0.90, Chinese 0.35 to 0.88), Chinese titles in Chinese general results (78% to 98%), and English news (0.80 to 0.94). Every query put a gold source in the top three except one Chinese news query, whose top results (iyiou, DataLearner, mobile Sina) were relevant but outside its gold list. That run also showed You.com returning a few English titles for Chinese news; sending it `language: zh-hans, country: CN` made them all Chinese and raised Chinese news from 0.78 to 0.81.
+
 ## Tables
 
 `p50 ms` is the median latency of successful calls. Variants ending in `-zh` add Chinese-market parameters; `-news` variants add a one-week window.

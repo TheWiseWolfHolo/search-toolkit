@@ -125,6 +125,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   const zh = isChineseQuery(query);
   const braveLang = zh ? { searchLang: "zh-hans", country: "CN" } : {};
   const serperLang = zh ? { gl: "cn", hl: "zh-cn" } : {};
+  const youLang = zh ? { language: "zh-hans", country: "CN" } : {};
   const exa = quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa";
   // Orders follow evals/search-queries.json results (gold-source hits, language match, dates, latency).
   switch (mode) {
@@ -133,14 +134,14 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
         ? [
             candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
             candidate("serper_search", "limit", serperLang),
-            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
           ]
         : [
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("brave_web_search", "limit", braveMax),
             candidate("serper_search", "limit"),
-            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, exact_match: true }),
           ];
     case "context":
@@ -148,18 +149,18 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
         ? [
             candidate("parallel_search", "maxResults", { mode: "advanced" }),
             candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens, ...(zh ? { searchLang: "zh-hans" } : {}) }),
-            candidate("you_search", "limit", { contentLevel: "highlights" }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: "highlights" }),
             candidate("tavily_tavily_search", "max_results", { search_depth: "advanced" }),
           ]
         : [
             candidate("brave_llm_context", undefined, { count: 20, maximumNumberOfTokens: braveTokens, ...(zh ? { searchLang: "zh-hans" } : {}) }),
             candidate("parallel_search", "maxResults", { mode: "basic" }),
-            candidate("you_search", "limit", { contentLevel: "highlights" }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: "highlights" }),
             candidate("tavily_tavily_search", "max_results", { search_depth: "basic" }),
           ];
     case "current":
       return [
-        candidate("you_search", "limit", { contentLevel: youLevel, freshness }),
+        candidate("you_search", "limit", { ...youLang, contentLevel: youLevel, freshness }),
         candidate("serper_news", "limit", { tbs: serperFreshness, ...serperLang }),
         candidate("brave_news_search", "limit", { freshness: braveFreshness, ...braveLang, ...braveMax }),
         candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, topic: "news", time_range: freshness }),
@@ -176,13 +177,13 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             candidate(exa, "numResults"),
             candidate("brave_web_search", "limit", braveMax),
             candidate("serper_search", "limit"),
-            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
           ];
     case "scholar":
       return [
         candidate("exa_web_search_exa", "numResults", { objective: `Research papers, preprints, and scholarly reviews about: ${query}` }),
         candidate("parallel_search", "maxResults", { mode: parallelMode }),
-        candidate("you_search", "limit", { contentLevel: youLevel }),
+        candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
         candidate("serper_scholar", "limit"),
       ];
     case "code":
@@ -197,7 +198,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
         ? [
             candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
             candidate("serper_search", "limit", serperLang),
-            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
           ]
@@ -205,7 +206,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("serper_search", "limit"),
             candidate("exa_web_search_exa", "numResults"),
-            candidate("you_search", "limit", { contentLevel: youLevel }),
+            candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("brave_web_search", "limit", braveMax),
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
           ];

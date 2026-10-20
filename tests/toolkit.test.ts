@@ -189,6 +189,9 @@ test("Chinese queries lead with Brave and Serper in Chinese-market settings", ()
     query: "台风 预警", limit: 8, tbs: "qdr:w", gl: "cn", hl: "zh-cn",
   });
   assert.equal(autoCandidates("context", "balanced", { query: "大模型 评测" })[0]?.nativeArguments?.searchLang, "zh-hans");
+  assert.deepEqual(autoCandidates("current", "balanced", { query: "台风 预警" })[0]?.nativeArguments, {
+    query: "台风 预警", limit: 8, language: "zh-hans", country: "CN", contentLevel: "snippets", freshness: "week",
+  });
 });
 
 test("autoCandidates translates domain filters, freshness, and maxCharsPerResult across providers", () => {

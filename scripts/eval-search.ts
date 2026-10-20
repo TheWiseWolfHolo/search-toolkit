@@ -22,7 +22,7 @@ interface Variant {
   tool: string;
   kinds: Kind[];
   lang?: "zh";
-  args(query: string, limit: number): Record<string, unknown>;
+  args(query: string, limit: number, spec: Query): Record<string, unknown>;
 }
 
 interface Item {
@@ -43,6 +43,8 @@ const WEEK_SECONDS = 604_800;
 
 const WEB: Kind[] = ["web", "code"];
 const VARIANTS: Variant[] = [
+  // The unified route as shipped, in the query's own mode. Compare it with the single-provider rows.
+  { name: "auto", tool: "search_auto", kinds: ["web", "news", "scholar", "code"], args: (query, n, spec) => ({ query, limit: n, mode: spec.mode }) },
   { name: "parallel", tool: "parallel_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, maxResults: n, mode: "fast" }) },
   { name: "parallel-news", tool: "parallel_search", kinds: ["news"], args: (query, n) => ({ query, maxResults: n, mode: "fast", maxAgeSeconds: WEEK_SECONDS }) },
   { name: "you", tool: "you_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, limit: n, contentLevel: "snippets" }) },
@@ -99,8 +101,8 @@ function ageDays(value: string | undefined, now: number): number | undefined {
 }
 
 function itemsOf(output: unknown): Item[] {
-  const structured = (output as { structuredContent?: { data?: { items?: unknown } } })?.structuredContent;
-  const items = structured?.data?.items;
+  const structured = (output as { structuredContent?: { data?: { items?: unknown }; result?: { data?: { items?: unknown }; items?: unknown } } })?.structuredContent;
+  const items = structured?.data?.items ?? structured?.result?.data?.items ?? structured?.result?.items;
   return Array.isArray(items) ? items as Item[] : [];
 }
 
@@ -123,7 +125,8 @@ function score(query: Query, items: Item[], now: number) {
 
 const file = JSON.parse(readFileSync(resolve(process.cwd(), "evals/search-queries.json"), "utf8")) as { queries: Query[] };
 const queries = file.queries.filter((query) => !only || only.includes(query.id));
-const toolkit = new SearchToolkit(flag("--config"), { profile: "full" });
+// The cache would hide providers behind earlier answers; every call here must reach one.
+const toolkit = new SearchToolkit(flag("--config"), { profile: "full", cache: false });
 await toolkit.initialize();
 const available = new Set(toolkit.listTools().map((tool) => tool.name));
 const variants = VARIANTS.filter((variant) => available.has(variant.tool) && (!onlyVariants || onlyVariants.includes(variant.name)));
@@ -155,7 +158,7 @@ await Promise.all(Array.from(byProvider.values(), async (group) => {
       if (!variant.kinds.includes(query.kind) || (variant.lang && variant.lang !== query.lang)) continue;
       const started = performance.now();
       try {
-        const output = await toolkit.callTool(variant.tool, variant.args(query.query, limit));
+        const output = await toolkit.callTool(variant.tool, variant.args(query.query, limit, query));
         const items = itemsOf(output);
         const isError = (output as { isError?: boolean }).isError === true;
         rows.push({
