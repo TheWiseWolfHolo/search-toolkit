@@ -101,14 +101,14 @@ node dist/src/cli.js probe querit "轮询验证"
 MCP 会按 Provider 工具策略暴露官方上游能力；Firecrawl 默认从 27 个工具收窄为 7 个核心检索/获取工具，完整目录需要显式 `toolPolicy.allow: ["*"]`。此外提供：
 
 - `search_auto`：提供 `balanced` / `max` 两档质量优先路由，支持 `includeDomains`、`excludeDomains`、全模式 `freshness` 与 `maxCharsPerResult`；优先选择当前有健康可用 Key 的 Provider，自动对规范化 URL（含 `.md` / `.html` 文档镜像后缀）去重并限制单条摘录长度，避免常规搜索输出过大被宿主落盘。`crossCheck: true` 并行查询两个独立搜索源（支持 REST 与归一化后的 Exa / Tavily MCP），按规范化 URL 去重合并并标注每条结果由哪些 Provider 找到。
-- `fetch_auto`：用 Exa、Tavily、Parallel Extract、You.com Contents、Firecrawl、LinkUp、AnySearch（`auto` 含 `fetch` 的那些）读取单个 `url` 或并发读取最多 5 个 `urls`。读到几乎无内容或 Cloudflare/JS 验证壳页面的阅读器会被自动跳过，最多尝试三个；支持 `maxChars`、`offset` 分页续读与 `section` Markdown 标题段落提取；`quality: max` 优先 Firecrawl 以应对重度 JavaScript 页面。
+- `fetch_auto`：用 Exa、Tavily、Parallel Extract、You.com Contents、Firecrawl、LinkUp、AnySearch（`auto` 含 `fetch` 的那些）读取单个 `url` 或并发读取最多 5 个 `urls`。读到几乎无内容、Cloudflare/JS 验证壳页面，或者网站对它返回 403/429/5xx 时，自动换下一个阅读器，最多尝试三个；页面不存在（404/410）时直接报错；支持 `maxChars`、`offset` 分页续读与 `section` Markdown 标题段落提取；`quality: max` 优先 Firecrawl 以应对重度 JavaScript 页面。
 - `search_images`：全球质量优先按 Brave Images → Parallel Images → Serper Images 做文本搜图，不等同于反向搜图，也不会自动收到聊天附件。
 - `search_pool_status`：查看脱敏 Key 池、冷却和轮询状态。
 - `search_rotation_probe`：实际请求并证明 Key 轮询顺序，会消耗 Provider 配额。
 
 ### 模型读到什么
 
-每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool, upstreamTool}}`（统一工具另带 `searchToolkitAuto`，记录 mode、quality 与受限尝试列表），后面是紧凑文本：带发布日期的编号结果、受控长度摘录，以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式，同时在 `structuredContent` 保留结构化结果。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
+每个结果以一个路由块开头：`{"searchToolkitRoute": {provider, tool}}`（统一工具另带 `searchToolkitAuto`，记录 mode 和 quality；只有发生降级时才附 `attempts`，形如 `["parallel_search:429", "you_search:success"]`），后面是紧凑文本：带发布日期的编号结果、受控长度摘录，以及交叉验证时找到该结果的 Provider。Exa、Tavily 等上游 MCP 搜索工具也会自动归一化为相同的编号格式，同时在 `structuredContent` 保留结构化结果。Brave LLM Context 按来源渲染 grounding，Grok 的回答附引用列表。
 
 ### 上下文成本
 
@@ -143,8 +143,11 @@ node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/provid
 - `401/403`：封这把 Key 1 小时，重复出错依次延长到 6、24 小时。不是永久禁用，到期会重新试用。
 - `402`：封 30 分钟，再到 6、24 小时。
 - `429`：封 1、5、15 分钟；Provider 给了 `Retry-After` 就按它的时间。
-- `5xx`、网络错误、超时：在同一池内最多换 3 把健康 Key 重试；瞬时服务端/网络错误不封 Key。
-- `400/404/422`，以及上游 MCP 工具自己返回的错误（例如被抓取的网页返回 403），不会算到 Key 头上，也不重试，直接把工具的回答还给调用方。只有明确指向 Key 的错误文本（无效 Key、额度、限流）才算 Key 故障。
+- `401/402/403/429`：在同一池内最多换 3 把健康 Key。
+- `5xx` 或连接断开：再换 1 把 Key 试一次，不封 Key。
+- 超时不换 Key 重试，自动路由直接去试下一家 Provider。
+- `400/404/422`、上游 MCP 工具自己返回的错误，以及被读取网页自己的状态码（例如网站对 Parallel Extract 返回 403），都不算到 Key 头上，也不重试。只有明确指向 Key 的错误文本（无效 Key、额度、限流）才算 Key 故障。
+- `search-toolkit status --verbose` 会显示每把 Key 最近一次的错误和时间。
 - Key 池全部被封时快速失败，并说明最早什么时候恢复；`search-toolkit reset <provider>` 可手动解封。
 - 仓库不包含真实 Key；Git 忽略 `providers.json`、`.env`、`state.db` 和日志；工具输出只显示 Key 掩码。
 - 创建、更新、运行任务和提交反馈不标成只读；删除工具标成 destructive。Codex 建议使用 `default_tools_approval_mode = "writes"`。

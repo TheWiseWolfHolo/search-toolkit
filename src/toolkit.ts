@@ -3,9 +3,14 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { integrationFingerprint, ToolCatalogCache, toolsFingerprint } from "./catalog.js";
 import { loadConfigWithNotes } from "./config.js";
-import { shouldFailoverProvider, statusFromError, textOfContent, ToolResultError } from "./errors.js";
+import { isPageFailure, shouldFailoverProvider, statusFromError, textOfContent, ToolResultError } from "./errors.js";
+import {
+  bodyText, combineBatchFetch, isUsableFetchText, parseFetchUrls, truncateBody, type TruncateOptions,
+} from "./fetching.js";
 import { mergeItems, type MergedItem } from "./merge.js";
-import { attachRouteMetadata, bodyBlocks, cleanError, isRouteContentBlock, isToolErrorResult, result } from "./provenance.js";
+import {
+  attachRouteMetadata, bodyBlocks, cleanError, isRouteContentBlock, isToolErrorResult, result, routeBlock, type Route,
+} from "./provenance.js";
 import { renderItems } from "./render.js";
 import { RestProvider } from "./rest/base.js";
 import { adapterFor } from "./rest/adapters.js";
@@ -22,6 +27,7 @@ import {
 import type { AutoCapability, ProviderConfig, SearchItem, ToolBinding, ToolkitConfig, ToolkitProfile } from "./types.js";
 import { UpstreamMcpProvider } from "./upstream.js";
 
+export { isUsableFetchText, truncateBody, type TruncateOptions } from "./fetching.js";
 export { attachRouteMetadata } from "./provenance.js";
 export { autoCandidates, fetchCandidates, imageCandidates } from "./routes.js";
 export type { AutoCandidate, AutoFreshness, AutoMode, AutoQuality } from "./routes.js";
@@ -42,26 +48,20 @@ interface ChainSpec {
   emptyError: string;
   /** Soft success test: false means "answered, but nothing usable"; the next provider is tried. */
   usable?: (output: unknown) => boolean;
+  /** Extra failures worth trying the next provider for, beyond availability failures. */
+  failover?: (error: unknown) => boolean;
 }
 
 export interface ToolkitOptions {
   profile?: ToolkitProfile;
 }
 
-export interface TruncateOptions {
-  offset?: number;
-  section?: string;
-}
-
 type Validator = ReturnType<AjvJsonSchemaValidator["getValidator"]>;
 
-const MIN_FETCH_CHARS = 80;
 const DEFAULT_BALANCED_EXCERPT_CHARS = 700;
 const DEFAULT_MAX_EXCERPT_CHARS = 1_800;
 const LEAN_TOOL_NAMES = new Set(MANAGEMENT_TOOL_NAMES);
 const CURATED_TOOL_NAMES = new Set([...MANAGEMENT_TOOL_NAMES, ...CURATED_SPECIALIST_TOOLS]);
-
-const INTERSTITIAL_PAGE_PATTERN = /just a moment[\s\S]{0,160}enable javascript and cookies|attention required!\s*\|\s*cloudflare|please enable js and disable any ad blocker|verify you are human|cf-browser-verification|checking your browser before accessing/i;
 
 export class SearchToolkit {
   readonly config: ToolkitConfig;
@@ -256,15 +256,21 @@ export class SearchToolkit {
     const spec: ChainSpec = {
       tool: "search_auto",
       capability: "search",
-      maxProviders: 2,
+      maxProviders: 3,
       meta: { mode, quality },
       emptyError: `No automatic provider is available for mode ${mode}`,
     };
+    let remaining = candidates;
     if (args.crossCheck === true && mode !== "context") {
-      const merged = await this.crossCheck(candidates, spec, limit, maxCharsPerItem);
-      if (merged) return merged;
+      const checked = await this.crossCheck(candidates, spec, limit, maxCharsPerItem);
+      if (checked.output) return checked.output;
+      // Both sides failed: carry on down the list without calling them again.
+      remaining = candidates.filter((candidate) => {
+        const provider = this.bindings.get(candidate.name)?.provider;
+        return !provider || !checked.failed.includes(provider);
+      });
     }
-    const output = await this.runChain(candidates, spec);
+    const output = await this.runChain(remaining, spec);
     return mode === "context" ? output : capSearchOutput(output, maxCharsPerItem, limit);
   }
 
@@ -313,6 +319,7 @@ export class SearchToolkit {
       meta: { mode: "fetch", quality },
       emptyError: "No automatic fetch provider is available",
       usable: (candidate) => isUsableFetchText(bodyText(candidate)),
+      failover: isPageFailure,
     });
     return truncateBody(output, maxChars, truncateOpts);
   }
@@ -368,7 +375,7 @@ export class SearchToolkit {
         lastError = error;
         const status = statusFromError(error);
         attempts.push({ ...base, outcome: "error", ...(status ? { status } : {}) });
-        if (!shouldFailoverProvider(error)) throw autoFailure(error, attempts, spec.tool);
+        if (!shouldFailoverProvider(error) && !spec.failover?.(error)) throw autoFailure(error, attempts, spec.tool);
       }
     }
     if (fallback) {
@@ -383,13 +390,17 @@ export class SearchToolkit {
     throw autoFailure(lastError ?? new Error(spec.emptyError), attempts, spec.tool);
   }
 
-  /** Query two independent indexes concurrently and merge by URL. Returns undefined when a pair is not available. */
+  /**
+   * Query two independent indexes concurrently and merge by URL. Without a
+   * merged output, `failed` names the providers already tried so the caller
+   * does not call them again.
+   */
   private async crossCheck(
     candidates: AutoCandidate[],
     spec: ChainSpec,
     limit: number,
     maxCharsPerItem = DEFAULT_BALANCED_EXCERPT_CHARS,
-  ): Promise<unknown | undefined> {
+  ): Promise<{ output?: unknown; failed: string[] }> {
     const seen = new Set<string>();
     const pair = this.eligible(candidates, spec.capability).filter((entry) => {
       const provider = entry.binding.provider;
@@ -397,11 +408,11 @@ export class SearchToolkit {
       seen.add(provider);
       return true;
     }).slice(0, 2);
-    if (pair.length < 2) return undefined;
+    if (pair.length < 2) return { failed: [] };
 
     const settled = await Promise.allSettled(pair.map((entry) => entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) })));
     const lists: Array<{ provider: string; items: MergedItem[] }> = [];
-    const routes: Array<Record<string, unknown>> = [];
+    const routes: Route[] = [];
     const failed: string[] = [];
     settled.forEach((outcome, index) => {
       const entry = pair[index] as (typeof pair)[number];
@@ -413,21 +424,24 @@ export class SearchToolkit {
       lists.push({ provider: entry.binding.provider, items: items as MergedItem[] });
       routes.push({ provider: entry.binding.provider, tool: entry.binding.exposed.name, upstreamTool: entry.binding.upstreamName });
     });
-    if (!lists.length) return undefined;
+    if (!lists.length) return { failed };
 
     const merged = mergeItems(lists, limit);
     const auto = {
       ...spec.meta,
       crossCheck: { routes, failed, corroborated: merged.filter((item) => item.foundBy.length > 1).length },
     };
-    const route = routes[0] as Record<string, unknown>;
+    const route = routes[0] as Route;
     return {
-      content: [
-        { type: "text", text: JSON.stringify({ searchToolkitRoute: route, searchToolkitAuto: auto }) },
-        { type: "text", text: renderItems(merged, { maxCharsPerItem, dedupe: false }) },
-      ],
-      structuredContent: { route, searchAuto: auto, result: { items: merged } },
-      _meta: { searchToolkit: { route, auto } },
+      failed,
+      output: {
+        content: [
+          routeBlock(route, auto),
+          { type: "text", text: renderItems(merged, { maxCharsPerItem, dedupe: false }) },
+        ],
+        structuredContent: { route, searchAuto: auto, result: { items: merged } },
+        _meta: { searchToolkit: { route, auto } },
+      },
     };
   }
 
@@ -551,83 +565,6 @@ function firstSentence(text: string, max: number): string {
   return sentence.length > max ? `${sentence.slice(0, max - 1).trimEnd()}…` : sentence;
 }
 
-function bodyText(output: unknown): string {
-  return textOfContent(bodyBlocks(output));
-}
-
-export function isUsableFetchText(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.length < MIN_FETCH_CHARS) return false;
-  if (trimmed.length < 1_200 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
-  return true;
-}
-
-function parseFetchUrls(args: Record<string, unknown>): string[] {
-  const raw: string[] = [];
-  if (typeof args.url === "string" && args.url.trim()) raw.push(args.url.trim());
-  if (Array.isArray(args.urls)) {
-    for (const item of args.urls) {
-      const trimmed = String(item ?? "").trim();
-      if (trimmed) raw.push(trimmed);
-    }
-  }
-  if (raw.length === 0) throw new Error("fetch_auto requires an absolute http(s) URL");
-  const normalized: string[] = [];
-  for (const candidate of raw) {
-    let parsed: URL;
-    try {
-      parsed = new URL(candidate);
-    } catch {
-      throw new Error("fetch_auto requires an absolute http(s) URL");
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("fetch_auto requires an http(s) URL");
-    }
-    const href = parsed.toString();
-    if (!normalized.includes(href)) normalized.push(href);
-  }
-  return normalized.slice(0, 5);
-}
-
-function combineBatchFetch(
-  urls: string[],
-  settled: PromiseSettledResult<unknown>[],
-  quality: AutoQuality,
-): unknown {
-  const routes: Array<Record<string, unknown>> = [];
-  const failed: Array<{ url: string; error: string }> = [];
-  const sections: string[] = [];
-  settled.forEach((outcome, index) => {
-    const url = urls[index] as string;
-    if (outcome.status === "rejected") {
-      failed.push({ url, error: cleanError(outcome.reason) });
-      sections.push(`=== [${index + 1}/${urls.length}] ${url} [error] ===\n${cleanError(outcome.reason)}`);
-      return;
-    }
-    const value = outcome.value as {
-      content?: Array<{ type: string; text?: string }>;
-      structuredContent?: { route?: Record<string, unknown> };
-    };
-    const route = value?.structuredContent?.route ?? { provider: "unknown", tool: "fetch_auto", upstreamTool: "fetch_auto" };
-    routes.push({ url, ...route });
-    const text = bodyText(value).trim();
-    sections.push(`=== [${index + 1}/${urls.length}] ${url} (${String(route.provider ?? "unknown")}) ===\n${text}`);
-  });
-  if (routes.length === 0) {
-    throw new Error(`fetch_auto failed for all ${urls.length} URLs: ${failed.map((f) => `${f.url}: ${f.error}`).join("; ")}`);
-  }
-  const primaryRoute = routes[0] as Record<string, unknown>;
-  const auto = { mode: "fetch", quality, batch: { total: urls.length, succeeded: routes.length, routes, failed } };
-  return {
-    content: [
-      { type: "text", text: JSON.stringify({ searchToolkitRoute: primaryRoute, searchToolkitAuto: auto }) },
-      { type: "text", text: sections.join("\n\n") },
-    ],
-    structuredContent: { route: primaryRoute, searchAuto: auto, result: { urls, routes, failed } },
-    _meta: { searchToolkit: { route: primaryRoute, auto } },
-  };
-}
-
 function itemsOf(output: unknown): unknown[] | undefined {
   if (!output || typeof output !== "object") return undefined;
   const structured = (output as {
@@ -648,89 +585,6 @@ function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number
     ...(output as object),
     content: [...routeBlock, { type: "text", text: renderItems(capped, { maxCharsPerItem }) }],
   };
-}
-
-function filterTextBySection(text: string, sectionQuery: string): string {
-  const needle = sectionQuery.toLowerCase();
-  const lines = text.split("\n");
-  let startLine = -1;
-  let startLevel = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const match = (lines[i] ?? "").match(/^(#{1,6})\s+(.+)$/);
-    if (match && (match[2] ?? "").toLowerCase().includes(needle)) {
-      startLine = i;
-      startLevel = (match[1] ?? "#").length;
-      break;
-    }
-  }
-  if (startLine >= 0) {
-    let endLine = lines.length;
-    for (let i = startLine + 1; i < lines.length; i += 1) {
-      const match = (lines[i] ?? "").match(/^(#{1,6})\s+/);
-      if (match && (match[1] ?? "#").length <= startLevel) {
-        endLine = i;
-        break;
-      }
-    }
-    return lines.slice(startLine, endLine).join("\n").trim();
-  }
-  const blocks = text.split(/\n{2,}/);
-  const matchingIndices: number[] = [];
-  blocks.forEach((block, index) => {
-    if (block.toLowerCase().includes(needle)) matchingIndices.push(index);
-  });
-  if (matchingIndices.length === 0) {
-    return `[section "${sectionQuery}" not found; showing start of page]\n\n${text}`;
-  }
-  const picked = new Set<number>();
-  for (const hit of matchingIndices) {
-    for (let idx = Math.max(0, hit - 1); idx <= Math.min(blocks.length - 1, hit + 3); idx += 1) {
-      picked.add(idx);
-    }
-  }
-  return Array.from(picked)
-    .sort((a, b) => a - b)
-    .map((idx) => blocks[idx])
-    .join("\n\n");
-}
-
-/** Cap the readable text of a result, supporting optional section filtering and character offset. */
-export function truncateBody(output: unknown, maxChars: number, options: TruncateOptions = {}): unknown {
-  if (!output || typeof output !== "object") return output;
-  const record = output as { content?: unknown };
-  if (!Array.isArray(record.content)) return output;
-  let skip = options.offset && options.offset > 0 ? Math.floor(options.offset) : 0;
-  let remaining = maxChars;
-  let dropped = 0;
-  const sectionQuery = options.section?.trim();
-  const content = record.content.map((block, index) => {
-    if (index === 0 && isRouteContentBlock(block)) return block;
-    const text = block && typeof block === "object" ? (block as { type?: string; text?: unknown }) : undefined;
-    if (text?.type !== "text" || typeof text.text !== "string") return block;
-    const sourceText = sectionQuery ? filterTextBySection(text.text, sectionQuery) : text.text;
-    if (skip >= sourceText.length) {
-      skip -= sourceText.length;
-      return { ...text, text: "" };
-    }
-    const sliced = skip > 0 ? sourceText.slice(skip) : sourceText;
-    skip = 0;
-    if (sliced.length <= remaining) {
-      remaining -= sliced.length;
-      return { ...text, text: sliced };
-    }
-    dropped += sliced.length - remaining;
-    const kept = sliced.slice(0, Math.max(remaining, 0));
-    remaining = 0;
-    return { ...text, text: kept };
-  });
-  if (dropped > 0) {
-    const nextOffset = (options.offset && options.offset > 0 ? Math.floor(options.offset) : 0) + maxChars;
-    content.push({
-      type: "text",
-      text: `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`,
-    });
-  }
-  return { ...(output as object), content };
 }
 
 function autoFailure(error: unknown, attempts: AutoAttempt[], toolName = "search_auto"): Error {

@@ -26,6 +26,22 @@ export class ToolResultError extends Error {
   }
 }
 
+/**
+ * The provider API worked, but the page it was asked to read failed (blocked,
+ * missing, or unreachable). The page's HTTP status says nothing about the key,
+ * so this never benches a key or rotates to another one; a different reader
+ * may still get through, so automatic routes may fail over.
+ */
+export class TargetPageError extends Error {
+  constructor(
+    message: string,
+    public readonly pageStatus?: number,
+  ) {
+    super(message);
+    this.name = "TargetPageError";
+  }
+}
+
 const REQUEST_SHAPE_PATTERN = /validation error|unexpected keyword argument|invalid (?:request|argument|parameter)|unsupported parameter/i;
 
 // JSON-RPC "method not found" / "invalid params" from an upstream MCP server.
@@ -34,13 +50,20 @@ const REQUEST_SHAPE_RPC_CODES = new Set([-32_601, -32_602]);
 export function statusFromError(error: unknown): number | undefined {
   if (error instanceof HttpError) return error.status;
   if (error instanceof ToolResultError) return error.status;
+  if (error instanceof TargetPageError) return undefined;
+  const text = error instanceof Error ? error.message : String(error);
   if (error && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
     // StreamableHTTPError carries the real HTTP status in `code`.
     if (typeof code === "number" && Number.isInteger(code) && code >= 400 && code <= 599) return code;
     if (typeof code === "number" && REQUEST_SHAPE_RPC_CODES.has(code)) return 422;
+    // Any other JSON-RPC error came from inside the upstream tool. A status
+    // number in its text usually belongs to the page being read, so only
+    // wording that names the key counts.
+    if (typeof code === "number" && code < 0) {
+      return keyFaultStatusFromToolText(text) ?? (REQUEST_SHAPE_PATTERN.test(text) ? 422 : undefined);
+    }
   }
-  const text = error instanceof Error ? error.message : String(error);
   const match = text.match(/(?:HTTP|status)\s*(\d{3})/i);
   if (match?.[1]) return Number(match[1]);
   if (REQUEST_SHAPE_PATTERN.test(text)) return 422;
@@ -72,10 +95,25 @@ export function textOfContent(content: unknown): string {
 export function shouldRetryWithNextKey(status: number | undefined): boolean {
   if (status === undefined) return true;
   if (status === 400 || status === 404 || status === 422) return false;
-  return status === 401 || status === 402 || status === 403 || status === 429 || status >= 500;
+  return isKeyFaultStatus(status) || status >= 500;
+}
+
+/** Statuses that describe the key itself: another key can fix them. */
+export function isKeyFaultStatus(status: number | undefined): boolean {
+  return status === 401 || status === 402 || status === 403 || status === 429;
+}
+
+/** The request ran out of time. Another key would wait just as long. */
+export function isTimeout(error: unknown): boolean {
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return true;
+  if (error && typeof error === "object" && (error as { code?: unknown }).code === -32_001) return true; // MCP RequestTimeout
+  const text = error instanceof Error ? error.message : String(error);
+  return /timed out|timeout/i.test(text);
 }
 
 export function shouldFailoverProvider(error: unknown): boolean {
+  // Another reader may get past a block or render the page; a page that is gone stays gone.
+  if (error instanceof TargetPageError) return ![404, 410, 451].includes(error.pageStatus ?? 0);
   const status = statusFromError(error);
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
   if (status !== undefined) {
@@ -88,6 +126,18 @@ export function shouldFailoverProvider(error: unknown): boolean {
   }
   if (REQUEST_SHAPE_PATTERN.test(text)) return false;
   return /abort|timeout|timed out|fetch failed|econnreset|econnrefused|enotfound|connection reset|connection closed|rate limit|too many requests|temporar(?:y|ily) unavailable|service unavailable|overloaded|please retry|try again|no healthy key slots|crawl_not_found|crawl_failed|extract_failed|scrape_failed/i.test(text);
+}
+
+/**
+ * A reader could not get the page: blocked, challenged, rate limited, or the
+ * site errored. A different reader often can, so fetch chains move on. A page
+ * that does not exist (404/410) does not count.
+ */
+export function isPageFailure(error: unknown): boolean {
+  if (error instanceof TargetPageError) return ![404, 410, 451].includes(error.pageStatus ?? 0);
+  if (!(error instanceof ToolResultError)) return false;
+  if (/status(?:\s+code)?:?\s*(?:404|410|451)\b|not found/i.test(error.message)) return false;
+  return /status(?:\s+code)?:?\s*(?:403|429|5\d\d)\b|forbidden|access denied|blocked|captcha|cloudflare|timed?\s?out/i.test(error.message);
 }
 
 /** Transport-level failures where the cached upstream client should be rebuilt. */

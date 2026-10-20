@@ -1,5 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { redact } from "./provenance.js";
 import { SearchToolkit } from "./toolkit.js";
 import { PACKAGE_VERSION } from "./version.js";
 
@@ -24,9 +25,7 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
       options.beforeCall?.(tool.name);
       return await toolkit.callTool(tool.name, request.params.arguments ?? {}) as never;
     } catch (error) {
-      const text = (error instanceof Error ? error.message : String(error))
-        .replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>")
-        .slice(0, 1_000);
+      const text = redact(error instanceof Error ? error.message : String(error)).slice(0, 1_000);
       return { content: [{ type: "text", text }], isError: true };
     }
   });

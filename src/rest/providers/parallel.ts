@@ -1,5 +1,5 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { HttpError } from "../../errors.js";
+import { TargetPageError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
 import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import {
@@ -193,8 +193,12 @@ export class ParallelAdapter implements RestAdapter {
     const errors = Array.isArray(data.errors) ? data.errors.map(objectRecord) : [];
     if (results.length === 0 && errors.length > 0) {
       const firstErr = errors[0] ?? {};
-      const status = typeof firstErr.http_status_code === "number" ? firstErr.http_status_code : 502;
-      throw new HttpError(`Parallel extract failed: ${String(firstErr.content ?? firstErr.error_type ?? "fetch_error")}`, status);
+      // http_status_code is what the page answered Parallel, not a verdict on our key.
+      const pageStatus = typeof firstErr.http_status_code === "number" ? firstErr.http_status_code : undefined;
+      throw new TargetPageError(
+        `Parallel extract failed${pageStatus ? ` (page answered ${pageStatus})` : ""}: ${String(firstErr.content ?? firstErr.error_type ?? "fetch_error")}`,
+        pageStatus,
+      );
     }
     const text = results.map((entry) => {
       const title = stringValue(entry.title);

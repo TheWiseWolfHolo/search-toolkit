@@ -14,7 +14,7 @@ Choose providers by capability and task intent. Prefer strong retrieval that fit
 
 ## Reading a result
 
-Every result starts with a JSON block, `{"searchToolkitRoute": {...}, "searchToolkitAuto": {...}}`, followed by readable text: numbered results with the provider's publication date in parentheses when it reports one. `searchToolkitAuto` lists which providers were tried and how each attempt ended. Prefer `structuredContent.route` when the client exposes it.
+Every result starts with a compact JSON block, `{"searchToolkitRoute": {"provider", "tool"}, "searchToolkitAuto": {"mode", "quality"}}`, followed by readable text: numbered results with the provider's publication date in parentheses when it reports one. When a fallback happened, `searchToolkitAuto.attempts` lists each try as `tool:outcome`, for example `["parallel_search:429", "you_search:success"]`; a first-try success omits it. The upstream tool name, candidate rank, and full attempt records are in `structuredContent` and `_meta`.
 
 `search_auto` stops at the first provider that answers and tries one more only after an availability failure. `fetch_auto` also moves on when a reader returns almost no text, up to three providers. Nothing is merged unless `crossCheck` is set.
 
@@ -40,7 +40,7 @@ A provider is eligible for `search_auto`, `search_images`, or `fetch_auto` only 
 
 ## Automatic routing
 
-Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and one more is tried after an availability failure. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave and Serper).
+Balanced search routing uses these profiles. Each is an ordered candidate list; the first eligible provider answers, and up to two more are tried after availability failures. `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult` are mapped to each candidate's native parameters (or automatic `site:` / `-site:` query operators for Brave and Serper).
 
 - General: Parallel Fast → You snippets → Brave Web → Exa Search → Querit → Tavily Basic.
 - Exact: Exa Search → Serper → Tavily exact/basic → Brave Web.
@@ -50,11 +50,11 @@ Balanced search routing uses these profiles. Each is an ordered candidate list; 
 
 Max quality uses Parallel Advanced for General and Context, Exa Advanced for Exact and Official, You.com highlights in General, and Tavily Advanced wherever Tavily appears. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
 
-An availability failure that allows a second provider is: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, provider 5xx, or a clear statusless message such as a rate limit, temporary unavailability, or no healthy key slots. Request or schema errors, policy or safety blocks, local code errors, and unknown failures end the chain. An explicit HTTP status outranks error-body keyword guesses. An upstream tool's own error (for example a scraped page answering 403) is the tool's verdict and is returned, not retried.
+An availability failure that allows a second provider is: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, provider 5xx, or a clear statusless message such as a rate limit, temporary unavailability, or no healthy key slots. Request or schema errors, policy or safety blocks, local code errors, and unknown failures end the chain. An explicit HTTP status outranks error-body keyword guesses. An upstream tool's own error is the tool's verdict and is returned to a direct caller. Inside `fetch_auto`, a reader that could not get the page (the site answered 403, 429, or 5xx, or showed a block or captcha) hands over to the next reader; a missing page (404/410) or a malformed request ends the chain.
 
 ### Cross-checking
 
-`crossCheck: true` runs the first two eligible search providers of the mode's candidate list concurrently (across both REST adapters and normalized MCP upstreams such as Exa and Tavily), de-duplicates by canonical URL (scheme, `www`, fragments, trailing slashes, `.md`/`.html` doc suffixes, and tracking parameters ignored), and returns corroborated URLs first, then the rest interleaved by rank. Each result lists which providers found it. If one provider fails, the other's results are returned and `searchToolkitAuto.crossCheck.failed` names the failure. It is ignored in context mode, whose results are chunks rather than items.
+`crossCheck: true` runs the first two eligible search providers of the mode's candidate list concurrently (across both REST adapters and normalized MCP upstreams such as Exa and Tavily), de-duplicates by canonical URL (scheme, `www`, fragments, trailing slashes, `.md`/`.html` doc suffixes, and tracking parameters ignored), and returns corroborated URLs first, then the rest interleaved by rank. Each result lists which providers found it. If one provider fails, the other's results are returned and `searchToolkitAuto.crossCheck.failed` names the failure. If both fail, the ordinary chain continues with the remaining candidates and does not call the failed two again. It is ignored in context mode, whose results are chunks rather than items.
 
 ### Known-URL fetch
 
@@ -130,7 +130,7 @@ When X posts, users, threads, reactions, or X-native breaking signals are centra
 
 ## Key health
 
-Keys are tracked by fingerprint, so reordering a pool does not move their history. Authentication failures bench a key for 1 hour, then 6, then 24; quota failures for 30 minutes, then 6 hours, then 24; rate limits for 1, 5, then 15 minutes, or for the provider's `Retry-After`. A success clears the strikes. Server errors and a tool's own errors never bench a key; retryable faults try up to 3 healthy keys in the pool before failing. When every key in a pool is benched the call fails with the time until the first recovers.
+Keys are tracked by fingerprint, so reordering a pool does not move their history. Authentication failures bench a key for 1 hour, then 6, then 24; quota failures for 30 minutes, then 6 hours, then 24; rate limits for 1, 5, then 15 minutes, or for the provider's `Retry-After`. A success clears the strikes. Server errors, a tool's own errors, and a target page's status never bench a key. A key fault (401/402/403/429) tries up to 3 healthy keys in the pool; a 5xx or dropped connection tries one more key; timeouts, page failures, and request errors are not retried on another key, so an automatic route reaches the next provider quickly. `search_pool_status` with `verbose: true` shows each key's last error and when it happened. When every key in a pool is benched the call fails with the time until the first recovers.
 
 ## Profiles and context cost
 

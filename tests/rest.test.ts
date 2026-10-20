@@ -38,7 +38,8 @@ test("REST direct results expose the same route provenance shape", async () => {
     );
     const content = output.content as Array<{ text: string }>;
     assert.equal(content.length, 2);
-    assert.deepEqual(JSON.parse(content[0]?.text ?? "{}").searchToolkitRoute, expectedRoute);
+    // The model sees provider and exposed tool; the upstream name stays in structured metadata.
+    assert.deepEqual(JSON.parse(content[0]?.text ?? "{}").searchToolkitRoute, { provider: "brave", tool: "brave_web_search" });
     // Model-visible text is a compact rendering, not an escaped JSON dump.
     assert.equal(content[1]?.text, ["1. Example (2026-09-30)", "   https://example.com", "   Line one", "   Line two"].join(String.fromCharCode(10)));
   } finally {

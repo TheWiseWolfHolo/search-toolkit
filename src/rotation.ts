@@ -48,8 +48,11 @@ interface StateRow {
   strikes: number;
 }
 
+type Statement = ReturnType<DatabaseSync["prepare"]>;
+
 export class RotationStore {
   private readonly db: DatabaseSync;
+  private readonly statements = new Map<string, Statement>();
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
@@ -78,6 +81,29 @@ export class RotationStore {
       );
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
+    this.addColumn("last_error", "TEXT");
+    this.addColumn("last_error_at", "INTEGER");
+  }
+
+  /** Columns added after a state file was first created. Older processes keep working: they name their columns. */
+  private addColumn(name: string, type: string): void {
+    const columns = this.db.prepare("PRAGMA table_info(key_state)").all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === name)) return;
+    try {
+      this.db.exec(`ALTER TABLE key_state ADD COLUMN ${name} ${type}`);
+    } catch (error) {
+      // Another process starting at the same moment may have added it first.
+      if (!/duplicate column/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    }
+  }
+
+  private statement(sql: string): Statement {
+    let prepared = this.statements.get(sql);
+    if (!prepared) {
+      prepared = this.db.prepare(sql);
+      this.statements.set(sql, prepared);
+    }
+    return prepared;
   }
 
   close(): void {
@@ -138,7 +164,7 @@ export class RotationStore {
     if (keys.length === 0) throw new Error(`${provider} has no API keys`);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.db.prepare("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
+      const row = this.statement("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
         | { next_slot: number }
         | undefined;
       const start = (row?.next_slot ?? 0) % keys.length;
@@ -157,7 +183,7 @@ export class RotationStore {
         }
         slot = found;
       }
-      this.db.prepare(`
+      this.statement(`
         INSERT INTO provider_cursor(provider, next_slot) VALUES (?, ?)
         ON CONFLICT(provider) DO UPDATE SET next_slot = excluded.next_slot
       `).run(provider, (slot + 1) % keys.length);
@@ -173,21 +199,21 @@ export class RotationStore {
 
   record(
     selection: KeySelection,
-    result: { ok: boolean; latencyMs: number; httpStatus?: number; retryAfterMs?: number; toolError?: boolean },
+    result: { ok: boolean; latencyMs: number; httpStatus?: number; retryAfterMs?: number; toolError?: boolean; error?: string },
   ): void {
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.db.prepare("SELECT strikes FROM key_state WHERE provider = ? AND fp = ?")
+      const current = this.statement("SELECT strikes FROM key_state WHERE provider = ? AND fp = ?")
         .get(selection.provider, selection.fingerprint) as { strikes: number } | undefined;
       const strikes = current?.strikes ?? 0;
       const penalty = result.ok ? undefined : penaltyFor(result.httpStatus, strikes, result.retryAfterMs);
       const nextStrikes = result.ok ? 0 : penalty ? strikes + 1 : strikes;
-      this.db.prepare(`
+      this.statement(`
         INSERT INTO key_state(
           provider, fp, status, cooldown_until, strikes, requests, successes, failures, tool_errors,
-          last_http_status, last_latency_ms, last_used_at
-        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+          last_http_status, last_latency_ms, last_used_at, last_error, last_error_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider, fp) DO UPDATE SET
           status = excluded.status,
           cooldown_until = excluded.cooldown_until,
@@ -198,7 +224,9 @@ export class RotationStore {
           tool_errors = key_state.tool_errors + excluded.tool_errors,
           last_http_status = excluded.last_http_status,
           last_latency_ms = excluded.last_latency_ms,
-          last_used_at = excluded.last_used_at
+          last_used_at = excluded.last_used_at,
+          last_error = COALESCE(excluded.last_error, key_state.last_error),
+          last_error_at = COALESCE(excluded.last_error_at, key_state.last_error_at)
       `).run(
         selection.provider,
         selection.fingerprint,
@@ -211,6 +239,8 @@ export class RotationStore {
         result.httpStatus ?? null,
         result.latencyMs,
         now,
+        result.error ? result.error.slice(0, 200) : null,
+        result.error ? now : null,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -234,7 +264,7 @@ export class RotationStore {
     const targets = slot === undefined ? keys : [keys[slot]].filter((key): key is string => Boolean(key));
     let cleared = 0;
     for (const key of targets) {
-      const result = this.db.prepare(`
+      const result = this.statement(`
         UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
         WHERE provider = ? AND fp = ? AND (status != 'healthy' OR cooldown_until IS NOT NULL OR strikes > 0)
       `).run(provider, keyFingerprint(key));
@@ -244,12 +274,12 @@ export class RotationStore {
   }
 
   status(provider: string, keys: string[]) {
-    const cursor = this.db.prepare("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
+    const cursor = this.statement("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
       | { next_slot: number }
       | undefined;
-    const rows = this.db.prepare(`
+    const rows = this.statement(`
       SELECT fp, status, cooldown_until, strikes, requests, successes, failures, tool_errors,
-             last_http_status, last_latency_ms, last_used_at
+             last_http_status, last_latency_ms, last_used_at, last_error, last_error_at
       FROM key_state WHERE provider = ?
     `).all(provider) as Array<Record<string, unknown> & { fp: string }>;
     const byFingerprint = new Map(rows.map((item) => [item.fp, item]));
@@ -276,7 +306,7 @@ export class RotationStore {
   }
 
   private healthByFingerprint(provider: string): Map<string, StateRow> {
-    const rows = this.db.prepare(
+    const rows = this.statement(
       "SELECT fp, status, cooldown_until, strikes FROM key_state WHERE provider = ?",
     ).all(provider) as unknown as StateRow[];
     return new Map(rows.map((item) => [item.fp, item]));

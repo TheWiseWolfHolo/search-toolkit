@@ -28,7 +28,8 @@ export function trimText(text: string, max: number): string {
   if (value.length <= max) return value;
   const head = value.slice(0, max);
   const paragraph = head.lastIndexOf("\n\n");
-  const sentence = Math.max(head.lastIndexOf(". "), head.lastIndexOf(".\n"));
+  // Latin sentences end with ". "; CJK ones end with 。！？ and no space.
+  const sentence = Math.max(head.lastIndexOf(". "), head.lastIndexOf(".\n"), head.lastIndexOf("。"), head.lastIndexOf("！"), head.lastIndexOf("？"));
   const cut = paragraph > max * 0.5 ? paragraph : sentence > max * 0.5 ? sentence + 1 : head.lastIndexOf(" ") > max * 0.5 ? head.lastIndexOf(" ") : max;
   return `${head.slice(0, cut).trimEnd()} …`;
 }

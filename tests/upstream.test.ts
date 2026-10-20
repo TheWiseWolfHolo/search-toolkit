@@ -105,7 +105,6 @@ test("upstream direct results expose route provenance to models", () => {
     searchToolkitRoute: {
       provider: "linkup",
       tool: "linkup_linkup_search",
-      upstreamTool: "linkup-search",
     },
   });
   assert.equal(content[1]?.text, "result body");

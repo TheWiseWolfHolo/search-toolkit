@@ -12,6 +12,7 @@ import {
 } from "./errors.js";
 import { callWithRotation } from "./keys.js";
 import { dedupeItems } from "./merge.js";
+import { cleanError, routeBlock } from "./provenance.js";
 import { renderItems } from "./render.js";
 import { extractUpstreamSearchItems } from "./rest/normalize.js";
 import { keyFingerprint, maskKey, type RotationStore } from "./rotation.js";
@@ -88,7 +89,7 @@ export class UpstreamMcpProvider {
         await this.dropClient(selection);
         const status = statusFromError(error);
         if (status === 401 || status === 402 || status === 403 || status === 429) {
-          this.rotation.record(selection, { ok: false, latencyMs: 0, httpStatus: status });
+          this.rotation.record(selection, { ok: false, latencyMs: 0, httpStatus: status, error: cleanError(error) });
         }
         if (error instanceof Error && /timed out after/.test(error.message)) break;
       }
@@ -117,7 +118,7 @@ export class UpstreamMcpProvider {
           throw new ToolResultError(`${this.name} upstream tool error: ${text.slice(0, 500)}`, result.content as unknown[], keyFault);
         }
         // The key and transport worked; the tool rejected this particular request.
-        this.rotation.record(selection, { ok: true, latencyMs, toolError: true });
+        this.rotation.record(selection, { ok: true, latencyMs, toolError: true, error: `tool error: ${cleanError(text)}` });
         return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
       }
       this.rotation.record(selection, { ok: true, latencyMs });
@@ -125,7 +126,7 @@ export class UpstreamMcpProvider {
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const httpStatus = statusFromError(error);
-      this.rotation.record(selection, { ok: false, latencyMs, ...(httpStatus ? { httpStatus } : {}) });
+      this.rotation.record(selection, { ok: false, latencyMs, ...(httpStatus ? { httpStatus } : {}), error: cleanError(error) });
       throw error;
     }
   }
@@ -295,7 +296,7 @@ export function appendRotationMetadata(
     : Array.isArray(record.content) ? record.content : [];
   return {
     ...record,
-    content: [{ type: "text", text: JSON.stringify({ searchToolkitRoute: route }) }, ...content],
+    content: [routeBlock(route), ...content],
     ...(items
       ? {
           structuredContent: {

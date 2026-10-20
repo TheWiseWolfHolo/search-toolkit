@@ -49,6 +49,10 @@ function route(output: unknown): Json {
   return JSON.parse((output as { content: Array<{ text: string }> }).content[0]?.text ?? "{}") as Json;
 }
 
+function autoMeta(output: unknown): Json {
+  return (output as { structuredContent: { searchAuto: Json } }).structuredContent.searchAuto;
+}
+
 const LONG = "readable page content. ".repeat(40);
 
 test("fetch_auto uses the first reader that returns real content and skips the rest", async () => {
@@ -59,7 +63,7 @@ test("fetch_auto uses the first reader that returns real content and skips the r
     const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/page" });
     assert.equal((route(output).searchToolkitRoute as Json).tool, "exa_web_fetch_exa");
     assert.match(text(output), /readable page content/);
-    assert.deepEqual((route(output).searchToolkitAuto as Json).attempts, [
+    assert.deepEqual((autoMeta(output) as Json).attempts, [
       { provider: "exa", tool: "exa_web_fetch_exa", candidateRank: 1, outcome: "success" },
     ]);
   });
@@ -71,7 +75,7 @@ test("fetch_auto falls through a reader that answers with almost nothing", async
     tavily: upstream("tavily_extract", LONG),
   }, async (toolkit) => {
     const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/page" });
-    const auto = route(output).searchToolkitAuto as { attempts: Array<Json> };
+    const auto = autoMeta(output) as { attempts: Array<Json> };
     assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
     assert.deepEqual(auto.attempts.map((attempt) => attempt.outcome), ["empty", "success"]);
   });
@@ -117,15 +121,26 @@ test("a tool-level error is handed back to a direct caller as the upstream's own
   });
 });
 
-test("fetch_auto stops at a request-level tool error but fails over on an availability error", async () => {
+test("fetch_auto stops at a missing page but moves past a blocked page or an availability error", async () => {
   await withToolkit({
-    exa: upstream("web_fetch_exa", "unused", ["fetch"], { FAKE_ERROR: "Failed to scrape URL. Status code: 403 Forbidden" }),
+    exa: upstream("web_fetch_exa", "unused", ["fetch"], { FAKE_ERROR: "Failed to scrape URL. Status code: 404 Not Found" }),
     tavily: upstream("tavily_extract", LONG),
   }, async (toolkit) => {
     await assert.rejects(
       toolkit.callTool("fetch_auto", { url: "https://example.com/page" }),
-      /fetch_auto failed after exa\/exa_web_fetch_exa\[error\]: .*Status code: 403/,
+      /fetch_auto failed after exa\/exa_web_fetch_exa\[error\]: .*Status code: 404/,
     );
+  });
+  await withToolkit({
+    exa: upstream("web_fetch_exa", "unused", ["fetch"], { FAKE_ERROR: "Failed to scrape URL. Status code: 403 Forbidden" }),
+    tavily: upstream("tavily_extract", LONG),
+  }, async (toolkit) => {
+    const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/page" });
+    assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
+    // The fallback is visible to the model; a first-try success is not spelled out.
+    assert.deepEqual(route(output).searchToolkitAuto, {
+      mode: "fetch", quality: "balanced", attempts: ["exa_web_fetch_exa:error", "tavily_tavily_extract:success"],
+    });
   });
   await withToolkit({
     exa: upstream("web_fetch_exa", "unused", ["fetch"], { FAKE_ERROR: "Service temporarily unavailable" }),
@@ -133,7 +148,7 @@ test("fetch_auto stops at a request-level tool error but fails over on an availa
   }, async (toolkit) => {
     const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/page" });
     assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
-    const auto = route(output).searchToolkitAuto as { attempts: Json[] };
+    const auto = autoMeta(output) as { attempts: Json[] };
     assert.deepEqual(auto.attempts.map((attempt) => attempt.outcome), ["error", "success"]);
   });
 });
@@ -168,7 +183,7 @@ test("crossCheck merges two independent indexes and reports which provider found
   try {
     await withToolkit({ parallel: restProvider("parallel"), brave: restProvider("brave") }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "q", limit: 3, crossCheck: true });
-      const auto = route(output).searchToolkitAuto as { crossCheck: { routes: Json[]; failed: string[]; corroborated: number } };
+      const auto = autoMeta(output) as { crossCheck: { routes: Json[]; failed: string[]; corroborated: number } };
       assert.deepEqual(auto.crossCheck.routes.map((item) => item.provider), ["parallel", "brave"]);
       assert.equal(auto.crossCheck.corroborated, 1);
       assert.deepEqual(auto.crossCheck.failed, []);
@@ -189,7 +204,7 @@ test("crossCheck degrades to the surviving provider when one index fails", async
   try {
     await withToolkit({ parallel: restProvider("parallel"), brave: restProvider("brave") }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "q", crossCheck: true });
-      const auto = route(output).searchToolkitAuto as { crossCheck: { routes: Json[]; failed: string[] } };
+      const auto = autoMeta(output) as { crossCheck: { routes: Json[]; failed: string[] } };
       assert.deepEqual(auto.crossCheck.failed, ["parallel"]);
       assert.deepEqual(auto.crossCheck.routes.map((item) => item.provider), ["brave"]);
       assert.match(text(output), /Only/);
@@ -202,7 +217,7 @@ test("crossCheck with a single eligible provider is just a normal search", async
   try {
     await withToolkit({ brave: restProvider("brave") }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "q", crossCheck: true });
-      assert.equal((route(output).searchToolkitAuto as Json).crossCheck, undefined);
+      assert.equal((autoMeta(output) as Json).crossCheck, undefined);
       assert.match(text(output), /X/);
     });
   } finally { restore(); }
@@ -285,7 +300,7 @@ test("fetch_auto supports concurrent batch URLs and per-page section extraction"
     assert.match(rendered, /## API Reference/);
     assert.doesNotMatch(rendered, /# Title/);
     assert.doesNotMatch(rendered, /## Changelog/);
-    const auto = route(output).searchToolkitAuto as { batch: { total: number; succeeded: number } };
+    const auto = autoMeta(output) as { batch: { total: number; succeeded: number } };
     assert.equal(auto.batch.total, 2);
     assert.equal(auto.batch.succeeded, 2);
   });
@@ -316,7 +331,7 @@ test("crossCheck merges and corroborates results across REST and MCP providers",
       exa: upstream("web_search_exa", exaReply, ["search"]),
     }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "mcp spec", limit: 4, crossCheck: true });
-      const auto = route(output).searchToolkitAuto as { crossCheck: { routes: Json[]; corroborated: number } };
+      const auto = autoMeta(output) as { crossCheck: { routes: Json[]; corroborated: number } };
       assert.deepEqual(auto.crossCheck.routes.map((item) => item.provider), ["parallel", "exa"]);
       assert.equal(auto.crossCheck.corroborated, 1);
       const rendered = text(output);
@@ -342,7 +357,7 @@ test("search_auto prioritizes providers with healthy keys over providers whose k
       toolkit.rotation.record(slot, { ok: false, latencyMs: 10, httpStatus: 429 });
       const output = await toolkit.callTool("search_auto", { query: "q" });
       assert.equal((route(output).searchToolkitRoute as Json).provider, "brave");
-      assert.deepEqual((route(output).searchToolkitAuto as Json).attempts, [
+      assert.deepEqual((autoMeta(output) as Json).attempts, [
         { provider: "brave", tool: "brave_web_search", candidateRank: 3, outcome: "success" },
       ]);
     });

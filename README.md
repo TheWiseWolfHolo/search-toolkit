@@ -121,14 +121,14 @@ The server exposes:
 - Provider-prefixed official upstream tools selected by each provider's tool policy. Firecrawl defaults to seven focused retrieval/acquisition tools instead of its whole management catalog.
 - Every configured REST adapter tool (or only specialist tools under `--profile curated`).
 - `search_auto`: quality-first routing with `balanced` and `max` profiles, plus `includeDomains`, `excludeDomains`, universal `freshness`, and `maxCharsPerResult`. It prioritizes providers with currently healthy key slots, de-duplicates canonical URLs (including `.md` / `.html` documentation mirrors), and caps per-result excerpts so routine lookups stay compact and inline-friendly. `crossCheck: true` queries two independent search providers (REST or normalized MCP such as Exa and Tavily) concurrently and merges them by canonical URL, listing which providers found each result.
-- `fetch_auto`: reads one `url` or up to five `urls` concurrently through Exa, Tavily, Parallel Extract, You.com Contents, Firecrawl, LinkUp, or AnySearch (those whose `auto` includes `fetch`). Readers that return almost nothing or anti-bot/Cloudflare challenge shells are skipped automatically, up to three are tried, and `maxChars`, `offset`, and `section` support pagination and Markdown heading extraction. `quality: max` leads with Firecrawl for JavaScript-heavy pages.
+- `fetch_auto`: reads one `url` or up to five `urls` concurrently through Exa, Tavily, Parallel Extract, You.com Contents, Firecrawl, LinkUp, or AnySearch (those whose `auto` includes `fetch`). Readers that return almost nothing, return anti-bot/Cloudflare challenge shells, or are refused by the site (403/429/5xx) are skipped automatically, up to three are tried, a missing page (404/410) ends the chain, and `maxChars`, `offset`, and `section` support pagination and Markdown heading extraction. `quality: max` leads with Firecrawl for JavaScript-heavy pages.
 - `search_images`: quality-first worldwide text-to-image discovery through Brave Images, Parallel Image Search, and Serper Images on availability failure. It is not reverse image search and does not receive chat attachments by itself.
 - `search_pool_status`: masked key-pool diagnostics, including cool-downs.
 - `search_rotation_probe`: a live, quota-consuming rotation proof.
 
 ### What the model reads
 
-Results carry one leading route block, `{"searchToolkitRoute": {provider, tool, upstreamTool}}` (plus `searchToolkitAuto` with mode, quality, and the bounded attempt list for the unified tools), then compact text: numbered results with the provider's publication date, a bounded excerpt, and for cross-checks the providers that found each result. Upstream MCP search tools (such as Exa and Tavily) are normalized into the same compact numbered format while preserving structured items in `structuredContent`. Brave LLM Context renders grounding per source; Grok answers list their citations.
+Results carry one leading route block, `{"searchToolkitRoute": {provider, tool}}` (plus `searchToolkitAuto` with mode and quality for the unified tools, and an `attempts` list such as `["parallel_search:429", "you_search:success"]` only when a fallback happened), then compact text: numbered results with the provider's publication date, a bounded excerpt, and for cross-checks the providers that found each result. Upstream MCP search tools (such as Exa and Tavily) are normalized into the same compact numbered format while preserving structured items in `structuredContent`. Brave LLM Context renders grounding per source; Grok answers list their citations.
 
 ### Context cost
 
@@ -164,8 +164,11 @@ Each request selects one healthy key from the provider's pool. The cursor persis
 - `401` or `403`: bench the key for 1 hour, then 6, then 24 on repeated faults. Never permanent: when the window ends the key is tried again.
 - `402`: bench for 30 minutes, then 6 hours, then 24.
 - `429`: bench for 1, 5, then 15 minutes, or for the provider's `Retry-After`.
-- `5xx`, network failure, or timeout: retry on another healthy key (up to 3 keys per pool); transient server/network errors do not bench the key.
-- `400`, `404`, `422`, and an upstream MCP tool's own error (for example a scraped page answering 403) are not blamed on a key and do not retry; the tool's answer is returned. Only error text that is clearly about the key (invalid key, quota, rate limit) counts as a key fault.
+- `401`/`402`/`403`/`429` try up to 3 healthy keys per pool.
+- `5xx` or a dropped connection tries one more healthy key; neither benches the key.
+- A timeout is not retried on another key: the automatic route moves on to the next provider instead.
+- `400`, `404`, `422`, an upstream MCP tool's own error, and the status of a page being read (for example a site answering Parallel Extract with 403) are not blamed on a key and do not retry. Only error text that is clearly about the key (invalid key, quota, rate limit) counts as a key fault.
+- `search-toolkit status --verbose` shows each key's last error and when it happened.
 - A pool whose keys are all benched fails closed and says when the first recovers. `search-toolkit reset <provider>` clears the benches by hand.
 
 `providers.json`, raw keys, and rotation state are ignored by Git. Command output and MCP metadata show only masked key slots.

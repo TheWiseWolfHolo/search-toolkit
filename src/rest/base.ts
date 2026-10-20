@@ -2,6 +2,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError, parseRetryAfter, statusFromError } from "../errors.js";
 import { callWithRotation } from "../keys.js";
 import { dedupeItems } from "../merge.js";
+import { cleanError, redact, routeBlock } from "../provenance.js";
 import { renderPayload } from "../render.js";
 import type { RotationStore } from "../rotation.js";
 import type { KeySelection, ProviderConfig, SearchItem, ToolBinding } from "../types.js";
@@ -50,7 +51,7 @@ export class RestProvider {
       return {
         // Model-visible content: one compact route block, then readable text.
         content: [
-          { type: "text", text: JSON.stringify({ searchToolkitRoute: route }) },
+          routeBlock(route),
           { type: "text", text: renderPayload(payload, { dedupe: false }) },
         ],
         structuredContent: {
@@ -73,6 +74,7 @@ export class RestProvider {
         latencyMs,
         ...(status ? { httpStatus: status } : {}),
         ...(error instanceof HttpError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+        error: cleanError(error),
       });
       throw error;
     }
@@ -91,7 +93,7 @@ export async function requestJson(
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   const text = await response.text();
   if (!response.ok) {
-    const safe = text.replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>").slice(0, 500);
+    const safe = redact(text).slice(0, 500);
     throw new HttpError(`HTTP ${response.status}: ${safe}`, response.status, parseRetryAfter(response.headers.get("retry-after")));
   }
   try {
