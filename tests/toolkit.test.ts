@@ -124,7 +124,7 @@ test("automatic route profiles keep their measured provider order", () => {
   const names = (mode: Parameters<typeof autoCandidates>[0], quality: Parameters<typeof autoCandidates>[1] = "balanced", extra = {}) =>
     autoCandidates(mode, quality, { ...request, ...extra }).map((item) => item.name);
   assert.deepEqual(names("general"), [
-    "parallel_search", "serper_search", "exa_web_search_exa", "you_search", "brave_web_search", "tavily_tavily_search",
+    "parallel_search", "serper_search", "exa_web_search_exa", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search",
   ]);
   // Providers are asked for two extra results; duplicates are dropped before the list is capped.
   assert.deepEqual(autoCandidates("general", "balanced", request)[0]?.nativeArguments, {
@@ -134,7 +134,7 @@ test("automatic route profiles keep their measured provider order", () => {
     query: "route contract", numResults: 9, objective: "route contract",
   });
   assert.deepEqual(names("general", "max"), [
-    "exa_web_search_advanced_exa", "parallel_search", "serper_search", "you_search", "brave_web_search", "tavily_tavily_search",
+    "exa_web_search_advanced_exa", "parallel_search", "serper_search", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search",
   ]);
   assert.deepEqual(autoCandidates("general", "max", request)[0]?.nativeArguments, {
     query: "route contract", numResults: 9, type: "auto", enableHighlights: true,
@@ -153,14 +153,15 @@ test("automatic route profiles keep their measured provider order", () => {
     query: "route contract", count: 20, maximumNumberOfTokens: 4096,
   });
   assert.equal(autoCandidates("context", "max", request)[0]?.nativeArguments?.mode, "advanced");
-  assert.deepEqual(names("current"), ["you_search", "serper_news", "brave_news_search", "tavily_tavily_search"]);
+  assert.deepEqual(names("current"), ["you_search", "octen_search", "serper_news", "brave_news_search", "tavily_tavily_search"]);
   assert.deepEqual(autoCandidates("current", "balanced", request).map((item) => item.nativeArguments), [
     { query: "route contract", limit: 9, contentLevel: "snippets", freshness: "week" },
+    { query: "route contract", limit: 9, freshness: "week" },
     { query: "route contract", limit: 9, tbs: "qdr:w" },
     { query: "route contract", limit: 9, freshness: "pw" },
     { query: "route contract", max_results: 9, search_depth: "basic", topic: "news", time_range: "week" },
   ]);
-  assert.equal(autoCandidates("current", "max", { ...request, freshness: "month" })[3]?.nativeArguments?.time_range, "month");
+  assert.equal(autoCandidates("current", "max", { ...request, freshness: "month" })[4]?.nativeArguments?.time_range, "month");
   assert.deepEqual(names("scholar"), ["exa_web_search_exa", "parallel_search", "you_search", "serper_scholar"]);
   assert.match(String(autoCandidates("scholar", "balanced", request)[0]?.nativeArguments?.objective), /Research papers.*route contract/);
   assert.deepEqual(names("code"), ["exa_web_search_advanced_exa", "parallel_search", "serper_search", "exa_web_search_exa"]);
@@ -192,6 +193,9 @@ test("Chinese queries lead with Brave and Serper in Chinese-market settings", ()
     "exa_web_search_exa", "serper_search", "parallel_search", "brave_web_search",
   ]);
   assert.deepEqual(autoCandidates("current", "balanced", { query: "台风 预警" })[1]?.nativeArguments, {
+    query: "台风 预警", limit: 8, freshness: "week", language: ["zh"],
+  });
+  assert.deepEqual(autoCandidates("current", "balanced", { query: "台风 预警" })[2]?.nativeArguments, {
     query: "台风 预警", limit: 8, tbs: "qdr:w", gl: "cn", hl: "zh-cn",
   });
   assert.equal(autoCandidates("context", "balanced", { query: "大模型 评测" })[0]?.nativeArguments?.searchLang, "zh-hans");

@@ -158,3 +158,30 @@ test("a provider failing repeatedly right now is tried after its healthy peers",
     assert.ok((status.providers.find((item) => item.name === "parallel")?.recentFailure ?? 0) >= 0.5);
   });
 });
+
+test("Octen sends its native filters, restores spacing, and treats a business error code as a failure", async () => {
+  const { OctenAdapter, spaced } = await import("../src/rest/providers/octen.js");
+  assert.equal(spaced("Shorncliffe,Brisbane,Queensland.The pier is 1,000 m; U.S. law.It"), "Shorncliffe, Brisbane, Queensland. The pier is 1,000 m; U.S. law. It");
+  const original = globalThis.fetch;
+  const bodies: Array<Record<string, unknown>> = [];
+  let reply: Record<string, unknown> = {
+    code: 0,
+    data: { results: [{ title: "Pier", url: "https://example.com/pier", highlight: "Reopened in 2016.It hosts a dinner.", time_published: "2024-10-15T00:00:00Z" }] },
+  };
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(reply), { status: 200 });
+  };
+  try {
+    const adapter = new OctenAdapter();
+    const config = { enabled: true, auto: [], keys: ["k"], integration: { kind: "rest", adapter: "octen" } } as never;
+    const result = await adapter.call("octen_search", { query: "pier", limit: 3, freshness: "week", includeDomains: ["example.com"], language: ["zh"] }, "k", config) as { items: Array<{ text: string; date?: string }> };
+    assert.deepEqual(bodies[0], { query: "pier", count: 3, include_domains: ["example.com"], language: ["zh"], time_range: "week" });
+    assert.equal(result.items[0]?.text, "Reopened in 2016. It hosts a dinner.");
+    assert.equal(result.items[0]?.date, "2024-10-15");
+    reply = { code: 403, msg: "Insufficient balance in account" };
+    await assert.rejects(adapter.call("octen_search", { query: "pier" }, "k", config), (error: { status?: number }) => error.status === 403);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

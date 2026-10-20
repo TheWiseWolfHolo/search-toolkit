@@ -77,6 +77,12 @@
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "querit" }
     },
+    "octen": {
+      "enabled": true,
+      "auto": ["search"],
+      "keys": ["replace-me"],
+      "integration": { "kind": "rest", "adapter": "octen" }
+    },
     "serper": {
       "enabled": true,
       "auto": ["search", "images"],

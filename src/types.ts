@@ -22,7 +22,7 @@ export type IntegrationConfig =
     }
   | {
       kind: "rest";
-      adapter: "querit" | "serper" | "doubao" | "jina" | "tinyfish" | "brave" | "you" | "parallel" | "grok";
+      adapter: "querit" | "serper" | "doubao" | "jina" | "tinyfish" | "brave" | "you" | "parallel" | "grok" | "octen";
       baseUrl?: string;
     };
 

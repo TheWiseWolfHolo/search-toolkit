@@ -38,6 +38,10 @@ Artificial Analysis (artificialanalysis.ai/agents/search-api, data of 2026-10-19
 
 The two agree where they overlap: Exa, Parallel, Brave, and You.com are the strong providers, and Tavily and LinkUp are not among the leaders. Its multi-hop result changed one route: English General max now starts with Exa Advanced (`type: auto`, highlights) instead of Parallel Advanced; on its BrowseComp example (a pier in Brisbane rebuilt in 2016 that hosts a yearly dinner) Exa's first result named Shorncliffe Pier. Perplexity Search and Octen are not integrated here; Octen in particular scored near the top at about a sixth of Exa's search cost and the lowest latency per query.
 
+## Octen, added afterwards
+
+Octen was run on the same 42 queries after it was integrated (`octen`, `octen-zh` with `language: ["zh"]`, `octen-news` with a one-week window). It was the fastest provider in every bucket, with a median of about 0.3 seconds, and dated over 80% of its results. On first-page authority it trailed the leaders: English general 0.78 (Parallel 0.83), English exact 0.66, Chinese official 0.64. English news was its best result at 0.88, second to You.com (0.94) and ahead of Brave News (0.80). The language filter mattered for Chinese exact queries (0.88 with it, 0.63 without). It now sits second in Current and between You.com and Brave in English General.
+
 ## Tables
 
 `p50 ms` is the median latency of successful calls. Variants ending in `-zh` add Chinese-market parameters; `-news` variants add a one-week window.

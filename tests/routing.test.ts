@@ -358,7 +358,7 @@ test("search_auto prioritizes providers with healthy keys over providers whose k
       const output = await toolkit.callTool("search_auto", { query: "q" });
       assert.equal((route(output).searchToolkitRoute as Json).provider, "brave");
       assert.deepEqual((autoMeta(output) as Json).attempts, [
-        { provider: "brave", tool: "brave_web_search", candidateRank: 5, outcome: "success" },
+        { provider: "brave", tool: "brave_web_search", candidateRank: 6, outcome: "success" },
       ]);
     });
   } finally {

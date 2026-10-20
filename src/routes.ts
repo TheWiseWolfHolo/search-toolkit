@@ -59,7 +59,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
 
   const domainArgsFor = (name: string): Record<string, unknown> => {
     if (!hasDomains) return {};
-    if (name === "parallel_search" || name === "you_search" || name === "exa_web_search_advanced_exa") {
+    if (name === "parallel_search" || name === "you_search" || name === "exa_web_search_advanced_exa" || name === "octen_search") {
       return {
         ...(includeDomains.length ? { includeDomains } : {}),
         ...(excludeDomains.length ? { excludeDomains } : {}),
@@ -84,7 +84,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
     if (!freshness || mode === "current") return {};
     if (name.startsWith("brave_")) return { freshness: braveFreshness };
     if (name.startsWith("serper_")) return { tbs: serperFreshness };
-    if (name === "you_search") return { freshness };
+    if (name === "you_search" || name === "octen_search") return { freshness };
     if (name === "tavily_tavily_search") return { time_range: freshness };
     if (name === "parallel_search") return { maxAgeSeconds: parallelMaxAge };
     if (name === "querit_search") return { timeRange: freshness };
@@ -161,6 +161,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
     case "current":
       return [
         candidate("you_search", "limit", { ...youLang, contentLevel: youLevel, freshness }),
+        candidate("octen_search", "limit", { freshness, ...(zh ? { language: ["zh"] } : {}) }),
         candidate("serper_news", "limit", { tbs: serperFreshness, ...serperLang }),
         candidate("brave_news_search", "limit", { freshness: braveFreshness, ...braveLang, ...braveMax }),
         candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, topic: "news", time_range: freshness }),
@@ -209,6 +210,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             candidate("serper_search", "limit"),
             ...(quality === "max" ? [] : [candidate("exa_web_search_exa", "numResults")]),
             candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
+            candidate("octen_search", "limit"),
             candidate("brave_web_search", "limit", braveMax),
             candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth }),
           ];

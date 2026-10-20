@@ -10,7 +10,7 @@ Search Toolkit preserves provider-specific capabilities instead of flattening ev
 
 - Official Remote MCP proxy: Exa, Tavily, LinkUp, and AnySearch.
 - Official STDIO MCP proxy: Firecrawl.
-- Thin official-API adapters: Querit, Serper (Web/News/Images/Scholar), Brave Web/News/Images/LLM Context, You.com Search/Contents, Parallel Search/Extract/Images, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
+- Thin official-API adapters: Querit, Serper (Web/News/Images/Scholar), Brave Web/News/Images/LLM Context, You.com Search/Contents, Parallel Search/Extract/Images, Octen Search, Jina Search, TinyFish Search, Doubao Search, and xAI Responses Web/X Search.
 - Persistent per-provider key pools in SQLite, tracked by key fingerprint so reordering a pool never moves history.
 - Upstream tool names and schemas are discovered from the official MCP servers, cached on disk, and filtered by an optional per-provider tool policy.
 - Raw keys stay outside the repository in a local JSON file.

@@ -6,7 +6,7 @@
 
 - 不把所有搜索服务压成一个失去特色的通用接口。
 - Exa、Tavily、LinkUp、AnySearch、Firecrawl 优先透明代理官方 MCP，保留官方工具 schema。
-- Querit、Serper（Web/News/Images/Scholar）、Brave Web/News/Images/LLM Context、You.com Search/Contents、Parallel Search/Extract/Images、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
+- Querit、Serper（Web/News/Images/Scholar）、Brave Web/News/Images/LLM Context、You.com Search/Contents、Parallel Search/Extract/Images、Octen、Jina、TinyFish、豆包与 xAI Responses 只做官方 API 薄适配。
 - 每家 Provider 独立维护 Key 池；SQLite 游标可跨进程、跨重启持续轮询，健康状态按 Key 指纹记录，调换 Key 顺序不会错位。
 - 真实 Key 只保存在仓库外的文本 JSON，不写进代码、Skill、README 或 Codex 配置。
 - 豆包 `auto` 为空，只能被直接调用，不会被 `search_auto` 或任何自动兜底消耗。

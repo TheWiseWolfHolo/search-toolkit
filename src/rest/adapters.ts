@@ -3,6 +3,7 @@ import { BraveAdapter } from "./providers/brave.js";
 import { DoubaoAdapter } from "./providers/doubao.js";
 import { GrokAdapter } from "./providers/grok.js";
 import { JinaAdapter } from "./providers/jina.js";
+import { OctenAdapter } from "./providers/octen.js";
 import { ParallelAdapter } from "./providers/parallel.js";
 import { QueritAdapter } from "./providers/querit.js";
 import { SerperAdapter } from "./providers/serper.js";
@@ -10,7 +11,7 @@ import { TinyfishAdapter } from "./providers/tinyfish.js";
 import { YouAdapter } from "./providers/you.js";
 
 export {
-  BraveAdapter, DoubaoAdapter, GrokAdapter, JinaAdapter, ParallelAdapter,
+  BraveAdapter, DoubaoAdapter, GrokAdapter, JinaAdapter, OctenAdapter, ParallelAdapter,
   QueritAdapter, SerperAdapter, TinyfishAdapter, YouAdapter,
 };
 
@@ -24,6 +25,7 @@ const ADAPTERS: Record<string, () => RestAdapter> = {
   you: () => new YouAdapter(),
   parallel: () => new ParallelAdapter(),
   grok: () => new GrokAdapter(),
+  octen: () => new OctenAdapter(),
 };
 
 export const REST_ADAPTER_NAMES = Object.keys(ADAPTERS);

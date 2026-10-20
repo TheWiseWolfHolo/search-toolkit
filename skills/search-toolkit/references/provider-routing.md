@@ -44,10 +44,10 @@ Balanced search routing uses these profiles. Each is an ordered candidate list; 
 
 A query with at least two Han characters and no kana counts as Chinese. Chinese queries send Brave `searchLang: zh-hans, country: CN`, Serper `gl: cn, hl: zh-cn`, and You.com `language: zh-hans, country: CN`, and lead with Brave and Serper, because Parallel and You.com mixed English pages into Chinese results.
 
-- General: Parallel Fast → Serper → Exa Search → You snippets → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
+- General: Parallel Fast → Serper → Exa Search → You snippets → Octen → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
 - Exact (quoted strings, error messages): Parallel → Brave Web → Serper → You → Tavily exact. Chinese: Brave → Serper → You → Parallel. Exa ranks semantically and was weakest here.
 - Official (vendor, product, or government sites): Exa Search → Brave Web → Serper → You. Chinese: Exa → Serper → Parallel → Brave. Exa returned the highest share of official pages in both languages.
-- Current (news): You.com with `freshness` → Serper News → Brave News → Tavily news topic, with Chinese-market settings for Chinese queries. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com and Tavily `day/week/month/year`, and Parallel `maxAgeSeconds`.
+- Current (news): You.com with `freshness` → Octen with `freshness` → Serper News → Brave News → Tavily news topic, with Chinese-market settings for Chinese queries. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com, Octen, and Tavily `day/week/month/year`, and Parallel `maxAgeSeconds`.
 - Scholar (papers, preprints, reviews): Exa Search with a research-paper objective → Parallel → You → Serper Scholar. Call `serper_scholar` directly when citation counts matter.
 - Code (repositories, examples, API usage): Exa Advanced `category: github` → Parallel → Serper → Exa Search.
 - Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
@@ -119,6 +119,10 @@ Observations from live checks in August 2026, which may have changed: strong Eng
 Known-page scrape, clean Markdown/HTML, screenshots or structured JSON, site crawl and map, difficult JavaScript pages, extraction. Ordinary search normally stays with a retrieval provider.
 
 The default tool policy exposes scrape, map, search, crawl, crawl status, developer search, and GitHub research search. Monitor, feedback, interaction, agent, and other management tools are hidden; use Scrape JSON for structured extraction. `allow: ["*"]` exposes the full catalog, but write and destructive annotations and approval prompts still apply. Note that firecrawl-mcp 3.27 no longer ships `firecrawl_research_search_github`, so the pinned version matters.
+
+### Octen — fast highlights
+
+The fastest search here, about 0.3 seconds per call, with dated results and a long query-relevant highlight per result. In the 2026-10 comparison it was second for English news, but its first page carried fewer official or primary sources than Parallel, Exa, Brave, or Serper, so it sits in the middle of General and second in Current. It ranked near the top of the Artificial Analysis Search Index, where an agent reads highlights over many searches. Web search costs $1 per 1,000 calls; pass `language: ["zh"]` to keep Chinese results Chinese.
 
 ### Jina and TinyFish — search-only in this server
 
