@@ -185,6 +185,8 @@ node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/provid
 
 客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions`。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
 
+HTTP 入口使用 MCP SDK 1.32.1，JSON 请求上限为 100 KiB，工具参数中的数组元素与对象键总数上限为 10,000，计数发生在参数 Schema 验证之前。每个会话使用独立的 server 与 transport。这两项 HTTP 限制不影响 STDIO。
+
 ## Key 轮询
 
 每次请求从该 Provider 的 Key 池里取一把健康的 Key。游标跨重启持久化，并通过 SQLite 在多个并发进程间共享。健康状态按 Key 指纹记录，调换或删减 Key 不会把历史记到别的 Key 上。

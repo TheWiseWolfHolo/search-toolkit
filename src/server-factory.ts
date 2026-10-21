@@ -9,6 +9,7 @@ const instructions = "Search with search_auto (web), search_images (images), and
 interface ProtocolServerOptions {
   allowTool?: (tool: Tool) => boolean;
   beforeCall?: (toolName: string) => void;
+  maxToolInputElements?: number;
 }
 
 /**
@@ -34,8 +35,10 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
     try {
       const tool = visibleTools().find((candidate) => candidate.name === request.params.name);
       if (!tool) throw new Error("Tool is not available for this token");
+      const arguments_ = request.params.arguments ?? {};
+      if (options.maxToolInputElements !== undefined) enforceInputElementLimit(arguments_, options.maxToolInputElements);
       options.beforeCall?.(tool.name);
-      return forModel(await toolkit.callTool(tool.name, request.params.arguments ?? {})) as never;
+      return forModel(await toolkit.callTool(tool.name, arguments_)) as never;
     } catch (error) {
       const text = redact(error instanceof Error ? error.message : String(error)).slice(0, 1_000);
       return { content: [{ type: "text", text }], isError: true };
@@ -47,4 +50,21 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
   });
   server.onclose = unsubscribe;
   return server;
+}
+
+// The low-level Server has no McpServer maxToolInputElements option.
+// Count JSON members before invoking the toolkit's schema validator.
+function enforceInputElementLimit(value: unknown, maximum: number): void {
+  let count = 0;
+  const pending: unknown[] = [value];
+  while (pending.length) {
+    const node = pending.pop();
+    if (node === null || typeof node !== "object") continue;
+    for (const key in node) {
+      if (!Object.hasOwn(node, key)) continue;
+      if (++count > maximum) throw new Error(`Tool input exceeds ${maximum} array elements and object keys`);
+      const child = (node as Record<string, unknown>)[key];
+      if (child !== null && typeof child === "object") pending.push(child);
+    }
+  }
 }

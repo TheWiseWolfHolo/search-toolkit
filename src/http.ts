@@ -6,6 +6,9 @@ import type { Request, Response } from "express";
 import { createProtocolServer } from "./server-factory.js";
 import { SearchToolkit } from "./toolkit.js";
 
+const MAX_HTTP_REQUEST_BYTES = 100 * 1024;
+const MAX_HTTP_TOOL_INPUT_ELEMENTS = 10_000;
+
 export interface HttpTokenPolicy {
   hash: string;
   tools?: string[];
@@ -91,6 +94,7 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
       return;
     }
     const protocolOptions = {
+      maxToolInputElements: MAX_HTTP_TOOL_INPUT_ELEMENTS,
       ...(policy.tools ? { allowTool: (tool: { name: string }) => policy.tools?.has(tool.name) === true } : {}),
       ...(policy.requestsPerMinute
         ? { beforeCall: () => enforceRateLimit(tokenId, policy.requestsPerMinute as number, rateWindows) }
@@ -98,6 +102,7 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
     };
     const server = createProtocolServer(toolkit, protocolOptions);
     const transport = new StreamableHTTPServerTransport({
+      maxRequestBodySize: MAX_HTTP_REQUEST_BYTES,
       sessionIdGenerator: randomUUID,
       onsessioninitialized: (id) => {
         sessions.set(id, { tokenId, transport, lastSeenAt: Date.now() });

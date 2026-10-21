@@ -67,6 +67,20 @@ test("Streamable HTTP serves the shared toolkit behind bearer authentication", a
     assert.ok(ownerTools.tools.some((tool) => tool.name === "search_pool_status"));
     assert.ok(ownerTransport.sessionId);
 
+    const excessiveInput = await owner.callTool({
+      name: "search_auto",
+      arguments: { query: "example", padding: Array(10_001).fill(null) },
+    });
+    assert.equal(excessiveInput.isError, true);
+    assert.match(String((excessiveInput.content as Array<{ text?: string }>)[0]?.text), /Tool input exceeds 10000/);
+    const excessiveBody = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ownerToken}` },
+      body: JSON.stringify({ padding: "x".repeat(100 * 1024) }),
+    });
+    assert.equal(excessiveBody.status, 413);
+    assert.ok((await owner.listTools()).tools.length > 0);
+
     const ownerSecond = new Client({ name: "search-toolkit-http-owner-second-test", version: "1.0.0" });
     const ownerSecondTransport = new StreamableHTTPClientTransport(url, {
       requestInit: { headers: { Authorization: `Bearer ${ownerToken}` } },

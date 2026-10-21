@@ -185,6 +185,8 @@ node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/provid
 
 Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. Put public deployments behind HTTPS; provider keys stay on the server.
 
+The HTTP endpoint uses MCP SDK 1.32.1, limits JSON requests to 100 KiB and tool arguments to 10,000 total array elements and object keys before schema validation. Each session has its own server and transport. These HTTP limits do not apply to STDIO.
+
 ## Key rotation
 
 Each request takes one healthy key from the provider's pool. The cursor persists across restarts and is shared by concurrent processes through SQLite. Health is recorded per key fingerprint, so reordering or trimming a pool does not misattribute history.

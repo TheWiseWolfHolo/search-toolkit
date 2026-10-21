@@ -42,7 +42,7 @@
     "eval:search": "npm run build && node dist/scripts/eval-search.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "express": "5.2.1"
   },
   "devDependencies": {
