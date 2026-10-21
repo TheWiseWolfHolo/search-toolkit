@@ -42,6 +42,19 @@ The two agree where they overlap: Exa, Parallel, Brave, and You.com are the stro
 
 Octen was run on the same 42 queries after it was integrated (`octen`, `octen-zh` with `language: ["zh"]`, `octen-news` with a one-week window). It was the fastest provider in every bucket, with a median of about 0.3 seconds, and dated over 80% of its results. On first-page authority it trailed the leaders: English general 0.78 (Parallel 0.83), English exact 0.66, Chinese official 0.64. English news was its best result at 0.88, second to You.com (0.94) and ahead of Brave News (0.80). The language filter mattered for Chinese exact queries (0.88 with it, 0.63 without). It now sits second in Current and between You.com and Brave in English General.
 
+## Exa 3.0 rerun (2026-10-21)
+
+Exa 3.0 shipped on 2026-10-19 with a larger embedding model, generally available Dynamic Highlights, a larger index, and a new Lite search type. Exa and its main peers were rerun on all 42 queries on 2026-10-21 (329 calls). Exa Auto scored the same as on 2026-10-20 (English general 0.83, official 0.93, exact 0.66, Chinese official 0.92), so the earlier run had most likely already hit 3.0 and its gains were already in the routes.
+
+What changed the routes:
+
+- **Lite matched Auto at a third of the latency.** English official 0.94 against 0.93, scholar 0.93 against 0.92, code 0.88 against 0.85, Chinese web 0.81 against 0.78, general tied at 0.83, with a median of about 0.7 seconds instead of 2 and $4 instead of $7 per 1,000 requests. With `category: github` it scored 0.95 against 0.96 at 0.8 to 1.1 seconds instead of 1.4 to 1.8. Lite was worse on exact strings (0.53), where Exa is not used. Balanced routes now use Lite and max keeps Auto.
+- **Auto with highlights added nothing measurable** (0.83 English general) and was slower, up to 7 seconds on Chinese queries.
+- **News needs a publish-date filter.** The first run's `exa-news` variant passed `maxAgeHours: 168`, which only controls how stale a cached page may be and makes Exa re-crawl older pages live, hence its 8-second latency. With `startPublishedDate` and Lite, Exa news scored 0.90 on Chinese news (You.com 0.78) and 0.91 on English news (You.com 0.93) at 0.7 to 1 second. Chinese current now starts with Exa news; English current puts it second. Three queries per news bucket is a small sample.
+- **Freshness now reaches Exa.** Basic Exa search has no date filter, and the routes used to drop `freshness` for it; a time-bounded request now goes to the advanced tool with `startPublishedDate`.
+
+The shipped routes, run end to end afterwards, averaged 0.905 across the 42 queries (0.901 before), with English official at 0.95 and English exact at 0.91.
+
 ## Tables
 
 `p50 ms` is the median latency of successful calls. Variants ending in `-zh` add Chinese-market parameters; `-news` variants add a one-week window.

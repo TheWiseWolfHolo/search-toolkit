@@ -18,15 +18,15 @@ Three tools cover almost every lookup. Each picks a provider, falls back when on
 
 | Mode | For | English order | Chinese order |
 | --- | --- | --- | --- |
-| `general` | Everyday lookup | Parallel → Serper → Exa → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
+| `general` | Everyday lookup | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
 | `exact` | Quoted strings, error messages | Parallel → Brave → Serper → You.com → Tavily | Brave → Serper → You.com → Parallel |
-| `official` | Vendor, product, or government sites | Exa → Brave → Serper → You.com | Exa → Serper → Parallel → Brave |
-| `current` | News | You.com → Octen → Serper News → Brave News → Tavily news | same, with Chinese settings |
-| `scholar` | Papers, preprints, reviews | Exa (research objective) → Parallel → You.com → Serper Scholar | same |
-| `code` | Repositories, examples, API usage | Exa (GitHub category) → Parallel → Serper → Exa | same |
+| `official` | Vendor, product, or government sites | Exa Lite → Brave → Serper → You.com | Exa Lite → Serper → Parallel → Brave |
+| `current` | News | You.com → Exa news → Octen → Serper News → Brave News → Tavily news | Exa news → You.com → Octen → Serper News → Brave News → Tavily news |
+| `scholar` | Papers, preprints, reviews | Exa Lite → Parallel → You.com → Serper Scholar | same |
+| `code` | Repositories, examples, API usage | Exa Lite (GitHub category) → Parallel → Serper → Exa Lite | same |
 | `context` | Grounding chunks within a token budget | Brave LLM Context → Parallel → You.com → Tavily | same |
 
-`quality: max` is for broad or multi-hop questions: English general starts with Exa Advanced with highlights, and Parallel, You.com, Brave, and Tavily switch to their deeper settings. Every mode accepts `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult`, translated into each provider's own parameters. `crossCheck: true` asks two independent indexes at once and marks which found each result.
+`quality: max` is for broad or multi-hop questions: English general starts with Exa Auto with highlights, Exa Lite becomes Exa Auto elsewhere, and Parallel, You.com, Brave, and Tavily switch to their deeper settings. Every mode accepts `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult`, translated into each provider's own parameters. `crossCheck: true` asks two independent indexes at once and marks which found each result.
 
 ### Where the orders come from
 

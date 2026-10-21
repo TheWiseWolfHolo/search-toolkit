@@ -328,7 +328,7 @@ test("crossCheck merges and corroborates results across REST and MCP providers",
   try {
     await withToolkit({
       parallel: restProvider("parallel"),
-      exa: upstream("web_search_exa", exaReply, ["search"]),
+      exa: upstream("web_search_advanced_exa", exaReply, ["search"]),
     }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "mcp spec", limit: 4, crossCheck: true });
       const auto = autoMeta(output) as { crossCheck: { routes: Json[]; corroborated: number } };

@@ -42,6 +42,8 @@ const onlyVariants = flag("--variants")?.split(",");
 const WEEK_SECONDS = 604_800;
 
 const WEB: Kind[] = ["web", "code"];
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+
 const VARIANTS: Variant[] = [
   // The unified route as shipped, in the query's own mode. Compare it with the single-provider rows.
   { name: "auto", tool: "search_auto", kinds: ["web", "news", "scholar", "code"], args: (query, n, spec) => ({ query, limit: n, mode: spec.mode }) },
@@ -59,7 +61,12 @@ const VARIANTS: Variant[] = [
   { name: "serper-news-zh", tool: "serper_news", kinds: ["news"], lang: "zh", args: (query, n) => ({ query, limit: n, tbs: "qdr:w", gl: "cn", hl: "zh-cn" }) },
   { name: "serper-scholar", tool: "serper_scholar", kinds: ["scholar"], args: (query, n) => ({ query, limit: n }) },
   { name: "exa", tool: "exa_web_search_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, objective: query }) },
-  { name: "exa-news", tool: "exa_web_search_advanced_exa", kinds: ["news"], args: (query, n) => ({ query, numResults: n, category: "news", maxAgeHours: 168 }) },
+  // maxAgeHours is how stale a cached page may be (older ones are re-crawled live), not a publish-date filter.
+  { name: "exa-news", tool: "exa_web_search_advanced_exa", kinds: ["news"], args: (query, n) => ({ query, numResults: n, category: "news", startPublishedDate: daysAgo(7) }) },
+  { name: "exa-news-lite", tool: "exa_web_search_advanced_exa", kinds: ["news"], args: (query, n) => ({ query, numResults: n, type: "lite", category: "news", startPublishedDate: daysAgo(7) }) },
+  { name: "exa-github-lite", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "lite", category: "github" }) },
+  { name: "exa-lite", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "lite" }) },
+  { name: "exa-hl", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "auto", enableHighlights: true }) },
   { name: "exa-pdf", tool: "exa_web_search_advanced_exa", kinds: ["scholar"], args: (query, n) => ({ query, numResults: n, category: "pdf" }) },
   { name: "exa-github", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, category: "github" }) },
   { name: "tavily", tool: "tavily_tavily_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, max_results: n, search_depth: "basic" }) },

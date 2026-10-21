@@ -56,6 +56,8 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   const braveFreshness = freshness ? { day: "pd", week: "pw", month: "pm", year: "py" }[freshness] : undefined;
   const serperFreshness = freshness ? { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" }[freshness] : undefined;
   const parallelMaxAge = freshness ? { day: 86_400, week: 604_800, month: 2_592_000, year: 31_536_000 }[freshness] : undefined;
+  // Exa filters by publish date only in its advanced tool (maxAgeHours is cache staleness, not a date filter).
+  const publishedSince = parallelMaxAge ? new Date(Date.now() - parallelMaxAge * 1000).toISOString().slice(0, 10) : undefined;
 
   const domainArgsFor = (name: string): Record<string, unknown> => {
     if (!hasDomains) return {};
@@ -87,6 +89,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
     if (name === "you_search" || name === "octen_search") return { freshness };
     if (name === "tavily_tavily_search") return { time_range: freshness };
     if (name === "parallel_search") return { maxAgeSeconds: parallelMaxAge };
+    if (name === "exa_web_search_advanced_exa") return { startPublishedDate: publishedSince };
     if (name === "querit_search") return { timeRange: freshness };
     return {};
   };
@@ -99,12 +102,15 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   };
 
   const candidate = (
-    name: string,
+    requestedName: string,
     limitKey: "limit" | "max_results" | "maxResults" | "numResults" | undefined,
     nativeArguments: Record<string, unknown> = {},
   ): AutoCandidate => {
+    // Basic Exa search has no date filter, so a time-bounded request goes to the advanced tool.
+    const name = requestedName === "exa_web_search_exa" && publishedSince ? "exa_web_search_advanced_exa" : requestedName;
+    if (name !== requestedName) delete nativeArguments.objective;
     const usesSiteQuery = hasDomains && (name.startsWith("brave_") || name.startsWith("serper_") || name === "exa_web_search_exa");
-    return {
+    const built: AutoCandidate = {
       name,
       nativeArguments: {
         query: usesSiteQuery ? siteQuery : query,
@@ -117,6 +123,9 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
         ...nativeArguments,
       },
     };
+    // Lite rejects contextMaxCharacters; excerpts are capped after the call instead.
+    if (built.nativeArguments?.type === "lite") delete built.nativeArguments.contextMaxCharacters;
+    return built;
   };
   const braveMax = quality === "max" ? { extraSnippets: true } : {};
   const youLevel = quality === "max" ? "highlights" : "snippets";
@@ -126,7 +135,11 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   const braveLang = zh ? { searchLang: "zh-hans", country: "CN" } : {};
   const serperLang = zh ? { gl: "cn", hl: "zh-cn" } : {};
   const youLang = zh ? { language: "zh-hans", country: "CN" } : {};
-  const exa = quality === "max" ? "exa_web_search_advanced_exa" : "exa_web_search_exa";
+  // Exa Lite (Exa 3.0, 2026-10) matched Auto on general, official, scholar, and code queries at a third of the
+  // latency and a lower price, so balanced routes use it; max keeps Auto. Lite is weak on exact strings.
+  const exaLite = (extra: Record<string, unknown> = {}) => candidate("exa_web_search_advanced_exa", "numResults", { type: "lite", ...extra });
+  const exa = quality === "max" ? candidate("exa_web_search_advanced_exa", "numResults", { type: "auto" }) : exaLite();
+  const exaNews = exaLite({ category: "news", startPublishedDate: publishedSince });
   // Orders follow evals/search-queries.json results (gold-source hits, language match, dates, latency).
   switch (mode) {
     case "exact":
@@ -158,41 +171,48 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             candidate("you_search", "limit", { ...youLang, contentLevel: "highlights" }),
             candidate("tavily_tavily_search", "max_results", { search_depth: "basic" }),
           ];
-    case "current":
+    case "current": {
+      // Exa news filtered by publish date led Chinese news and was second in English.
+      const you = candidate("you_search", "limit", { ...youLang, contentLevel: youLevel, freshness });
       return [
-        candidate("you_search", "limit", { ...youLang, contentLevel: youLevel, freshness }),
+        ...(zh ? [exaNews, you] : [you, exaNews]),
         candidate("octen_search", "limit", { freshness, ...(zh ? { language: ["zh"] } : {}) }),
         candidate("serper_news", "limit", { tbs: serperFreshness, ...serperLang }),
         candidate("brave_news_search", "limit", { freshness: braveFreshness, ...braveLang, ...braveMax }),
         candidate("tavily_tavily_search", "max_results", { search_depth: tavilyDepth, topic: "news", time_range: freshness }),
       ];
+    }
     case "official":
       return zh
         ? [
-            candidate(exa, "numResults"),
+            exa,
             candidate("serper_search", "limit", serperLang),
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("brave_web_search", "limit", { ...braveLang, ...braveMax }),
           ]
         : [
-            candidate(exa, "numResults"),
+            exa,
             candidate("brave_web_search", "limit", braveMax),
             candidate("serper_search", "limit"),
             candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
           ];
     case "scholar":
       return [
-        candidate("exa_web_search_exa", "numResults", { objective: `Research papers, preprints, and scholarly reviews about: ${query}` }),
+        quality === "max"
+          ? candidate("exa_web_search_exa", "numResults", { objective: `Research papers, preprints, and scholarly reviews about: ${query}` })
+          : exaLite(),
         candidate("parallel_search", "maxResults", { mode: parallelMode }),
         candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
         candidate("serper_scholar", "limit"),
       ];
     case "code":
       return [
-        candidate("exa_web_search_advanced_exa", "numResults", { category: "github" }),
+        quality === "max"
+          ? candidate("exa_web_search_advanced_exa", "numResults", { category: "github" })
+          : exaLite({ category: "github" }),
         candidate("parallel_search", "maxResults", { mode: parallelMode }),
         candidate("serper_search", "limit"),
-        candidate("exa_web_search_exa", "numResults"),
+        exaLite(),
       ];
     default:
       return zh
@@ -208,7 +228,7 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
             ...(quality === "max" ? [candidate("exa_web_search_advanced_exa", "numResults", { type: "auto", enableHighlights: true })] : []),
             candidate("parallel_search", "maxResults", { mode: parallelMode }),
             candidate("serper_search", "limit"),
-            ...(quality === "max" ? [] : [candidate("exa_web_search_exa", "numResults")]),
+            ...(quality === "max" ? [] : [exaLite()]),
             candidate("you_search", "limit", { ...youLang, contentLevel: youLevel }),
             candidate("octen_search", "limit"),
             candidate("brave_web_search", "limit", braveMax),

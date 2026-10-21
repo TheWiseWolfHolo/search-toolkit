@@ -218,3 +218,18 @@ test("search_images searches by image through Google Lens and explains an empty 
     globalThis.fetch = original;
   }
 });
+
+test("a time-bounded request sends Exa to its advanced tool with a publish-date filter", async () => {
+  const { autoCandidates } = await import("../src/routes.js");
+  const since = new Date(Date.now() - 604_800_000).toISOString().slice(0, 10);
+  const official = autoCandidates("official", "balanced", { query: "Node.js release schedule", freshness: "week" });
+  assert.equal(official[0]?.name, "exa_web_search_advanced_exa");
+  assert.equal(official[0]?.nativeArguments?.startPublishedDate, since);
+  assert.equal(official[0]?.nativeArguments?.objective, undefined);
+  const scholarMax = autoCandidates("scholar", "max", { query: "retrieval augmented generation", freshness: "year" });
+  assert.equal(scholarMax[0]?.name, "exa_web_search_advanced_exa");
+  assert.equal(scholarMax[0]?.nativeArguments?.objective, undefined);
+  const plain = autoCandidates("scholar", "max", { query: "retrieval augmented generation" });
+  assert.equal(plain[0]?.name, "exa_web_search_exa");
+  assert.equal(plain[0]?.nativeArguments?.startPublishedDate, undefined);
+});

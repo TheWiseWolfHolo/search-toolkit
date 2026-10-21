@@ -44,15 +44,15 @@ Balanced search routing uses these profiles. Each is an ordered candidate list; 
 
 A query with at least two Han characters and no kana counts as Chinese. Chinese queries send Brave `searchLang: zh-hans, country: CN`, Serper `gl: cn, hl: zh-cn`, and You.com `language: zh-hans, country: CN`, and lead with Brave and Serper, because Parallel and You.com mixed English pages into Chinese results.
 
-- General: Parallel Fast → Serper → Exa Search → You snippets → Octen → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
+- General: Parallel Fast → Serper → Exa Lite → You snippets → Octen → Brave Web → Tavily Basic. Chinese: Brave → Serper → You → Parallel → Tavily.
 - Exact (quoted strings, error messages): Parallel → Brave Web → Serper → You → Tavily exact. Chinese: Brave → Serper → You → Parallel. Exa ranks semantically and was weakest here.
-- Official (vendor, product, or government sites): Exa Search → Brave Web → Serper → You. Chinese: Exa → Serper → Parallel → Brave. Exa returned the highest share of official pages in both languages.
-- Current (news): You.com with `freshness` → Octen with `freshness` → Serper News → Brave News → Tavily news topic, with Chinese-market settings for Chinese queries. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com, Octen, and Tavily `day/week/month/year`, and Parallel `maxAgeSeconds`.
-- Scholar (papers, preprints, reviews): Exa Search with a research-paper objective → Parallel → You → Serper Scholar. Call `serper_scholar` directly when citation counts matter.
-- Code (repositories, examples, API usage): Exa Advanced `category: github` → Parallel → Serper → Exa Search.
+- Official (vendor, product, or government sites): Exa Lite → Brave Web → Serper → You. Chinese: Exa → Serper → Parallel → Brave. Exa returned the highest share of official pages in both languages.
+- Current (news): You.com with `freshness` → Exa Lite news filtered by publish date → Octen with `freshness` → Serper News → Brave News → Tavily news topic. Chinese queries start with Exa news, which led Chinese news, then You.com, all with Chinese-market settings. `freshness` (default `week` in current mode, optional in all other modes) maps to Brave `pd/pw/pm/py`, Serper `qdr:d/w/m/y`, You.com, Octen, and Tavily `day/week/month/year`, Parallel `maxAgeSeconds`, and Exa `startPublishedDate` (a time-bounded request always uses Exa's advanced tool, since basic Exa search has no date filter; `maxAgeHours` only controls cache staleness and is not a date filter).
+- Scholar (papers, preprints, reviews): Exa Lite (max: Exa Search with a research-paper objective) → Parallel → You → Serper Scholar. Call `serper_scholar` directly when citation counts matter.
+- Code (repositories, examples, API usage): Exa Lite `category: github` (max: Exa Auto) → Parallel → Serper → Exa Lite.
 - Context: Brave LLM Context 4096 → Parallel Basic → You highlights → Tavily Basic.
 
-Max quality is for multi-hop or high-stakes questions. English General max starts with Exa Advanced (`type: auto`, highlights), which led the Artificial Analysis Search Index for agentic research in October 2026, then Parallel Advanced. Elsewhere max uses Parallel Advanced wherever Parallel appears, Exa Advanced for Official, You.com highlights, Brave extra snippets, and Tavily Advanced. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
+Max quality is for multi-hop or high-stakes questions. English General max starts with Exa Advanced (`type: auto`, highlights), which led the Artificial Analysis Search Index for agentic research in October 2026, then Parallel Advanced. Elsewhere max uses Parallel Advanced wherever Parallel appears, Exa Auto instead of Exa Lite, You.com highlights, Brave extra snippets, and Tavily Advanced. Max never turns ordinary lookup into Research, Crawl, full-page extraction, or an agentic task.
 
 An availability failure that allows a second provider is: HTTP 401/402, an authentication/plan/permission 403 that is not a policy or safety block, network failure, timeout, HTTP 408/425/429, provider 5xx, or a clear statusless message such as a rate limit, temporary unavailability, or no healthy key slots. Request or schema errors, policy or safety blocks, local code errors, and unknown failures end the chain. An explicit HTTP status outranks error-body keyword guesses. An upstream tool's own error is the tool's verdict and is returned to a direct caller. Inside `fetch_auto`, a reader that could not get the page (the site answered 403, 429, or 5xx, or showed a block or captcha) hands over to the next reader; a missing page (404/410) or a malformed request ends the chain.
 
@@ -78,9 +78,9 @@ The image must be reachable at a public http(s) URL. Some hosts, Wikimedia origi
 
 Compact factual lookup in English. It left the automatic routes after the 2026-10 comparison: Chinese queries came back mostly in English, and exact-string lookups rarely surfaced the right source. Call `querit_search` directly (with `languages` when the language matters).
 
-### Exa — precision and long-tail discovery
+### Exa — semantic discovery, official sources, papers, and code
 
-Exact error messages, identifiers, configuration keys, code strings, obscure repositories, implementation examples, semantic discovery, specialist people, companies and papers. Prefer bounded highlights or context. Use advanced search only for filters, dates, domains, or deeper structured retrieval. Exa Fetch reads pages Exa discovered.
+Semantic discovery, official and primary sources, papers, repositories and implementation examples, specialist people and companies. It ranks by meaning, so it is the weakest choice for exact error messages or quoted strings. Exa 3.0 (October 2026) added a Lite search type, which matched Auto on general, official, scholar, and code queries at about a third of the latency and $4 instead of $7 per 1,000 requests; balanced routes use `web_search_advanced_exa` with `type: lite`, max uses Auto. Lite rejects `contextMaxCharacters`. Use `category` (`news`, `github`, `pdf`, `company`, `people`, …) and `startPublishedDate` for scoped searches. Exa Fetch reads pages Exa discovered.
 
 ### Brave — independent grounding
 

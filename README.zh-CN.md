@@ -18,15 +18,15 @@
 
 | 模式 | 适用 | 英文查询 | 中文查询 |
 | --- | --- | --- | --- |
-| `general` | 日常查询 | Parallel → Serper → Exa → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
+| `general` | 日常查询 | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
 | `exact` | 带引号的原文、报错信息 | Parallel → Brave → Serper → You.com → Tavily | Brave → Serper → You.com → Parallel |
-| `official` | 厂商、产品、政府官网 | Exa → Brave → Serper → You.com | Exa → Serper → Parallel → Brave |
-| `current` | 新闻 | You.com → Octen → Serper News → Brave News → Tavily 新闻 | 同左，带中文参数 |
-| `scholar` | 论文、预印本、综述 | Exa（论文目标）→ Parallel → You.com → Serper Scholar | 同左 |
-| `code` | 代码仓库、示例、API 用法 | Exa（GitHub 分类）→ Parallel → Serper → Exa | 同左 |
+| `official` | 厂商、产品、政府官网 | Exa Lite → Brave → Serper → You.com | Exa Lite → Serper → Parallel → Brave |
+| `current` | 新闻 | You.com → Exa 新闻 → Octen → Serper News → Brave News → Tavily 新闻 | Exa 新闻 → You.com → Octen → Serper News → Brave News → Tavily 新闻 |
+| `scholar` | 论文、预印本、综述 | Exa Lite → Parallel → You.com → Serper Scholar | 同左 |
+| `code` | 代码仓库、示例、API 用法 | Exa Lite（GitHub 分类）→ Parallel → Serper → Exa Lite | 同左 |
 | `context` | 限定 token 预算的 grounding 片段 | Brave LLM Context → Parallel → You.com → Tavily | 同左 |
 
-`quality: max` 用于范围大或需要多跳的问题：英文 general 改由带 highlights 的 Exa Advanced 打头，Parallel、You.com、Brave、Tavily 也切到更深的档位。所有模式都支持 `includeDomains`、`excludeDomains`、`freshness`、`maxCharsPerResult`，会换算成各家自己的参数。`crossCheck: true` 同时查两个独立索引，并标出每条结果是哪家找到的。
+`quality: max` 用于范围大或需要多跳的问题：英文 general 改由带 highlights 的 Exa Auto 打头，其他模式里的 Exa Lite 换成 Exa Auto，Parallel、You.com、Brave、Tavily 也切到更深的档位。所有模式都支持 `includeDomains`、`excludeDomains`、`freshness`、`maxCharsPerResult`，会换算成各家自己的参数。`crossCheck: true` 同时查两个独立索引，并标出每条结果是哪家找到的。
 
 ### 顺序是怎么定的
 
