@@ -8,7 +8,7 @@ const instructions = "Search with search_auto (web), search_images (images), and
 
 interface ProtocolServerOptions {
   allowTool?: (tool: Tool) => boolean;
-  beforeCall?: (toolName: string) => void;
+  beforeCall?: (toolName: string, arguments_: Record<string, unknown>) => void;
   maxToolInputElements?: number;
 }
 
@@ -37,7 +37,7 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
       if (!tool) throw new Error("Tool is not available for this token");
       const arguments_ = request.params.arguments ?? {};
       if (options.maxToolInputElements !== undefined) enforceInputElementLimit(arguments_, options.maxToolInputElements);
-      options.beforeCall?.(tool.name);
+      options.beforeCall?.(tool.name, arguments_);
       return forModel(await toolkit.callTool(tool.name, arguments_)) as never;
     } catch (error) {
       const text = redact(error instanceof Error ? error.message : String(error)).slice(0, 1_000);

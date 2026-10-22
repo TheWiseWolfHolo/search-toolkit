@@ -46,7 +46,7 @@ Three tools cover almost every lookup. Each picks a provider, falls back when on
 | Search, scrape, crawl, map, and structured extraction | Firecrawl official MCP |
 | Sourced answers and research jobs | LinkUp official MCP |
 | Manual general or vertical search, parallel batches, URL extraction | AnySearch official MCP |
-| Native Web + X search with model synthesis and image or video understanding | Grok / xAI Responses |
+| Native Web + X search with model synthesis and image or video understanding; `depth` up to 16 research agents | Grok / xAI Responses |
 | Compact search, manual only | Querit, TinyFish Search, Jina Search |
 | Chinese local search with explicit quota use, manual only | Doubao |
 
@@ -183,7 +183,7 @@ $env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
 node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
-Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. Put public deployments behind HTTPS; provider keys stay on the server.
+Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. `allowedArgumentValues` limits argument values for every tool, for example `{"depth":["fast","deep"]}` keeps a shared token off 16-agent Grok research; an omitted argument is allowed. Put public deployments behind HTTPS; provider keys stay on the server.
 
 The HTTP endpoint uses MCP SDK 1.32.1, limits JSON requests to 100 KiB and tool arguments to 10,000 total array elements and object keys before schema validation. Each session has its own server and transport. These HTTP limits do not apply to STDIO.
 

@@ -14,6 +14,8 @@ export interface HttpTokenPolicy {
   tools?: string[];
   requestsPerMinute?: number;
   maxSessions?: number;
+  /** Allowed values per argument name, for any tool; an omitted argument is allowed. Example: {"depth": ["fast", "deep"]}. */
+  allowedArgumentValues?: Record<string, string[]>;
 }
 
 interface HttpOptions {
@@ -35,6 +37,7 @@ interface ParsedTokenPolicy {
   tools?: Set<string>;
   requestsPerMinute?: number;
   maxSessions?: number;
+  allowedArgumentValues?: Map<string, Set<string>>;
 }
 
 export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: HttpOptions) {
@@ -96,8 +99,13 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
     const protocolOptions = {
       maxToolInputElements: MAX_HTTP_TOOL_INPUT_ELEMENTS,
       ...(policy.tools ? { allowTool: (tool: { name: string }) => policy.tools?.has(tool.name) === true } : {}),
-      ...(policy.requestsPerMinute
-        ? { beforeCall: () => enforceRateLimit(tokenId, policy.requestsPerMinute as number, rateWindows) }
+      ...(policy.requestsPerMinute || policy.allowedArgumentValues
+        ? {
+          beforeCall: (toolName: string, arguments_: Record<string, unknown>) => {
+            if (policy.allowedArgumentValues) enforceArgumentValues(toolName, arguments_, policy.allowedArgumentValues);
+            if (policy.requestsPerMinute) enforceRateLimit(tokenId, policy.requestsPerMinute, rateWindows);
+          },
+        }
         : {}),
     };
     const server = createProtocolServer(toolkit, protocolOptions);
@@ -157,12 +165,26 @@ function parseTokenPolicy(policy: HttpTokenPolicy): ParsedTokenPolicy {
   if (maxSessions !== undefined && (!Number.isInteger(maxSessions) || maxSessions < 1)) {
     throw new Error("HTTP token maxSessions must be a positive integer");
   }
+  const allowedArgumentValues = policy.allowedArgumentValues
+    ? new Map(Object.entries(policy.allowedArgumentValues).map(([name, values]) => [name, new Set(values)]))
+    : undefined;
   return {
     hash: parseTokenHash(policy.hash),
     ...(tools ? { tools } : {}),
     ...(requestsPerMinute !== undefined ? { requestsPerMinute } : {}),
     ...(maxSessions !== undefined ? { maxSessions } : {}),
+    ...(allowedArgumentValues ? { allowedArgumentValues } : {}),
   };
+}
+
+function enforceArgumentValues(toolName: string, arguments_: Record<string, unknown>, allowed: Map<string, Set<string>>): void {
+  for (const [name, values] of allowed) {
+    const value = arguments_[name];
+    if (value === undefined) continue;
+    if (!values.has(String(value))) {
+      throw new Error(`${toolName}: ${name}=${String(value)} is not allowed for this token (allowed: ${Array.from(values).join(", ")})`);
+    }
+  }
 }
 
 function parseTokenHash(value: string): Buffer {
@@ -206,11 +228,19 @@ export function parseHttpTokenPolicies(value: string | undefined): HttpTokenPoli
     if (record.maxSessions !== undefined && (!Number.isInteger(record.maxSessions) || Number(record.maxSessions) < 1)) {
       throw new Error(`HTTP token policy ${index} maxSessions must be a positive integer`);
     }
+    const argumentValues = record.allowedArgumentValues;
+    if (argumentValues !== undefined && (
+      !argumentValues || typeof argumentValues !== "object" || Array.isArray(argumentValues)
+      || Object.values(argumentValues).some((values) => !Array.isArray(values) || values.some((value) => typeof value !== "string"))
+    )) {
+      throw new Error(`HTTP token policy ${index} allowedArgumentValues must map argument names to string arrays`);
+    }
     return {
       hash: record.hash,
       ...(record.tools !== undefined ? { tools: record.tools as string[] } : {}),
       ...(record.requestsPerMinute !== undefined ? { requestsPerMinute: Number(record.requestsPerMinute) } : {}),
       ...(record.maxSessions !== undefined ? { maxSessions: Number(record.maxSessions) } : {}),
+      ...(argumentValues !== undefined ? { allowedArgumentValues: argumentValues as Record<string, string[]> } : {}),
     };
   });
 }

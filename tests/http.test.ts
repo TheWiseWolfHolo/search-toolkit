@@ -172,3 +172,50 @@ test("HTTP numeric settings and token policies use safe boundaries", () => {
     maxSessions: 8,
   }]);
 });
+
+test("HTTP token policies can restrict argument values before any provider is called", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-http-args-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 1,
+    statePath: join(directory, "state.db"),
+    providers: { brave: { enabled: true, automatic: true, keys: ["test-key"], integration: { kind: "rest", adapter: "brave" } } },
+  }));
+  const token = "friend-test-token";
+  const toolkit = new SearchToolkit(configPath);
+  await toolkit.initialize();
+  const policies = parseHttpTokenPolicies(JSON.stringify([{
+    hash: createHash("sha256").update(token).digest("hex"),
+    allowedArgumentValues: { quality: ["balanced"] },
+  }]));
+  assert.deepEqual(policies[0]?.allowedArgumentValues, { quality: ["balanced"] });
+  assert.throws(() => parseHttpTokenPolicies('[{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedArgumentValues":{"depth":"fast"}}]'), /string arrays/);
+  const runtime = createSearchToolkitHttpApp(toolkit, { tokens: policies });
+  const listener = runtime.app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => listener.once("listening", resolve));
+  const url = new URL(`http://127.0.0.1:${(listener.address() as AddressInfo).port}/mcp`);
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  const client = new Client({ name: "search-toolkit-http-args-test", version: "1.0.0" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    }) as unknown as Parameters<typeof client.connect>[0]);
+    globalThis.fetch = async (input, init) => {
+      if (String(input).startsWith("http://127.0.0.1")) return originalFetch(input, init);
+      providerCalls += 1;
+      return new Response("{}", { status: 500 });
+    };
+    const denied = await client.callTool({ name: "search_auto", arguments: { query: "example", quality: "max" } });
+    assert.equal(denied.isError, true);
+    assert.match(String((denied.content as Array<{ text?: string }>)[0]?.text), /quality=max is not allowed for this token \(allowed: balanced\)/);
+    assert.equal(providerCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await client.close();
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    await runtime.close();
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
