@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { RestProvider, searchTool, type RestAdapter } from "../src/rest/base.js";
-import { BraveAdapter, SerperAdapter } from "../src/rest/adapters.js";
+import { BraveAdapter, GrokAdapter, SerperAdapter } from "../src/rest/adapters.js";
 import { RotationStore } from "../src/rotation.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -174,6 +174,86 @@ test("Serper Scholar, Brave extraSnippets, and Grok Web+X pass native provider f
     assert.match(lastUrl, /extra_snippets=true/);
     assert.match(lastUrl, /offset=1/);
     assert.match(String(brave.items[0]?.text), /Main snippet\.\nExtra snippet one\.\nExtra snippet two\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Grok adapter targets grok2api Console: default model, filter hints, citations and tool-usage notes", async () => {
+  const originalFetch = globalThis.fetch;
+  let body: Record<string, unknown> = {};
+  let usage: Record<string, unknown> = { server_side_tool_usage_details: { web_search_calls: 2, x_search_calls: 1, x_posts_fetched: 5 } };
+  globalThis.fetch = async (_input, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      id: "resp_1",
+      usage,
+      output: [{
+        type: "message",
+        content: [{
+          type: "output_text",
+          text: "Node 24 is LTS.[[1]](https://www.nodejs.org/en/download)[[2]](https://x.com/nodejs/status/1) Done.",
+          annotations: [
+            { type: "url_citation", url: "https://www.nodejs.org/en/download", title: "1" },
+            { type: "url_citation", url: "https://x.com/nodejs/status/1", title: "2" },
+            { type: "url_citation", url: "https://x.com/nodejs/status/1", title: "3" },
+          ],
+        }],
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const config = { enabled: true, keys: ["k"], integration: { kind: "rest", adapter: "grok", baseUrl: "https://grok.example/v1/responses" } } as never;
+  try {
+    const both = await new GrokAdapter().call("grok_web_x_search", {
+      query: "node lts",
+      allowedDomains: ["nodejs.org"],
+      allowedXHandles: ["@nodejs"],
+      fromDate: "2026-10-01",
+    }, "k", config) as { text: string; citations: Array<{ url: string; title?: string }>; toolUsage: Record<string, number> };
+    assert.equal(body.model, "grok-4.20-0309-non-reasoning");
+    assert.equal(body.reasoning, undefined);
+    assert.match(String((body.input as Array<{ content: string }>)[0]?.content), /Only use web sources from these domains: nodejs\.org\./);
+    assert.match(String((body.input as Array<{ content: string }>)[0]?.content), /Only use X posts from these accounts: @nodejs\./);
+    assert.deepEqual((body.tools as Array<Record<string, unknown>>).map((tool) => tool.type), ["web_search", "x_search"]);
+    assert.equal(both.text, "Node 24 is LTS.[nodejs.org][x.com] Done.\n\n(Grok fast, single model: 2 web searches, 1 X search over 5 posts)");
+    assert.match(String(body.instructions), /^You are the search backend for another AI agent\./);
+    assert.match(String(body.instructions), /Today's date is \d{4}-\d{2}-\d{2} \(UTC\)\.$/);
+    assert.deepEqual(both.citations, [{ url: "https://www.nodejs.org/en/download" }, { url: "https://x.com/nodejs/status/1" }]);
+    assert.deepEqual(both.toolUsage, { webSearches: 2, xSearches: 1, xPosts: 5 });
+
+    usage = { server_side_tool_usage_details: { web_search_calls: 0, x_search_calls: 0 } };
+    const silent = await new GrokAdapter().call("grok_x_search", { query: "q" }, "k", config) as { text: string };
+    assert.match(silent.text, /^\[Grok no X search was run;/);
+    assert.deepEqual((body.tools as Array<Record<string, unknown>>).map((tool) => tool.type), ["x_search"]);
+
+    await new GrokAdapter().call("grok_web_x_search", { query: "q", depth: "max" }, "k", config);
+    assert.equal(body.model, "grok-4.20-multi-agent-0309");
+    assert.deepEqual(body.reasoning, { effort: "high" });
+    await new GrokAdapter().call("grok_web_search", { query: "q", depth: "deep" }, "k", config);
+    assert.deepEqual(body.reasoning, { effort: "low" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Grok adapter retries once when grok2api reports the key's concurrency limit", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ code: "concurrency_limit_exceeded", message: "客户端 API Key 已达到并发上限", type: "invalid_request_error" }), { status: 429 });
+    }
+    return new Response(JSON.stringify({
+      usage: { server_side_tool_usage_details: { web_search_calls: 1 } },
+      output: [{ type: "message", content: [{ type: "output_text", text: "ok", annotations: [] }] }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const config = { enabled: true, keys: ["k"], integration: { kind: "rest", adapter: "grok", baseUrl: "https://grok.example/v1/responses" } } as never;
+  try {
+    const out = await new GrokAdapter().call("grok_web_search", { query: "q" }, "k", config) as { text: string };
+    assert.equal(calls, 2);
+    assert.match(out.text, /^ok\n\n\(Grok fast/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -65,6 +65,8 @@ const DEFAULT_BALANCED_EXCERPT_CHARS = 700;
 const DEFAULT_MAX_EXCERPT_CHARS = 1_800;
 const LEAN_TOOL_NAMES = new Set(MANAGEMENT_TOOL_NAMES);
 const CURATED_TOOL_NAMES = new Set([...MANAGEMENT_TOOL_NAMES, ...CURATED_SPECIALIST_TOOLS]);
+/** Direct provider tools whose answers are cached like search_auto results (multi-agent Grok calls are expensive). */
+const CACHED_DIRECT_PROVIDERS = new Set(["grok"]);
 
 export class SearchToolkit {
   readonly config: ToolkitConfig;
@@ -141,7 +143,13 @@ export class SearchToolkit {
   async callTool(name: string, arguments_: Record<string, unknown>): Promise<unknown> {
     const binding = this.bindings.get(name);
     if (!binding) throw new Error(`Unknown Search Toolkit tool: ${name}`);
-    return binding.call(this.validateArguments(binding.exposed, arguments_));
+    const args = this.validateArguments(binding.exposed, arguments_);
+    if (!CACHED_DIRECT_PROVIDERS.has(binding.provider)) return binding.call(args);
+    // A Grok multi-agent answer costs dollars; asking the same question again within minutes reuses it.
+    const key = cacheKey(name, { ...args, query: typeof args.query === "string" ? args.query.trim() : args.query });
+    const hit = this.fromCache(key);
+    if (hit) return hit;
+    return this.remember(key, await binding.call(args), this.cacheTtl.search);
   }
 
   /** Validate and default arguments against the exposed schema. A schema the validator cannot compile is left to the upstream. */

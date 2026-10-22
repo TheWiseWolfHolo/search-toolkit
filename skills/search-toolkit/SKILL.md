@@ -30,7 +30,7 @@ Without MCP, use the `search-toolkit` CLI on the same backend: `search-toolkit s
 - Code that is local or was just pushed: use `rg` or `gh search code`; web indexes lag.
 - `search_images` finds images by `query`, or by image with `imageUrl` (Google Lens): pages showing the same or a similar picture, to identify it or trace its source. The image needs a public URL; a local file or chat upload without one cannot be searched by image.
 - Crawl, map, and structured extraction belong to Firecrawl or Tavily, and long sourced research to LinkUp, only when the task needs more than lookup.
-- AnySearch is manual; call `get_sub_domains` before any vertical search. Grok X Search only when X itself matters. Jina and TinyFish are search-only.
+- AnySearch is manual; call `get_sub_domains` before any vertical search. Grok X Search only when X itself matters. Grok tools return a cited answer, not a result list; `depth=deep` (4 agents) or `depth=max` (16 agents, about $2-3 a call) is for broad research questions that combine Web and X, never for single facts. Jina and TinyFish are search-only.
 - Doubao only when the user explicitly asks or approves its quota, never as a fallback.
 
 ## Evidence

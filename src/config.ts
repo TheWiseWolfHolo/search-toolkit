@@ -11,7 +11,7 @@ const CAPABILITIES: readonly AutoCapability[] = ["search", "images", "fetch"];
 const FETCH_CAPABLE = new Set(["exa", "tavily", "firecrawl", "linkup", "anysearch"]);
 // Provider options that some adapter actually reads. Everything else is dead weight.
 const CONSUMED_OPTIONS: Record<string, readonly string[]> = {
-  grok: ["model", "reasoningEffort", "systemPrompt", "customUrl"],
+  grok: ["model", "multiAgentModel", "reasoningEffort", "systemPrompt", "customUrl"],
 };
 const PROVIDER_FIELDS = new Set(["enabled", "automatic", "manualOnly", "auto", "keys", "integration", "toolPolicy", "options"]);
 
