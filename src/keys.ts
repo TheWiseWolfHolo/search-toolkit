@@ -45,6 +45,10 @@ export function eligibleSlots(config: ProviderConfig, tools: readonly string[]):
  * when the pool has one, and otherwise lets automatic routes try the next
  * provider. Timeouts, target page failures, request-shape errors, and
  * tool-level errors are returned untouched: another key would not change them.
+ *
+ * After a plan limit only keys not marked `free` are tried: a `paid` key, or
+ * one whose plan is unknown (some providers, Octen among them, answer the same
+ * key differently from call to call).
  */
 export async function callWithRotation<T>(
   rotation: RotationStore,
@@ -62,11 +66,11 @@ export async function callWithRotation<T>(
   }
   const maxAttempts = Math.min(Math.max(eligible?.length ?? keys.length, 1), MAX_KEY_ATTEMPTS);
   const tried = new Set<number>();
-  let paidOnly = false;
+  let notFree = false;
   let transientRetried = false;
   let lastError: unknown;
   for (let index = 0; index < maxAttempts; index += 1) {
-    const allowed = paidOnly ? (eligible ?? keys.map((_, slot) => slot)).filter((slot) => slotTier(config, slot) === "paid") : eligible;
+    const allowed = notFree ? (eligible ?? keys.map((_, slot) => slot)).filter((slot) => slotTier(config, slot) !== "free") : eligible;
     let selection: KeySelection;
     try {
       selection = rotation.select(provider, keys, {
@@ -85,12 +89,12 @@ export async function callWithRotation<T>(
       if (error instanceof TargetPageError || isTimeout(error)) throw error;
       if (isPlanLimit(error)) {
         const planError = new PlanLimitError(error);
-        // Only a paid key can do better; the pool has none left to try, so let the route move on.
-        const paidLeft = keys.some((_, slot) => !tried.has(slot) && slotTier(config, slot) === "paid"
+        // Only a key not known to be on the free plan can do better; with none left, let the route move on.
+        const candidateLeft = keys.some((_, slot) => !tried.has(slot) && slotTier(config, slot) !== "free"
           && (!eligible || eligible.includes(slot)));
-        if (!paidLeft || index + 1 >= maxAttempts) throw planError;
+        if (!candidateLeft || index + 1 >= maxAttempts) throw planError;
         lastError = planError;
-        paidOnly = true;
+        notFree = true;
         continue;
       }
       if (index + 1 >= maxAttempts) throw error;

@@ -206,7 +206,7 @@ HTTP 入口使用 MCP SDK 1.32.2，JSON 请求上限为 100 KiB，工具参数�
 | --- | --- | --- |
 | 成功 | 清零失败计数，耗尽的 Key 恢复健康 | |
 | 额度或余额用完（`402`、Tavily 的 `432`/`433`，或任何状态码下出现 "Insufficient balance"、`spend_cap_exceeded` 这类说法） | 记为耗尽，停用 30 分钟、6 小时、24 小时，之后排在所有健康 Key 后面 | 换下一把；整池用完时自动路由去下一家 |
-| 套餐不支持（"not allowed for free accounts"、"Payment method required"） | 不停用 | 池里有 `paid` Key 就换它，没有就去下一家 |
+| 套餐不支持（"not allowed for free accounts"、"Payment method required"） | 不停用 | 换没标成 `free` 的 Key（`paid` 或没标套餐），最多 3 把，没有就去下一家 |
 | `401` / `403` | 停用 1 小时，再犯依次 6 小时、24 小时 | 最多换 3 把 |
 | `429` | 停用 1、5、15 分钟，或按 `Retry-After` | 最多换 3 把 |
 | `5xx` 或连接断开 | 不停用 | 再换 1 把 |

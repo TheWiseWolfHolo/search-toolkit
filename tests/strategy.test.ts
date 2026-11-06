@@ -190,6 +190,19 @@ test("a plan limit moves to a paid key without benching the free one", async () 
   });
 });
 
+test("a plan limit on keys of unknown plan tries the others, without benching any", async () => {
+  await withStore(async (store) => {
+    const tried: number[] = [];
+    await assert.rejects(callWithRotation(store, "p", pool(), { tools: ["octen_extract"] }, async (selection) => {
+      tried.push(selection.slot);
+      store.record(selection, { ok: false, latencyMs: 1, httpStatus: 403, planLimit: true });
+      throw new HttpError('HTTP 403: {"code":403,"msg":"Payment method required."}', 403);
+    }), (error: unknown) => error instanceof PlanLimitError);
+    assert.deepEqual(tried, [0, 1, 2]);
+    assert.deepEqual(store.usableSlots("p", KEYS), [0, 1, 2]);
+  });
+});
+
 test("with no paid key, a plan limit lets automatic routes move to the next provider", async () => {
   await withStore(async (store) => {
     let calls = 0;

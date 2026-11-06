@@ -206,7 +206,7 @@ The cursor persists across restarts and is shared by concurrent processes throug
 | --- | --- | --- |
 | Success | Strikes cleared; an exhausted key is healthy again | |
 | Out of credit or quota (`402`, Tavily `432`/`433`, or wording such as "Insufficient balance" or `spend_cap_exceeded` under any status) | Exhausted: benched 30 min, 6 h, then 24 h, and afterwards kept behind every healthy key | Next key; automatic routes move on when the pool is spent |
-| Plan limit ("not allowed for free accounts", "Payment method required") | Not benched | A `paid` key if the pool has one, otherwise the next provider |
+| Plan limit ("not allowed for free accounts", "Payment method required") | Not benched | Up to 3 keys not marked `free` (paid, or plan unknown), otherwise the next provider |
 | `401` / `403` | Benched 1 h, then 6 h, then 24 h | Up to 3 keys |
 | `429` | Benched 1, 5, then 15 min, or for `Retry-After` | Up to 3 keys |
 | `5xx` or dropped connection | Not benched | One more key |
