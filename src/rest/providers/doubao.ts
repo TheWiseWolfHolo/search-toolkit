@@ -1,5 +1,6 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { requestJson, searchTool, type RestAdapter } from "../base.js";
+import type { ProviderConfig } from "../../types.js";
+import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import { normalizeItem, numberArg, objectValue, stringArg } from "../normalize.js";
 
 export class DoubaoAdapter implements RestAdapter {
@@ -11,8 +12,8 @@ export class DoubaoAdapter implements RestAdapter {
     )];
   }
 
-  async call(_tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
-    const data = await requestJson("https://open.feedcoopapi.com/search_api/web_search", {
+  async call(_tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
+    const data = await requestJson(baseUrlOf(config, "https://open.feedcoopapi.com/search_api/web_search"), {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({

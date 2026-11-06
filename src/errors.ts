@@ -42,6 +42,56 @@ export class TargetPageError extends Error {
   }
 }
 
+/**
+ * The key's subscription plan does not cover this request ("not allowed for
+ * free accounts"). The key is fine for other calls, so it is not benched; a
+ * paid key, or another provider, may still answer.
+ */
+export class PlanLimitError extends Error {
+  constructor(readonly original: unknown) {
+    super(`plan limit: ${original instanceof Error ? original.message : String(original)}`);
+    this.name = "PlanLimitError";
+  }
+}
+
+/** No key slot in this provider's pool may run the tool (tier or per-key tool rules). */
+export class CapabilityGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CapabilityGateError";
+  }
+}
+
+// Octen answers 403 "Payment method required" on endpoints a credit-only (gift) account may not use: a plan limit.
+// Out of credit or quota, in the words providers use: Parallel and Firecrawl 402, Octen 403
+// "Insufficient balance in account", You.com 429 spend_cap_exceeded, Tavily "exceeds your plan's set usage limit".
+const QUOTA_PATTERN = /insufficient[\s_-]+(?:credits?|balance|funds|quota)|out[\s_-]+of[\s_-]+credits?|credits?[\s_-]+(?:exhausted|depleted)|no[\s_-]+more[\s_-]+credits|spend[\s_-]?cap|payment[\s_-]+required|(?:quota|usage[\s_-]+limit|plan[\s_-]+limit|monthly[\s_-]+limit|credit[\s_-]+limit)[\s_-]+(?:exceeded|reached|exhausted)|exceed(?:s|ed)?\s+(?:your\s+)?(?:plan(?:'s)?|quota|usage\s+limit|credits?|monthly)|balance\s+(?:is\s+)?(?:insufficient|too\s+low|exhausted)/i;
+
+const PLAN_LIMIT_PATTERN = /not\s+(?:allowed|available|supported|included|permitted)\s+(?:for|on|in|with)\s+(?:the\s+)?(?:free|your|this|current)\s+(?:accounts?|plans?|tier|subscription)|(?:requires?|needs?|only\s+(?:available|supported)\s+(?:on|for|with))\s+(?:a\s+)?(?:paid|higher|upgraded|pro|premium|business|enterprise)\s+(?:plan|tier|subscription|account)|plan\s+does\s+not\s+(?:include|support|allow)|payment\s+method\s+(?:is\s+)?required|(?:add|bind|binding|attach)\s+(?:a\s+)?payment\s+method|feature\s+(?:is\s+)?not\s+(?:available|enabled)\s+(?:for|on)/i;
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The key has run out of credit or quota. Recharging or a new billing period fixes it; waiting a minute does not. */
+export function isQuotaExhausted(error: unknown): boolean {
+  if (error instanceof TargetPageError || error instanceof PlanLimitError || error instanceof CapabilityGateError) return false;
+  const status = statusFromError(error);
+  // Tavily answers 432 (plan limit reached) and 433 (pay-as-you-go limit reached).
+  if (status === 402 || status === 432 || status === 433) return true;
+  if (status !== undefined && ![400, 401, 403, 429].includes(status)) return false;
+  return QUOTA_PATTERN.test(errorText(error));
+}
+
+/** The request needs a plan this key does not have. */
+export function isPlanLimit(error: unknown): boolean {
+  if (error instanceof PlanLimitError) return true;
+  if (error instanceof TargetPageError || error instanceof CapabilityGateError || isQuotaExhausted(error)) return false;
+  const status = statusFromError(error);
+  if (status !== undefined && ![400, 401, 403, 422].includes(status)) return false;
+  return PLAN_LIMIT_PATTERN.test(errorText(error));
+}
+
 const REQUEST_SHAPE_PATTERN = /validation error|unexpected keyword argument|invalid (?:request|argument|parameter)|unsupported parameter/i;
 
 // JSON-RPC "method not found" / "invalid params" from an upstream MCP server.
@@ -50,7 +100,8 @@ const REQUEST_SHAPE_RPC_CODES = new Set([-32_601, -32_602]);
 export function statusFromError(error: unknown): number | undefined {
   if (error instanceof HttpError) return error.status;
   if (error instanceof ToolResultError) return error.status;
-  if (error instanceof TargetPageError) return undefined;
+  if (error instanceof TargetPageError || error instanceof CapabilityGateError) return undefined;
+  if (error instanceof PlanLimitError) return statusFromError(error.original);
   const text = error instanceof Error ? error.message : String(error);
   if (error && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
@@ -77,7 +128,7 @@ export function statusFromError(error: unknown): number | undefined {
  */
 export function keyFaultStatusFromToolText(text: string): number | undefined {
   if (/(?:invalid|missing|incorrect|expired|revoked|unknown|bad)\s+(?:api[\s_-]?key|access[\s_-]?token|credentials?)|api[\s_-]?key\s+(?:is\s+)?(?:invalid|missing|not\s+(?:valid|found))|unauthori[sz]ed|authentication\s+(?:failed|required)/i.test(text)) return 401;
-  if (/insufficient\s+(?:credits?|balance|funds)|out\s+of\s+credits?|credits?\s+(?:exhausted|depleted)|payment\s+required|(?:quota|usage\s+limit|plan\s+limit)\s+(?:exceeded|reached)|exceeded\s+(?:your\s+)?(?:quota|usage\s+limit|plan)/i.test(text)) return 402;
+  if (QUOTA_PATTERN.test(text)) return 402;
   if (/rate[\s_-]?limit(?:ed)?|too\s+many\s+requests/i.test(text)) return 429;
   return undefined;
 }
@@ -95,7 +146,7 @@ export function textOfContent(content: unknown): string {
 export function shouldRetryWithNextKey(status: number | undefined): boolean {
   if (status === undefined) return true;
   if (status === 400 || status === 404 || status === 422) return false;
-  return isKeyFaultStatus(status) || status >= 500;
+  return isKeyFaultStatus(status) || status === 432 || status === 433 || status >= 500;
 }
 
 /** Statuses that describe the key itself: another key can fix them. */
@@ -114,6 +165,8 @@ export function isTimeout(error: unknown): boolean {
 export function shouldFailoverProvider(error: unknown): boolean {
   // Another reader may get past a block or render the page; a page that is gone stays gone.
   if (error instanceof TargetPageError) return ![404, 410, 451].includes(error.pageStatus ?? 0);
+  // This provider cannot serve the request with the keys it has; the next one may.
+  if (error instanceof PlanLimitError || error instanceof CapabilityGateError || isQuotaExhausted(error)) return true;
   const status = statusFromError(error);
   const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
   if (status !== undefined) {
@@ -136,8 +189,12 @@ export function shouldFailoverProvider(error: unknown): boolean {
 export function isPageFailure(error: unknown): boolean {
   if (error instanceof TargetPageError) return ![404, 410, 451].includes(error.pageStatus ?? 0);
   if (!(error instanceof ToolResultError)) return false;
-  if (/status(?:\s+code)?:?\s*(?:404|410|451)\b|not found/i.test(error.message)) return false;
-  return /status(?:\s+code)?:?\s*(?:403|429|5\d\d)\b|forbidden|access denied|blocked|captcha|cloudflare|timed?\s?out/i.test(error.message);
+  const text = error.message;
+  // Reader error codes join words with underscores (Exa CRAWL_HTTP_403), so no \b around the digits.
+  if (/status(?:\s+code)?:?\s*(?:404|410|451)(?!\d)|crawl_http_(?:404|410|451)(?!\d)|page_not_found|not found/i.test(text)) return false;
+  return /status(?:\s+code)?:?\s*(?:403|429|5\d\d)(?!\d)|forbidden|access denied|blocked|captcha|cloudflare|timed?\s?out/i.test(text)
+    // Exa CRAWL_*, Firecrawl SCRAPE_* and unsupported_site, TinyFish per-URL codes.
+    || /(?:crawl|scrape)_[a-z0-9_]+|unsupported[\s_]site|empty[\s_]content|login_required|target_unreachable|target_http_error/i.test(text);
 }
 
 /** Transport-level failures where the cached upstream client should be rebuilt. */

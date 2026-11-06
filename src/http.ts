@@ -121,7 +121,7 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
       if (id) sessions.delete(id);
     };
     try {
-      await server.connect(transport as unknown as Parameters<typeof server.connect>[0]);
+      await server.connect(transport);
       await transport.handleRequest(request, response, request.body);
     } catch (error) {
       console.error("Search Toolkit HTTP request failed", error);

@@ -7,6 +7,7 @@ import test from "node:test";
 import { HttpError } from "../src/errors.js";
 import { callWithRotation } from "../src/keys.js";
 import { keyFingerprint, penaltyFor, RotationStore } from "../src/rotation.js";
+import type { ProviderConfig } from "../src/types.js";
 
 function withStore(run: (store: RotationStore, dir: string) => void): void {
   const dir = mkdtempSync(resolve(tmpdir(), "search-toolkit-store-"));
@@ -149,7 +150,8 @@ test("callWithRotation retries up to 3 keys when multiple keys hit retryable rat
   try {
     const keys = ["key-one-123456", "key-two-123456", "key-three-123456"];
     const tried: number[] = [];
-    const result = await callWithRotation(store, "exa", keys, async (selected) => {
+    const config: ProviderConfig = { enabled: true, auto: [], keys, integration: { kind: "rest", adapter: "serper" } };
+    const result = await callWithRotation(store, "exa", config, { tools: ["web_search_exa"] }, async (selected) => {
       tried.push(selected.slot);
       if (selected.slot < 2) {
         store.record(selected, { ok: false, latencyMs: 5, httpStatus: 429 });

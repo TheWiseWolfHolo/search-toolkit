@@ -1,6 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { HttpError, TargetPageError } from "../../errors.js";
 import type { ProviderConfig, SearchItem } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import { endpointOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import {
   arrayArg, normalizeYouKnowledge, normalizeYouSection, numberArg, objectRecord, stringArg, stringValue,
 } from "../normalize.js";
@@ -116,8 +117,9 @@ export class YouAdapter implements RestAdapter {
     }
     if (args.knowledge === true) body.knowledge = "core";
     if (typeof args.strictOperators === "boolean") body.strict_operators = args.strictOperators;
-    if (typeof args.crawlTimeout === "number") body.crawl_timeout = args.crawlTimeout;
     const contentLevel = stringArg(args, "contentLevel");
+    // crawl_timeout only applies to full-page crawls; sent with snippets or highlights it is a 422.
+    if (typeof args.crawlTimeout === "number" && contentLevel === "full_page") body.crawl_timeout = args.crawlTimeout;
     if (contentLevel === "highlights") {
       const highlights: Record<string, unknown> = {};
       if (typeof args.highlightsMaxTokens === "number") highlights.total_max_tokens = args.highlightsMaxTokens;
@@ -125,8 +127,7 @@ export class YouAdapter implements RestAdapter {
     } else if (contentLevel === "full_page") {
       body.extraction = { extraction_mode: "full_page", full_page: { extraction_formats: ["markdown"] } };
     }
-    const base = baseUrlOf(config, "https://ydc-index.io/v1/search");
-    const data = await requestJson(base, {
+    const data = await requestJson(endpointOf(config, "https://ydc-index.io", "/v1/search"), {
       method: "POST",
       headers: { "X-API-Key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -162,12 +163,18 @@ export class YouAdapter implements RestAdapter {
     };
     if (typeof args.crawlTimeout === "number") body.crawl_timeout = args.crawlTimeout;
     if (typeof args.maxAgeSeconds === "number") body.max_age = args.maxAgeSeconds;
-    const base = baseUrlOf(config, "https://ydc-index.io/v1/contents").replace(/\/v1\/search\/?$/, "/v1/contents");
-    const raw = await requestJson(base, {
-      method: "POST",
-      headers: { "X-API-Key": key, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 30_000) as unknown;
+    let raw: unknown;
+    try {
+      raw = await requestJson(endpointOf(config, "https://ydc-index.io", "/v1/contents"), {
+        method: "POST",
+        headers: { "X-API-Key": key, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, 30_000);
+    } catch (error) {
+      // The request shape is fixed, so a 422 here is about the page (pdf_too_large, an unreadable URL).
+      if (error instanceof HttpError && error.status === 422) throw new TargetPageError(`You.com could not read the page: ${error.message}`);
+      throw error;
+    }
     const pages = Array.isArray(raw) ? raw.map(objectRecord) : [];
     const text = pages.map((page) => {
       const title = stringValue(page.title);
@@ -176,6 +183,10 @@ export class YouAdapter implements RestAdapter {
       const header = [title ? `# ${title}` : "", url ? `URL: ${url}` : ""].filter(Boolean).join("\n");
       return [header, content.trim()].filter(Boolean).join("\n\n");
     }).filter(Boolean).join("\n\n---\n\n");
+    const wantsText = (body.formats as string[]).some((format) => format === "markdown" || format === "html");
+    if (wantsText && !pages.some((page) => stringValue(page.markdown)?.trim() || stringValue(page.html)?.trim())) {
+      throw new TargetPageError("You.com returned no content for the page");
+    }
     return { text, pages };
   }
 }

@@ -1,5 +1,6 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { requestJson, searchTool, type RestAdapter } from "../base.js";
+import type { ProviderConfig } from "../../types.js";
+import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import { normalizeBraveImage, normalizeItem, numberArg, stringArg } from "../normalize.js";
 
 export class BraveAdapter implements RestAdapter {
@@ -31,12 +32,12 @@ export class BraveAdapter implements RestAdapter {
       inputSchema: {
         type: "object",
         properties: {
-          query: { type: "string", minLength: 1, maxLength: 400, description: "Search query; Brave allows at most 50 words" },
+          query: { type: "string", minLength: 1, maxLength: 600, description: "Search query; Brave allows at most 75 words" },
           country: { type: "string", minLength: 2, maxLength: 2 },
           searchLang: { type: "string", minLength: 2 },
           count: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Search results considered before context extraction" },
           maximumNumberOfUrls: { type: "integer", minimum: 1, maximum: 50, default: 20 },
-          maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 4096 },
+          maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 8192 },
           maximumNumberOfSnippets: { type: "integer", minimum: 1, maximum: 256, default: 50 },
           contextThresholdMode: { type: "string", enum: ["disabled", "strict", "balanced", "lenient"] },
           maximumNumberOfTokensPerUrl: { type: "integer", minimum: 512, maximum: 8192, default: 4096 },
@@ -50,6 +51,8 @@ export class BraveAdapter implements RestAdapter {
           freshness: { type: "string", description: "pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD" },
           safesearch: { type: "string", enum: ["off", "moderate", "strict"] },
           spellcheck: { type: "boolean", default: true },
+          operators: { type: "boolean", default: true, description: "Apply search operators such as site: and quotes" },
+          operatorsFallback: { type: "boolean", default: true, description: "Fall back to plain results when operator matching finds nothing" },
           enableLocal: { type: "boolean" },
           enableSourceMetadata: { type: "boolean", default: false },
           locationLatitude: { type: "number", minimum: -90, maximum: 90 },
@@ -91,11 +94,14 @@ export class BraveAdapter implements RestAdapter {
     return [...searches, images, context];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
-    if (tool === "brave_llm_context") return this.callLlmContext(args, key);
-    if (tool === "brave_image_search") return this.callImageSearch(args, key);
+  async call(tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
+    const root = baseUrlOf(config, "https://api.search.brave.com/res/v1").replace(/\/+$/, "");
+    if (tool === "brave_llm_context") return this.callLlmContext(args, key, root);
+    if (tool === "brave_image_search") return this.callImageSearch(args, key, root);
     const kind = tool.includes("news") ? "news" : "web";
-    const url = new URL(`https://api.search.brave.com/res/v1/${kind}/search`);
+    const url = new URL(`${root}/${kind}/search`);
+    // Plain text: no <strong> highlight markup to strip from titles and snippets.
+    url.searchParams.set("text_decorations", "false");
     url.searchParams.set("q", stringArg(args, "query"));
     url.searchParams.set("count", String(numberArg(args, "limit", 6)));
     for (const [source, target] of [["country", "country"], ["searchLang", "search_lang"], ["freshness", "freshness"], ["safesearch", "safesearch"]] as const) {
@@ -117,8 +123,8 @@ export class BraveAdapter implements RestAdapter {
     return { items: Array.isArray(rows) ? rows.map((row) => normalizeItem(row, { html: true, dateKeys: ["page_age", "age"] })) : [] };
   }
 
-  private async callImageSearch(args: Record<string, unknown>, key: string): Promise<unknown> {
-    const url = new URL("https://api.search.brave.com/res/v1/images/search");
+  private async callImageSearch(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
+    const url = new URL(`${root}/images/search`);
     url.searchParams.set("q", stringArg(args, "query"));
     url.searchParams.set("count", String(numberArg(args, "limit", 10)));
     url.searchParams.set("country", stringArg(args, "country", "ALL"));
@@ -132,10 +138,10 @@ export class BraveAdapter implements RestAdapter {
     return { items: Array.isArray(data.results) ? data.results.map(normalizeBraveImage) : [] };
   }
 
-  private async callLlmContext(args: Record<string, unknown>, key: string): Promise<unknown> {
+  private async callLlmContext(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
     const body: Record<string, unknown> = {
       q: stringArg(args, "query"),
-      maximum_number_of_tokens: numberArg(args, "maximumNumberOfTokens", 4096),
+      maximum_number_of_tokens: numberArg(args, "maximumNumberOfTokens", 8192),
     };
     for (const [source, target] of [
       ["country", "country"],
@@ -150,6 +156,8 @@ export class BraveAdapter implements RestAdapter {
       ["freshness", "freshness"],
       ["safesearch", "safesearch"],
       ["spellcheck", "spellcheck"],
+      ["operators", "operators"],
+      ["operatorsFallback", "operators_fallback"],
       ["enableLocal", "enable_local"],
       ["enableSourceMetadata", "enable_source_metadata"],
     ] as const) {
@@ -175,7 +183,7 @@ export class BraveAdapter implements RestAdapter {
       if (typeof value === "string" && value.trim()) headers[target] = value;
       if (typeof value === "number" && Number.isFinite(value)) headers[target] = String(value);
     }
-    return requestJson("https://api.search.brave.com/res/v1/llm/context", {
+    return requestJson(`${root}/llm/context`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),

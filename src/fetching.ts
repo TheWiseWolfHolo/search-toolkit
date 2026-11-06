@@ -1,4 +1,4 @@
-import { textOfContent } from "./errors.js";
+import { TargetPageError, textOfContent } from "./errors.js";
 import { bodyBlocks, cleanError, isRouteContentBlock, routeBlock, type Route } from "./provenance.js";
 import type { AutoQuality } from "./routes.js";
 
@@ -20,6 +20,65 @@ export function isUsableFetchText(text: string): boolean {
   if (trimmed.length < MIN_FETCH_CHARS) return false;
   if (trimmed.length < 1_200 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
   return true;
+}
+
+/**
+ * Some readers answer with their raw JSON envelope as text: Firecrawl's
+ * `{"markdown": ...}`, Tavily's `{"results": [...], "failed_results": [...]}`.
+ * Unwrap it into the page text so the model reads Markdown, not escaped JSON.
+ * An envelope that holds only failures means the page was not read.
+ */
+export function readableFetchOutput(output: unknown): unknown {
+  if (!output || typeof output !== "object" || !Array.isArray((output as { content?: unknown }).content)) return output;
+  const record = output as { content: unknown[] };
+  let changed = false;
+  const content = record.content.map((block, index) => {
+    if (index === 0 && isRouteContentBlock(block)) return block;
+    const text = (block as { type?: string; text?: unknown })?.type === "text" ? (block as { text?: unknown }).text : undefined;
+    if (typeof text !== "string" || !/^\s*[{[]/.test(text)) return block;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return block;
+    }
+    const unwrapped = envelopeText(parsed);
+    if (unwrapped === undefined) return block;
+    changed = true;
+    return { ...(block as object), text: unwrapped };
+  });
+  return changed ? { ...record, content } : output;
+}
+
+function envelopeText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const pages = Array.isArray(record.results) ? record.results : Array.isArray(value) ? value : undefined;
+  if (pages) {
+    const texts = pages.map((page) => pageText(page)).filter((text): text is string => Boolean(text));
+    if (texts.length) return texts.join("\n\n---\n\n");
+    const failed = Array.isArray(record.failed_results) ? record.failed_results : Array.isArray(record.errors) ? record.errors : [];
+    if (failed.length) {
+      const first = failed[0] as Record<string, unknown>;
+      const reason = String(first?.error ?? first?.message ?? "no content");
+      const status = Number(reason.match(/\b([45]\d\d)\b/)?.[1]);
+      throw new TargetPageError(`reader could not get the page: ${reason}`, Number.isFinite(status) ? status : undefined);
+    }
+    return undefined;
+  }
+  return pageText(record.data && typeof record.data === "object" ? record.data : record);
+}
+
+function pageText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const page = value as Record<string, unknown>;
+  const body = [page.markdown, page.raw_content, page.content, page.text].find((item) => typeof item === "string" && item.trim()) as string | undefined;
+  if (!body) return undefined;
+  const metadata = page.metadata && typeof page.metadata === "object" ? page.metadata as Record<string, unknown> : {};
+  const title = typeof page.title === "string" ? page.title : typeof metadata.title === "string" ? metadata.title : undefined;
+  const url = typeof page.url === "string" ? page.url : typeof metadata.sourceURL === "string" ? metadata.sourceURL : undefined;
+  const header = [title ? `# ${title}` : "", url ? `URL: ${url}` : ""].filter(Boolean).join("\n");
+  return [header, body.trim()].filter(Boolean).join("\n\n");
 }
 
 export function parseFetchUrls(args: Record<string, unknown>): string[] {

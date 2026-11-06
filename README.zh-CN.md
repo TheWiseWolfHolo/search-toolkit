@@ -41,12 +41,13 @@
 | 独立的网页和新闻索引（`extraSnippets`、`goggles`），以及给模型用的 grounding 片段 | Brave Web、News、Images、LLM Context |
 | 一次返回网页和新闻、实时 `knowledge` 卡片、`full_page` 正文、URL 提取 | You.com Search 与 Contents |
 | 自然语言目标检索、批量 URL 提取、语义搜图 | Parallel Search、Extract、Images |
-| 速度快、每条结果附较长相关摘录的搜索 | Octen Search |
+| 速度快、每条结果附较长相关摘录的搜索，URL 提取 | Octen Search 与 Extract |
 | 托管的提取、站点地图、爬取和研究任务 | Tavily 官方 MCP |
 | 搜索、抓取、爬取、站点地图、结构化提取 | Firecrawl 官方 MCP |
 | 带来源的答案和研究任务 | LinkUp 官方 MCP |
 | 手动通用或垂直搜索、并行批量查询、URL 提取 | AnySearch 官方 MCP |
 | 网页加 X 原生搜索、模型综合、图片和视频理解 | Grok / xAI Responses |
+| 用 Chromium 渲染后读取网页，每天前 1,000 个 URL 免费 | TinyFish Fetch |
 | 紧凑搜索，只能手动调用 | Querit、TinyFish Search、Jina Search |
 | 中文本地搜索，需要明确同意消耗次数，只能手动调用 | 豆包 |
 
@@ -85,7 +86,8 @@ npm run build
 - `profile`：`full`（默认）、`curated` 或 `lean`，见[上下文成本](#上下文成本)。`--profile` 和 `SEARCH_TOOLKIT_PROFILE` 优先于配置文件。
 - `cache`：`enabled`（默认 `true`）、`searchTtlSeconds`（900）、`newsTtlSeconds`（300，用于 `mode: current`）、`fetchTtlSeconds`（1800），见[缓存](#缓存)。
 - `shaping`：`maxDescriptionChars`（默认 700）和 `maxParamDescriptionChars`（默认 220），`0` 表示保持上游原文。
-- 每个 Provider 可设 `toolPolicy.allow`、`toolPolicy.deny` 和 `toolPolicy.descriptions`（按上游工具名替换描述）。Firecrawl 默认只暴露 7 个检索工具，设 `toolPolicy.allow: ["*"]` 才会暴露完整目录。
+- 每个 Provider 可设 `strategy`、`defaultTier`、`paidTools` 和带备注的 Key，见 [Key 轮询](#key-轮询)。
+- 每个 Provider 可设 `toolPolicy.allow`、`toolPolicy.deny` 和 `toolPolicy.descriptions`（按上游工具名替换描述）。Firecrawl 默认只暴露 9 个检索工具（scrape、map、search、crawl、爬取状态、开发者搜索、论文搜索、政府文件搜索、额度查询），AnySearch 默认隐藏 `score`，这个工具只用来提交反馈，描述里却要求每次搜索后都调用。设 `toolPolicy.allow: ["*"]` 才会暴露完整目录。
 
 v1 配置（`automatic` / `manualOnly`）仍能加载。升级方法：
 
@@ -106,7 +108,8 @@ node dist/src/cli.js fetch https://example.com/a https://example.com/b --max-cha
 node dist/src/cli.js call serper_scholar '{"query":"retrieval augmented generation survey","limit":5}'
 node dist/src/cli.js tools --profile curated  # 只列名称；--json 输出完整 schema
 node dist/src/cli.js status --verbose         # 脱敏的 Key 健康、冷却和最近错误
-node dist/src/cli.js reset brave              # 手动清除 Key 冷却（可指定槽位）
+node dist/src/cli.js reset brave              # 手动清除 Key 冷却和耗尽状态（可指定槽位）
+node dist/src/cli.js quota                    # 从各家账单接口读取每把 Key 的剩余额度
 node dist/src/cli.js cache-clear
 ```
 
@@ -185,23 +188,58 @@ node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/provid
 
 客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions`。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
 
-HTTP 入口使用 MCP SDK 1.32.1，JSON 请求上限为 100 KiB，工具参数中的数组元素与对象键总数上限为 10,000，计数发生在参数 Schema 验证之前。每个会话使用独立的 server 与 transport。这两项 HTTP 限制不影响 STDIO。
+HTTP 入口使用 MCP SDK 1.32.2，JSON 请求上限为 100 KiB，工具参数中的数组元素与对象键总数上限为 10,000，计数发生在参数 Schema 验证之前。每个会话使用独立的 server 与 transport。这两项 HTTP 限制不影响 STDIO。
 
 ## Key 轮询
 
-每次请求从该 Provider 的 Key 池里取一把健康的 Key。游标跨重启持久化，并通过 SQLite 在多个并发进程间共享。健康状态按 Key 指纹记录，调换或删减 Key 不会把历史记到别的 Key 上。
+每次请求从该 Provider 的 Key 池里取一把 Key。怎么取由每个 Provider 的 `strategy` 决定。
+
+| `strategy` | 取哪一把 | 适合 |
+| --- | --- | --- |
+| `round_robin`（默认） | 上次用过的下一把健康 Key | 每月免费额度、按 Key 限速的服务（Serper、Tavily、Exa） |
+| `sticky` | 一直用同一把，出错才换到下一把健康的，然后停在新的那把 | 上游 MCP，一把 Key 对应一个会话或子进程（AnySearch） |
+| `drain` | 按配置顺序第一把健康的 Key | 先花完一份余额再用下一份，比如旧的预充值余额，或先用每月赠送额度再动买来的 credits（Parallel、Firecrawl） |
+
+游标跨重启持久化，并通过 SQLite 在多个并发进程间共享。健康状态按 Key 指纹记录，调换或删减 Key 不会把历史记到别的 Key 上。
 
 | 结果 | 对 Key 的处理 | 重试 |
 | --- | --- | --- |
-| 成功 | 清零失败计数 | |
+| 成功 | 清零失败计数，耗尽的 Key 恢复健康 | |
+| 额度或余额用完（`402`、Tavily 的 `432`/`433`，或任何状态码下出现 "Insufficient balance"、`spend_cap_exceeded` 这类说法） | 记为耗尽，停用 30 分钟、6 小时、24 小时，之后排在所有健康 Key 后面 | 换下一把；整池用完时自动路由去下一家 |
+| 套餐不支持（"not allowed for free accounts"、"Payment method required"） | 不停用 | 池里有 `paid` Key 就换它，没有就去下一家 |
 | `401` / `403` | 停用 1 小时，再犯依次 6 小时、24 小时 | 最多换 3 把 |
-| `402` | 停用 30 分钟，再犯依次 6 小时、24 小时 | 最多换 3 把 |
 | `429` | 停用 1、5、15 分钟，或按 `Retry-After` | 最多换 3 把 |
 | `5xx` 或连接断开 | 不停用 | 再换 1 把 |
 | 超时 | 不停用 | 不换 Key，自动路由直接去下一家 |
 | `400` / `404` / `422`、上游工具自己的错误、被读取网页自己的状态码 | 不停用 | 不重试 |
 
-停用都会到期，不是永久的。只有明确指向 Key 的错误文本（无效 Key、额度、余额、限流）才算 Key 故障，网站对阅读器返回 403 不算。Key 全部停用时立即失败，并说明最早什么时候恢复；`reset <provider>` 可以手动解除。`providers.json`、真实 Key 和状态库都被 Git 忽略，输出里只显示 Key 掩码。
+耗尽的 Key 在没有健康 Key 可用时才会再被用到。`drain` 例外，每个停用窗口结束后会再试一次排在前面的 Key，这样每月重置的赠送额度能重新排到前面先花。停用都会到期，不是永久的。只有明确指向 Key 的错误文本（无效 Key、额度、余额、限流）才算 Key 故障，网站对阅读器返回 403 不算。Key 全部停用时立即失败，并说明最早什么时候恢复，`reset <provider> [slot]` 可以手动解除停用和耗尽。
+
+### 套餐和单把 Key 的规则
+
+Key 可以写成字符串，也可以写成对象，同一个池里能混用：
+
+```json
+"octen": {
+  "enabled": true,
+  "auto": ["search"],
+  "defaultTier": "free",
+  "paidTools": ["octen_extract"],
+  "keys": [
+    "plain-key",
+    { "key": "another-key", "tier": "paid", "label": "已绑卡", "denyTools": ["octen_search"] }
+  ],
+  "integration": { "kind": "rest", "adapter": "octen" }
+}
+```
+
+`tier`（`free` 或 `paid`）没写时继承 `defaultTier`。列在 `paidTools` 里的工具只用 paid Key，`allowTools` 和 `denyTools` 限制单把 Key 能调哪些工具（上游名或对外工具名都行）。没有任何 Key 能调某个工具时，请求发出前就失败，自动路由直接去下一家。只限定部分 Key 的调用不会挪动 sticky 池的指针。`search_pool_status` 和 `config` 会显示每个槽位的套餐和备注，不显示 Key。
+
+### 余额
+
+`search-toolkit quota [provider]` 通过各家自己的账单接口读取每把 Key 的剩余额度，不消耗额度。目前支持 Serper `/account`、Tavily `/usage`、Firecrawl `/v2/team/credit-usage`、LinkUp `/v1/credits/balance`、You.com `/v1/billing/account_balance`、TinyFish `/v1/wallet`。读数会写进状态库，余额为零的 Key 记为耗尽，耗尽后又有余额的 Key（充值或进入新账期）回到轮询，`search_pool_status` 显示最近一次读数和距今多久。它只在手动运行时才读。`search_rotation_probe` 对每个槽位（或指定的 `slot`）各发一次真实请求，sticky 和 drain 池也能逐把检查。
+
+`providers.json`、真实 Key 和状态库都被 Git 忽略，输出里只显示 Key 掩码。
 
 ## Skill
 

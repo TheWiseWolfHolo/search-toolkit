@@ -1,7 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import {
   isConnectionFailure,
@@ -10,13 +9,13 @@ import {
   textOfContent,
   ToolResultError,
 } from "./errors.js";
-import { callWithRotation } from "./keys.js";
+import { callWithRotation, failureFlags } from "./keys.js";
 import { dedupeItems } from "./merge.js";
 import { cleanError, routeBlock } from "./provenance.js";
 import { renderItems } from "./render.js";
 import { extractUpstreamSearchItems } from "./rest/normalize.js";
 import { keyFingerprint, maskKey, type RotationStore } from "./rotation.js";
-import type { KeySelection, ProviderConfig, ToolBinding } from "./types.js";
+import type { CallOptions, KeySelection, ProviderConfig, ToolBinding } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 export const DEFAULT_FIRECRAWL_TOOLS = [
@@ -26,8 +25,22 @@ export const DEFAULT_FIRECRAWL_TOOLS = [
   "firecrawl_crawl",
   "firecrawl_check_crawl_status",
   "firecrawl_developer_search",
-  "firecrawl_research_search_github",
+  "firecrawl_research_search_papers",
+  "firecrawl_gov_search",
+  "firecrawl_credit_usage",
 ] as const;
+
+/**
+ * Upstream tools hidden unless toolPolicy.allow names them. AnySearch's `score`
+ * only files feedback, yet its description tells the model to call it after
+ * every search.
+ */
+const DEFAULT_DENIED_TOOLS: Record<string, readonly string[]> = {
+  anysearch: ["score"],
+};
+
+/** AnySearch asks clients to identify themselves; the version follows the package unless the config pins another client. */
+const ANYSEARCH_CLIENT_HEADER = "X-Anysearch-Client";
 
 const DISCOVERY_TIMEOUT_MS = 25_000;
 // Past this many keys, or after a timeout, another key will not help: the upstream itself is unreachable.
@@ -61,7 +74,7 @@ export class UpstreamMcpProvider {
         description: tool.description ?? "",
         annotations: safeToolAnnotations(tool),
       },
-      call: async (arguments_: Record<string, unknown>) => this.call(tool.name, arguments_),
+      call: async (arguments_: Record<string, unknown>, options?: CallOptions) => this.call(tool.name, arguments_, options),
     }));
   }
 
@@ -98,9 +111,17 @@ export class UpstreamMcpProvider {
     throw lastError;
   }
 
-  private call(upstreamName: string, arguments_: Record<string, unknown>): Promise<unknown> {
-    return callWithRotation(this.rotation, this.name, this.config.keys, (selection) =>
-      this.callWith(selection, upstreamName, arguments_));
+  private call(upstreamName: string, arguments_: Record<string, unknown>, options: CallOptions = {}): Promise<unknown> {
+    return callWithRotation(
+      this.rotation,
+      this.name,
+      this.config,
+      {
+        tools: [upstreamName, `${this.name}_${sanitizeName(upstreamName)}`],
+        ...(options.slot !== undefined ? { pin: options.slot } : {}),
+      },
+      (selection) => this.callWith(selection, upstreamName, arguments_),
+    );
   }
 
   private async callWith(
@@ -114,7 +135,7 @@ export class UpstreamMcpProvider {
       const latencyMs = Math.round(performance.now() - started);
       if (result.isError) {
         const text = textOfContent(result.content);
-        const keyFault = keyFaultStatusFromToolText(text);
+        const keyFault = structuredKeyFault(result.structuredContent) ?? keyFaultStatusFromToolText(text);
         if (keyFault) {
           throw new ToolResultError(`${this.name} upstream tool error: ${text.slice(0, 500)}`, result.content as unknown[], keyFault);
         }
@@ -127,7 +148,13 @@ export class UpstreamMcpProvider {
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const httpStatus = statusFromError(error);
-      this.rotation.record(selection, { ok: false, latencyMs, ...(httpStatus ? { httpStatus } : {}), error: cleanError(error) });
+      this.rotation.record(selection, {
+        ok: false,
+        latencyMs,
+        ...(httpStatus ? { httpStatus } : {}),
+        ...failureFlags(error),
+        error: cleanError(error),
+      });
       throw error;
     }
   }
@@ -183,13 +210,16 @@ export class UpstreamMcpProvider {
     if (integration.kind === "remote_mcp") {
       const url = new URL(integration.url);
       const headers = new Headers(integration.headers ?? {});
+      if (this.name === "anysearch" && /^(?:search-toolkit\/[\d.]+)?$/.test(headers.get(ANYSEARCH_CLIENT_HEADER) ?? "")) {
+        headers.set(ANYSEARCH_CLIENT_HEADER, `search-toolkit/${PACKAGE_VERSION}`);
+      }
       if (integration.auth.kind === "query") url.searchParams.set(integration.auth.name, selection.key);
       if (integration.auth.kind === "header") headers.set(integration.auth.name, selection.key);
       if (integration.auth.kind === "bearer") headers.set("Authorization", `Bearer ${selection.key}`);
       const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
       // The SDK's optional sessionId property conflicts with projects that
       // enable exactOptionalPropertyTypes, though the runtime transport is valid.
-      await client.connect(transport as unknown as Transport);
+      await client.connect(transport);
       return { client, close: async () => transport.close() };
     }
     if (integration.kind === "stdio_mcp") {
@@ -211,6 +241,20 @@ export class UpstreamMcpProvider {
     }
     throw new Error(`${this.name} is not an MCP integration`);
   }
+}
+
+/**
+ * Firecrawl 3.3x reports API failures as `{ success: false, error: { code, status } }`.
+ * Only codes that describe the key count; a 403 there can be the target site refusing.
+ */
+export function structuredKeyFault(structured: unknown): number | undefined {
+  const error = (structured as { error?: { code?: unknown; status?: unknown } } | undefined)?.error;
+  if (!error || typeof error !== "object") return undefined;
+  const code = typeof error.code === "string" ? error.code : "";
+  if (code === "insufficient_credits" || error.status === 402) return 402;
+  if (code === "unauthorized" || error.status === 401) return 401;
+  if (code === "rate_limited" || error.status === 429) return 429;
+  return undefined;
 }
 
 export function selectionFor(provider: string, slot: number, key: string): KeySelection {
@@ -250,6 +294,8 @@ export function filterUpstreamTools(provider: string, config: ProviderConfig, to
   const defaultAllow = provider === "firecrawl" ? [...DEFAULT_FIRECRAWL_TOOLS] : undefined;
   const allow = config.toolPolicy?.allow ?? defaultAllow;
   const deny = new Set(config.toolPolicy?.deny ?? []);
+  const explicitlyAllowed = new Set(config.toolPolicy?.allow ?? []);
+  for (const name of DEFAULT_DENIED_TOOLS[provider] ?? []) if (!explicitlyAllowed.has(name)) deny.add(name);
   return tools.filter((tool) => {
     const allowed = !allow || allow.includes("*") || allow.includes(tool.name);
     return allowed && !deny.has(tool.name);

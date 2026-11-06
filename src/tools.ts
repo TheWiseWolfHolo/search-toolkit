@@ -106,7 +106,7 @@ export const IMAGES_TOOL: Tool = {
 export const FETCH_TOOL: Tool = {
   name: "fetch_auto",
   title: "Read one or more known URLs",
-  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Exa, Tavily, Parallel, You.com, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
+  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Exa, Tavily, Parallel, TinyFish, You.com, Octen, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
   inputSchema: {
     type: "object",
     properties: {
@@ -131,13 +131,14 @@ export const FETCH_TOOL: Tool = {
 export const PROBE_TOOL: Tool = {
   name: "search_rotation_probe",
   title: "Verify provider key rotation",
-  description: "Run a few real calls through one provider and return the masked key-slot sequence. Consumes provider quota.",
+  description: "Run one real call on each key slot of a provider (or only `slot`) and report each slot's result and health. A success clears a benched or exhausted key. Consumes provider quota.",
   inputSchema: {
     type: "object",
     properties: {
       provider: { type: "string" },
       query: { type: "string", minLength: 1 },
-      calls: { type: "integer", minimum: 1, maximum: 12 },
+      calls: { type: "integer", minimum: 1, maximum: 12, description: "Probe the first n slots; defaults to every slot" },
+      slot: { type: "integer", minimum: 0, description: "Probe only this slot" },
       tool: { type: "string", description: "Optional exposed tool name; defaults to the provider's first search tool" },
     },
     required: ["provider", "query"],
@@ -191,6 +192,7 @@ export const CURATED_SPECIALIST_TOOLS = new Set([
   "you_contents",
   "serper_scholar",
   "exa_web_search_advanced_exa",
+  "exa_agent_run",
   "grok_x_search",
   "grok_web_x_search",
   "doubao_search",

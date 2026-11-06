@@ -21,11 +21,33 @@ function explicitFreshness(value: unknown): AutoFreshness | undefined {
   return value === "day" || value === "week" || value === "month" || value === "year" ? value : undefined;
 }
 
+/**
+ * Domains as given, minus scheme, query, and trailing slashes. A path prefix
+ * ("github.com/modelcontextprotocol") is kept: site: operators honour it.
+ */
 function cleanDomains(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
-    .map((item) => String(item ?? "").trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase())
+    .map((item) => String(item ?? "").trim().replace(/^https?:\/\//i, "").replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase())
     .filter(Boolean);
+}
+
+/** Native domain filters take hosts; a path prefix there would match nothing. */
+function hostsOf(domains: string[]): string[] {
+  return [...new Set(domains.map((domain) => domain.replace(/\/.*$/, "")))];
+}
+
+// Longest query each site:-operator provider takes. Brave rejects longer ones with 422;
+// Google, behind Serper, ignores words past 32, which drops the later site: terms.
+const SITE_QUERY_LIMITS: Record<string, { chars: number; words: number }> = {
+  brave: { chars: 400, words: 50 },
+  serper: { chars: 2_048, words: 32 },
+};
+
+function fitsQueryLimit(name: string, query: string): boolean {
+  const limit = SITE_QUERY_LIMITS[name.split("_")[0] ?? ""];
+  if (!limit) return true;
+  return query.length <= limit.chars && query.trim().split(/\s+/).length <= limit.words;
 }
 
 function queryWithSiteOperators(query: string, include: string[], exclude: string[]): string {
@@ -37,6 +59,12 @@ function queryWithSiteOperators(query: string, include: string[], exclude: strin
 }
 
 export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown> = {}): AutoCandidate[] {
+  // A long site: list goes to providers with native domain filters instead of failing or being cut short.
+  return routeCandidates(mode, quality, args).filter((candidate) =>
+    fitsQueryLimit(candidate.name, String(candidate.nativeArguments?.query ?? "")));
+}
+
+function routeCandidates(mode: AutoMode, quality: AutoQuality, args: Record<string, unknown>): AutoCandidate[] {
   const query = String(args.query ?? "");
   const limit = Number(args.limit ?? 6);
   // Ask for a little more than shown: duplicates and mirrors are dropped before the list is capped to `limit`.
@@ -49,34 +77,36 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
     : undefined;
   const includeDomains = cleanDomains(args.includeDomains);
   const excludeDomains = cleanDomains(args.excludeDomains);
+  const includeHosts = hostsOf(includeDomains);
+  const excludeHosts = hostsOf(excludeDomains);
   const hasDomains = includeDomains.length > 0 || excludeDomains.length > 0;
   const siteQuery = hasDomains ? queryWithSiteOperators(query, includeDomains, excludeDomains) : query;
 
   const freshness = mode === "current" ? autoFreshness(args.freshness) : explicitFreshness(args.freshness);
   const braveFreshness = freshness ? { day: "pd", week: "pw", month: "pm", year: "py" }[freshness] : undefined;
   const serperFreshness = freshness ? { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" }[freshness] : undefined;
-  const parallelMaxAge = freshness ? { day: 86_400, week: 604_800, month: 2_592_000, year: 31_536_000 }[freshness] : undefined;
+  const windowSeconds = freshness ? { day: 86_400, week: 604_800, month: 2_592_000, year: 31_536_000 }[freshness] : undefined;
   // Exa filters by publish date only in its advanced tool (maxAgeHours is cache staleness, not a date filter).
-  const publishedSince = parallelMaxAge ? new Date(Date.now() - parallelMaxAge * 1000).toISOString().slice(0, 10) : undefined;
+  const publishedSince = windowSeconds ? new Date(Date.now() - windowSeconds * 1000).toISOString().slice(0, 10) : undefined;
 
   const domainArgsFor = (name: string): Record<string, unknown> => {
     if (!hasDomains) return {};
     if (name === "parallel_search" || name === "you_search" || name === "exa_web_search_advanced_exa" || name === "octen_search") {
       return {
-        ...(includeDomains.length ? { includeDomains } : {}),
-        ...(excludeDomains.length ? { excludeDomains } : {}),
+        ...(includeHosts.length ? { includeDomains: includeHosts } : {}),
+        ...(excludeHosts.length ? { excludeDomains: excludeHosts } : {}),
       };
     }
     if (name === "tavily_tavily_search") {
       return {
-        ...(includeDomains.length ? { include_domains: includeDomains } : {}),
-        ...(excludeDomains.length ? { exclude_domains: excludeDomains } : {}),
+        ...(includeHosts.length ? { include_domains: includeHosts } : {}),
+        ...(excludeHosts.length ? { exclude_domains: excludeHosts } : {}),
       };
     }
     if (name === "querit_search") {
       return {
-        ...(includeDomains.length ? { sitesInclude: includeDomains } : {}),
-        ...(excludeDomains.length ? { sitesExclude: excludeDomains } : {}),
+        ...(includeHosts.length ? { sitesInclude: includeHosts } : {}),
+        ...(excludeHosts.length ? { sitesExclude: excludeHosts } : {}),
       };
     }
     return {};
@@ -85,10 +115,12 @@ export function autoCandidates(mode: AutoMode, quality: AutoQuality, args: Recor
   const timeArgsFor = (name: string): Record<string, unknown> => {
     if (!freshness || mode === "current") return {};
     if (name.startsWith("brave_")) return { freshness: braveFreshness };
+    if (name === "serper_scholar") return {};
     if (name.startsWith("serper_")) return { tbs: serperFreshness };
     if (name === "you_search" || name === "octen_search") return { freshness };
     if (name === "tavily_tavily_search") return { time_range: freshness };
-    if (name === "parallel_search") return { maxAgeSeconds: parallelMaxAge };
+    // Parallel's max_age_seconds is cache staleness; the publish-date filter is after_date.
+    if (name === "parallel_search") return { afterDate: publishedSince };
     if (name === "exa_web_search_advanced_exa") return { startPublishedDate: publishedSince };
     if (name === "querit_search") return { timeRange: freshness };
     return {};
@@ -295,7 +327,10 @@ export function fetchCandidates(quality: AutoQuality, args: Record<string, unkno
   };
   const linkup: AutoCandidate = { name: "linkup_linkup_fetch", nativeArguments: { url, ...(quality === "max" ? { renderJs: true } : {}) } };
   const anysearch: AutoCandidate = { name: "anysearch_extract", nativeArguments: { url } };
+  // TinyFish renders in Chromium; Octen's advanced mode targets hard pages. Both are opt-in through auto: ["fetch"].
+  const tinyfish: AutoCandidate = { name: "tinyfish_fetch", nativeArguments: { urls: [url], format: "markdown" } };
+  const octen: AutoCandidate = { name: "octen_extract", nativeArguments: { urls: [url], ...(quality === "max" ? { mode: "auto" } : {}) } };
   return quality === "max"
-    ? [firecrawl, tavily, parallel, exa, you, linkup, anysearch]
-    : [exa, tavily, parallel, you, firecrawl, linkup, anysearch];
+    ? [firecrawl, tinyfish, tavily, parallel, exa, you, octen, linkup, anysearch]
+    : [exa, tavily, parallel, tinyfish, you, octen, firecrawl, linkup, anysearch];
 }

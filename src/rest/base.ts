@@ -1,11 +1,11 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError, parseRetryAfter, statusFromError } from "../errors.js";
-import { callWithRotation } from "../keys.js";
+import { callWithRotation, failureFlags } from "../keys.js";
 import { dedupeItems } from "../merge.js";
 import { cleanError, redact, routeBlock } from "../provenance.js";
 import { renderPayload } from "../render.js";
 import type { RotationStore } from "../rotation.js";
-import type { KeySelection, ProviderConfig, SearchItem, ToolBinding } from "../types.js";
+import type { CallOptions, KeySelection, ProviderConfig, SearchItem, ToolBinding } from "../types.js";
 
 export interface RestAdapter {
   tools(provider: string): Tool[];
@@ -25,13 +25,18 @@ export class RestProvider {
       provider: this.name,
       upstreamName: tool.name,
       exposed: tool,
-      call: async (arguments_: Record<string, unknown>) => this.call(tool.name, arguments_),
+      call: async (arguments_: Record<string, unknown>, options?: CallOptions) => this.call(tool.name, arguments_, options),
     }));
   }
 
-  private call(tool: string, args: Record<string, unknown>): Promise<unknown> {
-    return callWithRotation(this.rotation, this.name, this.config.keys, (selection) =>
-      this.callWith(selection, tool, args));
+  private call(tool: string, args: Record<string, unknown>, options: CallOptions = {}): Promise<unknown> {
+    return callWithRotation(
+      this.rotation,
+      this.name,
+      this.config,
+      { tools: [tool], ...(options.slot !== undefined ? { pin: options.slot } : {}) },
+      (selection) => this.callWith(selection, tool, args),
+    );
   }
 
   private async callWith(
@@ -74,6 +79,7 @@ export class RestProvider {
         latencyMs,
         ...(status ? { httpStatus: status } : {}),
         ...(error instanceof HttpError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+        ...failureFlags(error),
         error: cleanError(error),
       });
       throw error;
@@ -81,8 +87,18 @@ export class RestProvider {
   }
 }
 
-export function baseUrlOf(config: ProviderConfig, fallback: string): string {
-  return config.integration.kind === "rest" && config.integration.baseUrl ? config.integration.baseUrl : fallback;
+export function baseUrlOf(config: ProviderConfig | undefined, fallback: string): string {
+  return config?.integration.kind === "rest" && config.integration.baseUrl ? config.integration.baseUrl : fallback;
+}
+
+/**
+ * Full URL of one endpoint under a provider's API root. A configured baseUrl may be the
+ * root ("https://proxy.example/parallel") or, as older configs have it, a full
+ * /v1/... endpoint; either way the endpoint path is appended to the root.
+ */
+export function endpointOf(config: ProviderConfig, root: string, path: string): string {
+  const base = baseUrlOf(config, root).replace(/\/+$/, "").replace(/\/v1(?:\/[a-z_/-]*)?$/i, "");
+  return `${base}${path}`;
 }
 
 export async function requestJson(

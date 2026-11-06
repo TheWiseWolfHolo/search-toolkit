@@ -1,5 +1,6 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { requestJson, searchTool, type RestAdapter } from "../base.js";
+import type { ProviderConfig } from "../../types.js";
+import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import { normalizeItem, normalizeSerperImage, numberArg, stringArg } from "../normalize.js";
 
 const LENS_TOOL: Tool = {
@@ -42,14 +43,16 @@ export class SerperAdapter implements RestAdapter {
     )), LENS_TOOL];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string): Promise<unknown> {
+  async call(tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
     const kind = tool.replace("serper_", "");
-    if (kind === "lens") return this.lens(args, key);
+    const root = baseUrlOf(config, "https://google.serper.dev").replace(/\/+$/, "");
+    if (kind === "lens") return this.lens(args, key, root);
     const body: Record<string, unknown> = { q: stringArg(args, "query"), num: numberArg(args, "limit", 6) };
-    for (const name of ["gl", "hl", "tbs"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
+    // Scholar has no web time filter; a tbs there narrows nothing and can empty the results.
+    for (const name of kind === "scholar" ? ["gl", "hl"] : ["gl", "hl", "tbs"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
     if (typeof args.page === "number") body.page = args.page;
     if (typeof args.autocorrect === "boolean") body.autocorrect = args.autocorrect;
-    const data = await requestJson(`https://google.serper.dev/${kind}`, {
+    const data = await requestJson(`${root}/${kind}`, {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -60,10 +63,10 @@ export class SerperAdapter implements RestAdapter {
     return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalize) : [] };
   }
 
-  private async lens(args: Record<string, unknown>, key: string): Promise<unknown> {
+  private async lens(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
     const body: Record<string, unknown> = { url: stringArg(args, "url") };
     for (const name of ["gl", "hl"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
-    const data = await requestJson("https://google.serper.dev/lens", {
+    const data = await requestJson(`${root}/lens`, {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),

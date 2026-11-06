@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { copyFileSync, writeFileSync } from "node:fs";
 import { defaultConfigPath, migrateConfig, normalizeConfig, readConfigFile, sanitizedConfig } from "./config.js";
+import { QUOTA_ENDPOINTS, readQuota } from "./quota.js";
 import { SearchToolkit } from "./toolkit.js";
 import type { ToolkitProfile } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
@@ -48,6 +49,30 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       if (slot !== undefined && !Number.isInteger(slot)) throw new Error("slot must be an integer");
       const cleared = toolkit.rotation.reset(provider, config.keys, slot);
       console.log(`${provider}: cleared ${cleared} key${cleared === 1 ? "" : "s"}`);
+      return;
+    }
+    if (name === "quota") {
+      const wanted = args.shift();
+      const names = wanted
+        ? [wanted]
+        : Object.keys(QUOTA_ENDPOINTS).filter((provider) => toolkit.config.providers[provider]?.enabled);
+      for (const provider of names) {
+        const config = toolkit.config.providers[provider];
+        if (!config) throw new Error(`Unknown provider: ${provider}`);
+        const rows = await readQuota(provider, config, toolkit.rotation);
+        if (options.has("json")) {
+          console.log(JSON.stringify(rows, null, 2));
+          continue;
+        }
+        for (const row of rows) {
+          const who = [row.tier, row.label].filter(Boolean).join(" ");
+          const fields = Object.entries(row.quota ?? {}).map(([field, value]) => `${field}=${value}`).join(" ");
+          const detail = row.ok
+            ? `${row.remaining !== undefined ? `remaining=${row.remaining}  ` : ""}${options.has("verbose") ? fields : ""}`.trim() || fields || "(no balance fields)"
+            : `error: ${row.error}`;
+          console.log(`${provider} slot ${row.slot} ${row.masked}${who ? ` [${who}]` : ""}  ${detail}`);
+        }
+      }
       return;
     }
     if (name === "cache-clear") {
@@ -113,8 +138,10 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
     } else if (name === "probe") {
       const provider = args.shift();
       const query = args.join(" ");
-      if (!provider || !query) throw new Error("Usage: search-toolkit probe <provider> <query>");
-      console.log(JSON.stringify(await toolkit.callTool("search_rotation_probe", { provider, query }), null, 2));
+      if (!provider || !query) throw new Error("Usage: search-toolkit probe <provider> <query> [--slot n]");
+      console.log(JSON.stringify(await toolkit.callTool("search_rotation_probe", {
+        provider, query, ...optional("slot", options.number("slot")),
+      }), null, 2));
     } else {
       console.log(helpText());
       process.exitCode = 1;
@@ -212,11 +239,14 @@ Commands:
   search-toolkit tools [--profile full|curated|lean] [--json]
   search-toolkit call <tool> '{"query":"..."}' [--json]
   search-toolkit status [--verbose]
-  search-toolkit reset <provider> [slot]       clear key cool-downs
+  search-toolkit reset <provider> [slot]       clear key cool-downs and exhaustion
+  search-toolkit quota [provider] [--verbose] [--json]
+                                               remaining credit per key from each provider's billing API (free reads);
+                                               empty keys are marked exhausted, refilled ones return to rotation
   search-toolkit config                        sanitized config summary
   search-toolkit cache-clear                   drop cached search and fetch results
   search-toolkit migrate-config [--write]      upgrade a v1 config (dry run by default)
-  search-toolkit probe <provider> <query>      live rotation test; consumes quota
+  search-toolkit probe <provider> <query> [--slot n]   one live call per key slot; consumes quota
 
 Options:
   --config <path>   Override SEARCH_TOOLKIT_CONFIG

@@ -1,6 +1,6 @@
 {
   "name": "@thewisewolfholo/search-toolkit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official-first web tools for AI agents with multi-key rotation, MCP, CLI, and Agent Skills.",
   "type": "module",
   "license": "MIT",
@@ -42,8 +42,8 @@
     "eval:search": "npm run build && node dist/scripts/eval-search.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
-    "express": "5.2.1"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "express": "5.3.0"
   },
   "devDependencies": {
     "@types/express": "5.0.6",

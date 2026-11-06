@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { KeySelection } from "./types.js";
+import type { KeySelection, KeyStrategy } from "./types.js";
 
 const SCHEMA_VERSION = 2;
 const MINUTE = 60_000;
@@ -24,19 +24,31 @@ export function keyFingerprint(key: string): string {
 }
 
 export interface KeyPenalty {
-  status: "cooldown" | "disabled";
+  status: "cooldown" | "disabled" | "exhausted";
   cooldownMs: number;
 }
 
 /**
- * Translate a key-attributable failure into a recoverable cool-down. Repeated
+ * Translate a key-attributable failure into a recoverable penalty. Repeated
  * faults back off further; a success clears the strike count. Nothing is ever
  * disabled forever: when the window ends the key gets another chance.
+ *
+ * An exhausted key (out of credit or quota) is different from a cooling one:
+ * after its window it stays at the back of the pool and is only tried again
+ * when no other key is healthy, so a spent prepaid key does not keep taking
+ * a share of the traffic just to fail with 402. Under `drain` it gets one try
+ * per window instead, so a key whose allowance reset is spent first again.
+ * A success, a positive quota reading, or `reset` makes it healthy.
  */
-export function penaltyFor(status: number | undefined, strikes: number, retryAfterMs?: number): KeyPenalty | undefined {
+export function penaltyFor(
+  status: number | undefined,
+  strikes: number,
+  retryAfterMs?: number,
+  exhausted = false,
+): KeyPenalty | undefined {
   const step = Math.min(strikes, 2);
+  if (exhausted || status === 402) return { status: "exhausted", cooldownMs: [30 * MINUTE, 6 * HOUR, 24 * HOUR][step] as number };
   if (status === 401 || status === 403) return { status: "disabled", cooldownMs: [HOUR, 6 * HOUR, 24 * HOUR][step] as number };
-  if (status === 402) return { status: "cooldown", cooldownMs: [30 * MINUTE, 6 * HOUR, 24 * HOUR][step] as number };
   if (status === 429) {
     const fallback = [MINUTE, 5 * MINUTE, 15 * MINUTE][step] as number;
     const cooldownMs = retryAfterMs === undefined ? fallback : Math.min(Math.max(retryAfterMs, 5_000), 6 * HOUR);
@@ -44,6 +56,21 @@ export function penaltyFor(status: number | undefined, strikes: number, retryAft
   }
   return undefined;
 }
+
+export interface SelectOptions {
+  /** Return the cursor slot regardless of health (tests and diagnostics). */
+  strict?: boolean;
+  strategy?: KeyStrategy;
+  /** Slots this call may use; omitted means the whole pool. */
+  eligible?: readonly number[];
+  /** Slots already tried by this call. */
+  exclude?: ReadonlySet<number>;
+  /** Use exactly this slot, healthy or not (probes). */
+  pin?: number;
+}
+
+/** healthy: selectable now. sunk: exhausted, window over, tried only as a last resort. benched: still inside its window. */
+export type SlotState = "healthy" | "sunk" | "benched";
 
 interface StateRow {
   fp: string;
@@ -87,6 +114,8 @@ export class RotationStore {
     `);
     this.addColumn("last_error", "TEXT");
     this.addColumn("last_error_at", "INTEGER");
+    this.addColumn("quota_remaining", "REAL");
+    this.addColumn("quota_checked_at", "INTEGER");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS provider_health (
         provider TEXT PRIMARY KEY,
@@ -201,33 +230,56 @@ export class RotationStore {
     }
   }
 
-  select(provider: string, keys: string[], strict = false): KeySelection {
+  select(provider: string, keys: string[], options: boolean | SelectOptions = {}): KeySelection {
     if (keys.length === 0) throw new Error(`${provider} has no API keys`);
+    const opts: SelectOptions = typeof options === "boolean" ? { strict: options } : options;
+    const strategy = opts.strategy ?? "round_robin";
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.statement("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
         | { next_slot: number }
         | undefined;
-      const start = (row?.next_slot ?? 0) % keys.length;
-      const health = this.healthByFingerprint(provider);
-      const now = Date.now();
-      let slot = start;
-      if (!strict) {
-        const found = Array.from({ length: keys.length }, (_, offset) => (start + offset) % keys.length).find((candidate) => {
-          const item = health.get(keyFingerprint(keys[candidate] as string));
-          return !item || item.cooldown_until === null || item.cooldown_until <= now;
-        });
+      const cursor = (row?.next_slot ?? 0) % keys.length;
+      let slot: number;
+      if (opts.pin !== undefined) {
+        if (!keys[opts.pin]) throw new Error(`${provider} key slot ${opts.pin} is missing`);
+        slot = opts.pin;
+      } else if (opts.strict) {
+        slot = cursor;
+      } else {
+        const states = this.slotStates(provider, keys);
+        const allowed = (opts.eligible ?? keys.map((_, index) => index))
+          .filter((index) => index >= 0 && index < keys.length && !opts.exclude?.has(index));
+        // drain walks the pool in configured order; the others start from the cursor.
+        const distance = (index: number) => (index - cursor + keys.length) % keys.length;
+        const ordered = strategy === "drain"
+          ? [...allowed].sort((a, b) => a - b)
+          : [...allowed].sort((a, b) => distance(a) - distance(b));
+        // An exhausted key past its window waits behind every healthy key, except under drain:
+        // there the order is the point (spend this key first), so it gets one try per window,
+        // which is how a monthly allowance that has reset gets used again instead of a paid balance.
+        const found = strategy === "drain"
+          ? ordered.find((index) => states[index]?.state !== "benched")
+          : ordered.find((index) => states[index]?.state === "healthy")
+            ?? ordered.find((index) => states[index]?.state === "sunk");
         if (found === undefined) {
-          const soonest = Math.min(...keys.map((key) => health.get(keyFingerprint(key))?.cooldown_until ?? Infinity));
-          const wait = Number.isFinite(soonest) ? ` (next recovery in ${formatDuration(soonest - now)})` : "";
-          throw new Error(`${provider} has no healthy key slots available${wait}`);
+          const soonest = Math.min(...allowed.map((index) => states[index]?.until ?? Infinity));
+          const wait = Number.isFinite(soonest) ? ` (next recovery in ${formatDuration(soonest - Date.now())})` : "";
+          const scope = opts.eligible && opts.eligible.length < keys.length ? " for this tool" : "";
+          throw new Error(`${provider} has no healthy key slots available${scope}${wait}`);
         }
         slot = found;
       }
-      this.statement(`
-        INSERT INTO provider_cursor(provider, next_slot) VALUES (?, ?)
-        ON CONFLICT(provider) DO UPDATE SET next_slot = excluded.next_slot
-      `).run(provider, (slot + 1) % keys.length);
+      // sticky keeps pointing at the key in use; round_robin moves past it; drain never moves.
+      // A call limited to some slots, or pinned to one, leaves a sticky pointer alone.
+      const restricted = opts.pin !== undefined || (opts.eligible !== undefined && opts.eligible.length < keys.length);
+      const next = strategy === "sticky" ? (restricted ? undefined : slot) : strategy === "drain" ? undefined : (slot + 1) % keys.length;
+      if (next !== undefined) {
+        this.statement(`
+          INSERT INTO provider_cursor(provider, next_slot) VALUES (?, ?)
+          ON CONFLICT(provider) DO UPDATE SET next_slot = excluded.next_slot
+        `).run(provider, next);
+      }
       this.db.exec("COMMIT");
       const key = keys[slot];
       if (!key) throw new Error(`${provider} key slot ${slot} is missing`);
@@ -238,9 +290,32 @@ export class RotationStore {
     }
   }
 
+  /** Where each slot stands right now, in key order. */
+  slotStates(provider: string, keys: string[]): Array<{ state: SlotState; until?: number }> {
+    const health = this.healthByFingerprint(provider);
+    const now = Date.now();
+    return keys.map((key) => {
+      const item = health.get(keyFingerprint(key));
+      if (!item) return { state: "healthy" };
+      if (item.cooldown_until !== null && item.cooldown_until > now) return { state: "benched", until: item.cooldown_until };
+      return { state: item.status === "exhausted" ? "sunk" : "healthy" };
+    });
+  }
+
   record(
     selection: KeySelection,
-    result: { ok: boolean; latencyMs: number; httpStatus?: number; retryAfterMs?: number; toolError?: boolean; error?: string },
+    result: {
+      ok: boolean;
+      latencyMs: number;
+      httpStatus?: number;
+      retryAfterMs?: number;
+      toolError?: boolean;
+      error?: string;
+      /** Out of credit or quota, whatever status code said so. */
+      exhausted?: boolean;
+      /** The key's plan does not cover this request: noted, but the key is not benched. */
+      planLimit?: boolean;
+    },
   ): void {
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
@@ -248,7 +323,9 @@ export class RotationStore {
       const current = this.statement("SELECT strikes FROM key_state WHERE provider = ? AND fp = ?")
         .get(selection.provider, selection.fingerprint) as { strikes: number } | undefined;
       const strikes = current?.strikes ?? 0;
-      const penalty = result.ok ? undefined : penaltyFor(result.httpStatus, strikes, result.retryAfterMs);
+      const penalty = result.ok || result.planLimit
+        ? undefined
+        : penaltyFor(result.httpStatus, strikes, result.retryAfterMs, result.exhausted === true);
       const nextStrikes = result.ok ? 0 : penalty ? strikes + 1 : strikes;
       this.statement(`
         INSERT INTO key_state(
@@ -290,17 +367,53 @@ export class RotationStore {
     }
   }
 
-  /** Slots that are not cooling down, in key order, without advancing the round-robin cursor. */
-  usableSlots(provider: string, keys: string[]): number[] {
-    const health = this.healthByFingerprint(provider);
-    const now = Date.now();
-    return keys.flatMap((key, slot) => {
-      const item = health.get(keyFingerprint(key));
-      return !item || item.cooldown_until === null || item.cooldown_until <= now ? [slot] : [];
-    });
+  /** Healthy slots (not benched, not exhausted), in key order, without moving the cursor. */
+  usableSlots(provider: string, keys: string[], eligible?: readonly number[]): number[] {
+    const states = this.slotStates(provider, keys);
+    return (eligible ?? keys.map((_, slot) => slot)).filter((slot) => states[slot]?.state === "healthy");
   }
 
-  /** Clear cool-downs and strikes so keys are selectable immediately. Returns the number of keys cleared. */
+  /** Exhausted slots whose window has passed: the last resort when nothing healthy is left. */
+  sunkSlots(provider: string, keys: string[], eligible?: readonly number[]): number[] {
+    const states = this.slotStates(provider, keys);
+    return (eligible ?? keys.map((_, slot) => slot)).filter((slot) => states[slot]?.state === "sunk");
+  }
+
+  /**
+   * Store what a provider's billing API says is left on a key. An empty key
+   * sinks to the back of the pool at once; an exhausted key that has credit
+   * again (recharged, or a new billing period) is healthy again. Cool-downs
+   * and auth failures are left alone: a balance says nothing about them.
+   */
+  recordQuota(provider: string, key: string, remaining: number | undefined): void {
+    const now = Date.now();
+    const fp = keyFingerprint(key);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.statement(`
+        INSERT INTO key_state(provider, fp, quota_remaining, quota_checked_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(provider, fp) DO UPDATE SET quota_remaining = excluded.quota_remaining, quota_checked_at = excluded.quota_checked_at
+      `).run(provider, fp, remaining ?? null, now);
+      if (remaining !== undefined && remaining <= 0) {
+        // Confirmed empty: bench it for six hours, then it waits at the back like any exhausted key.
+        this.statement(`
+          UPDATE key_state SET status = 'exhausted', cooldown_until = MAX(COALESCE(cooldown_until, 0), ?)
+          WHERE provider = ? AND fp = ? AND status IN ('healthy', 'exhausted')
+        `).run(now + 6 * HOUR, provider, fp);
+      } else if (remaining !== undefined) {
+        this.statement(`
+          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
+          WHERE provider = ? AND fp = ? AND status = 'exhausted'
+        `).run(provider, fp);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Clear cool-downs, exhaustion, and strikes so keys are selectable immediately. Returns the number of keys cleared. */
   reset(provider: string, keys: string[], slot?: number): number {
     const targets = slot === undefined ? keys : [keys[slot]].filter((key): key is string => Boolean(key));
     let cleared = 0;
@@ -320,7 +433,8 @@ export class RotationStore {
       | undefined;
     const rows = this.statement(`
       SELECT fp, status, cooldown_until, strikes, requests, successes, failures, tool_errors,
-             last_http_status, last_latency_ms, last_used_at, last_error, last_error_at
+             last_http_status, last_latency_ms, last_used_at, last_error, last_error_at,
+             quota_remaining, quota_checked_at
       FROM key_state WHERE provider = ?
     `).all(provider) as Array<Record<string, unknown> & { fp: string }>;
     const byFingerprint = new Map(rows.map((item) => [item.fp, item]));
@@ -330,16 +444,23 @@ export class RotationStore {
       keyCount: keys.length,
       nextSlot: (cursor?.next_slot ?? 0) % Math.max(keys.length, 1),
       keys: keys.map((key, slot) => {
-        const { fp: _fp, ...row } = byFingerprint.get(keyFingerprint(key)) ?? {} as Record<string, unknown>;
+        const { fp: _fp, quota_remaining: remaining, quota_checked_at: checkedAt, ...row } =
+          byFingerprint.get(keyFingerprint(key)) ?? {} as Record<string, unknown>;
         const coolingDown = typeof row.cooldown_until === "number" && row.cooldown_until > now;
+        // Exhaustion outlives its window: the key stays at the back until a call succeeds or it is reset.
+        const shown = coolingDown || row.status === "exhausted" ? row.status : "healthy";
         return {
           slot,
           masked: maskKey(key),
           status: {
             requests: 0, successes: 0, failures: 0, tool_errors: 0, strikes: 0,
             ...row,
-            status: coolingDown ? row.status : "healthy",
+            status: shown,
             ...(coolingDown ? { recovers_in: formatDuration(Number(row.cooldown_until) - now) } : {}),
+            // Last balance read by `search-toolkit quota`, and how long ago.
+            ...(typeof checkedAt === "number"
+              ? { quota_remaining: remaining ?? null, quota_checked: `${formatDuration(now - checkedAt)} ago` }
+              : {}),
           } as Record<string, unknown>,
         };
       }),

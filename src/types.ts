@@ -29,10 +29,34 @@ export type IntegrationConfig =
 /** What a provider may be chosen for without being named explicitly. An empty list means manual use only. */
 export type AutoCapability = "search" | "images" | "fetch";
 
+/** How a provider's key pool is walked. */
+export type KeyStrategy = "round_robin" | "sticky" | "drain";
+
+/** The subscription plan a key belongs to, when the operator has said so. */
+export type KeyTier = "free" | "paid";
+
+/** Per-slot annotations; `keys` stays a plain string list so every consumer keeps working. */
+export interface KeyMeta {
+  tier?: KeyTier;
+  label?: string;
+  /** Only these tools (upstream or exposed names) may use this key. */
+  allowTools?: string[];
+  /** These tools never use this key. */
+  denyTools?: string[];
+}
+
 export interface ProviderConfig {
   enabled: boolean;
   auto: AutoCapability[];
   keys: string[];
+  /** Same length as `keys` when any slot is annotated. */
+  keyMeta?: KeyMeta[];
+  /** round_robin (default) spreads load; sticky stays on one key until it fails; drain uses keys in order. */
+  strategy?: KeyStrategy;
+  /** Tier for slots that do not name one. */
+  defaultTier?: KeyTier;
+  /** Tools that only paid-tier keys may call. */
+  paidTools?: string[];
   integration: IntegrationConfig;
   toolPolicy?: {
     allow?: string[];
@@ -77,11 +101,16 @@ export interface KeySelection {
   fingerprint: string;
 }
 
+export interface CallOptions {
+  /** Run on this key slot only, healthy or not (rotation probes). */
+  slot?: number;
+}
+
 export interface ToolBinding {
   exposed: Tool;
   provider: string;
   upstreamName: string;
-  call(arguments_: Record<string, unknown>): Promise<unknown>;
+  call(arguments_: Record<string, unknown>, options?: CallOptions): Promise<unknown>;
 }
 
 export interface SearchItem {

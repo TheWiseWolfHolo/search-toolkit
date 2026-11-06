@@ -6,7 +6,7 @@ import { integrationFingerprint, ToolCatalogCache, toolsFingerprint } from "./ca
 import { loadConfigWithNotes } from "./config.js";
 import { isPageFailure, shouldFailoverProvider, statusFromError, textOfContent, ToolResultError } from "./errors.js";
 import {
-  bodyText, combineBatchFetch, isUsableFetchText, parseFetchUrls, truncateBody, type TruncateOptions,
+  bodyText, combineBatchFetch, isUsableFetchText, parseFetchUrls, readableFetchOutput, truncateBody, type TruncateOptions,
 } from "./fetching.js";
 import { mergeItems, type MergedItem } from "./merge.js";
 import {
@@ -15,6 +15,7 @@ import {
 import { renderItems } from "./render.js";
 import { RestProvider } from "./rest/base.js";
 import { adapterFor } from "./rest/adapters.js";
+import { eligibleSlots, slotTier } from "./keys.js";
 import { FLAKY_SCORE, RotationStore } from "./rotation.js";
 import {
   autoCandidates, autoMode, fetchCandidates, imageCandidates,
@@ -51,7 +52,12 @@ interface ChainSpec {
   usable?: (output: unknown) => boolean;
   /** Extra failures worth trying the next provider for, beyond availability failures. */
   failover?: (error: unknown) => boolean;
+  /** Rewrite a provider's answer before it is judged; may throw to move on. */
+  transform?: (output: unknown, provider: string) => unknown;
 }
+
+/** Readers that return their JSON envelope as text. */
+const ENVELOPE_READERS = new Set(["tavily", "firecrawl"]);
 
 export interface ToolkitOptions {
   profile?: ToolkitProfile;
@@ -190,9 +196,10 @@ export class SearchToolkit {
         auto: config.auto,
         integration: config.integration.kind,
         ...((failureScores.get(name) ?? 0) >= 0.05 ? { recentFailure: Number((failureScores.get(name) ?? 0).toFixed(2)) } : {}),
+        ...(config.strategy && config.strategy !== "round_robin" ? { strategy: config.strategy } : {}),
         rotation: verbose
-          ? this.rotation.status(name, config.keys)
-          : compactRotation(this.rotation.status(name, config.keys)),
+          ? annotateSlots(config, this.rotation.status(name, config.keys))
+          : compactRotation(annotateSlots(config, this.rotation.status(name, config.keys))),
       })),
       toolCount: tools.length,
       cache: this.cache ? { entries: this.cache.entries() } : { enabled: false },
@@ -372,6 +379,7 @@ export class SearchToolkit {
       emptyError: "No automatic fetch provider is available",
       usable: (candidate) => isUsableFetchText(bodyText(candidate)),
       failover: isPageFailure,
+      transform: (candidate, provider) => ENVELOPE_READERS.has(provider) ? readableFetchOutput(candidate) : candidate,
     });
     if (succeeded(output)) this.cache?.set(key, { output, requestChars }, this.cacheTtl.fetch);
     return truncateBody(output, maxChars, truncateOpts);
@@ -384,18 +392,24 @@ export class SearchToolkit {
         if (!entry.binding) return false;
         return this.config.providers[entry.binding.provider]?.auto.includes(capability) === true;
       });
-    // Healthy providers first, then ones failing repeatedly right now, then ones with every key benched.
+    // Healthy providers first, then ones failing repeatedly right now, then ones left only with
+    // exhausted keys (worth one last try), then ones with every usable key benched.
     const scores = this.rotation.providerFailureScores();
     const ready: typeof matched = [];
     const flaky: typeof matched = [];
+    const sunk: typeof matched = [];
     const cooling: typeof matched = [];
     for (const entry of matched) {
-      const keys = this.config.providers[entry.binding.provider]?.keys ?? [];
-      if (keys.length > 0 && this.rotation.usableSlots(entry.binding.provider, keys).length === 0) cooling.push(entry);
-      else if ((scores.get(entry.binding.provider) ?? 0) >= FLAKY_SCORE) flaky.push(entry);
+      const provider = entry.binding.provider;
+      const config = this.config.providers[provider];
+      const keys = config?.keys ?? [];
+      const slots = config ? eligibleSlots(config, [entry.binding.upstreamName, entry.binding.exposed.name]) : undefined;
+      if (keys.length > 0 && this.rotation.usableSlots(provider, keys, slots).length === 0) {
+        (this.rotation.sunkSlots(provider, keys, slots).length ? sunk : cooling).push(entry);
+      } else if ((scores.get(provider) ?? 0) >= FLAKY_SCORE) flaky.push(entry);
       else ready.push(entry);
     }
-    return [...ready, ...flaky, ...cooling];
+    return [...ready, ...flaky, ...sunk, ...cooling];
   }
 
   /** Try candidates in order; move on only after a recognised availability failure or an unusable answer. */
@@ -409,7 +423,11 @@ export class SearchToolkit {
     for (const entry of eligible.slice(0, spec.maxProviders)) {
       const base = { provider: entry.binding.provider, tool: entry.binding.exposed.name, candidateRank: entry.candidateRank };
       try {
-        const output = await entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) });
+        const raw = await entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) });
+        if (isToolErrorResult(raw)) {
+          throw new ToolResultError(textOfContent(bodyBlocks(raw)).slice(0, 500), bodyBlocks(raw));
+        }
+        const output = spec.transform ? spec.transform(raw, entry.binding.provider) : raw;
         if (isToolErrorResult(output)) {
           throw new ToolResultError(textOfContent(bodyBlocks(output)).slice(0, 500), bodyBlocks(output));
         }
@@ -560,17 +578,27 @@ export class SearchToolkit {
       ?? providerTools.find((item) => /search/i.test(item.exposed.name))
       ?? providerTools[0];
     if (!selected || selected.provider !== provider) throw new Error(`No callable tool found for provider: ${provider}`);
-    const count = Math.min(Number(args.calls ?? config.keys.length), Math.max(config.keys.length, 1), 12);
+    // Each call is pinned to one slot, walking the pool, so sticky and drain pools are probed key by key.
+    const requestedSlot = typeof args.slot === "number" && Number.isInteger(args.slot) ? args.slot : undefined;
+    if (requestedSlot !== undefined && (requestedSlot < 0 || requestedSlot >= config.keys.length)) {
+      throw new Error(`${provider} has no key slot ${requestedSlot}`);
+    }
+    const slots = requestedSlot !== undefined
+      ? [requestedSlot]
+      : config.keys.length
+        ? Array.from({ length: Math.min(Number(args.calls ?? config.keys.length), config.keys.length, 12) }, (_, index) => index)
+        : [undefined];
     const attempts: unknown[] = [];
-    for (let index = 0; index < count; index += 1) {
+    for (const [index, slot] of slots.entries()) {
+      const options = slot === undefined ? {} : { slot };
       try {
-        const output = await selected.call(probeArguments(selected.exposed, String(args.query ?? ""), 1));
-        attempts.push({ index: index + 1, ok: true, meta: extractMeta(output) });
+        const output = await selected.call(probeArguments(selected.exposed, String(args.query ?? ""), 1), options);
+        attempts.push({ index: index + 1, ...(slot !== undefined ? { slot } : {}), ok: !isToolErrorResult(output), meta: extractMeta(output) });
       } catch (error) {
-        attempts.push({ index: index + 1, ok: false, error: cleanError(error) });
+        attempts.push({ index: index + 1, ...(slot !== undefined ? { slot } : {}), ok: false, error: cleanError(error) });
       }
     }
-    return result({ provider, tool: selected.exposed.name, attempts, status: this.rotation.status(provider, config.keys) });
+    return result({ provider, tool: selected.exposed.name, attempts, status: annotateSlots(config, this.rotation.status(provider, config.keys)) });
   }
 }
 
@@ -609,22 +637,43 @@ function markCached(output: unknown, ageMs: number): unknown {
   return { ...record, content: [routeBlock(route, auto), ...body], structuredContent: { ...record.structuredContent, searchAuto: auto } };
 }
 
-function compactRotation(rotation: ReturnType<RotationStore["status"]>): unknown {
-  const counts = { healthy: 0, cooldown: 0, disabled: 0 };
+type SlotStatus = ReturnType<RotationStore["status"]>;
+
+/** Add each slot's plan and label from the config; neither is secret. */
+function annotateSlots(config: ProviderConfig, rotation: SlotStatus): SlotStatus {
+  return {
+    ...rotation,
+    keys: rotation.keys.map((key) => {
+      const tier = slotTier(config, key.slot);
+      const label = config.keyMeta?.[key.slot]?.label;
+      return { ...key, ...(tier ? { tier } : {}), ...(label ? { label } : {}) };
+    }),
+  };
+}
+
+function compactRotation(rotation: SlotStatus): unknown {
+  const counts = { healthy: 0, cooldown: 0, disabled: 0, exhausted: 0 };
   const unhealthySlots: Array<Record<string, unknown>> = [];
+  let remaining: number | undefined;
   for (const key of rotation.keys) {
     const details = key.status as Record<string, unknown>;
-    const status = details.status === "cooldown" || details.status === "disabled" ? details.status : "healthy";
+    if (typeof details.quota_remaining === "number") remaining = (remaining ?? 0) + details.quota_remaining;
+    const status = details.status === "cooldown" || details.status === "disabled" || details.status === "exhausted"
+      ? details.status
+      : "healthy";
     counts[status] += 1;
     if (status !== "healthy") {
       const { slot: _duplicateSlot, ...health } = details;
-      unhealthySlots.push({ slot: key.slot, masked: key.masked, ...health });
+      const { tier, label } = key as { tier?: string; label?: string };
+      unhealthySlots.push({ slot: key.slot, masked: key.masked, ...(tier ? { tier } : {}), ...(label ? { label } : {}), ...health });
     }
   }
   return {
     keyCount: rotation.keyCount,
     nextSlot: rotation.nextSlot,
     ...counts,
+    // Sum of the last `search-toolkit quota` readings, in the provider's unit.
+    ...(remaining !== undefined ? { remaining: Number(remaining.toFixed(2)) } : {}),
     unhealthySlots,
   };
 }

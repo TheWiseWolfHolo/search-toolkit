@@ -19,7 +19,8 @@ test("Brave exposes Web, News, Images, and LLM Context as distinct tools", () =>
   const schema = context.inputSchema as { properties?: Record<string, Record<string, unknown>> };
   assert.equal(schema.properties?.maximumNumberOfTokens?.minimum, 1024);
   assert.equal(schema.properties?.maximumNumberOfTokens?.maximum, 32768);
-  assert.equal(schema.properties?.maximumNumberOfTokens?.default, 4096);
+  assert.equal(schema.properties?.maximumNumberOfTokens?.default, 8192);
+  assert.equal(schema.properties?.query?.maxLength, 600);
   assert.deepEqual(schema.properties?.contextThresholdMode?.enum, ["disabled", "strict", "balanced", "lenient"]);
   assert.equal(context.annotations?.readOnlyHint, true);
 });
@@ -78,7 +79,7 @@ test("Brave LLM Context uses the official POST contract", async () => {
       search_lang: "en",
       count: 12,
       maximum_number_of_urls: 6,
-      maximum_number_of_tokens: 4096,
+      maximum_number_of_tokens: 8192,
       maximum_number_of_snippets: 24,
       context_threshold_mode: "strict",
       maximum_number_of_tokens_per_url: 1024,

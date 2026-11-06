@@ -41,12 +41,13 @@ Three tools cover almost every lookup. Each picks a provider, falls back when on
 | Independent web and news index (`extraSnippets`, `goggles`) and LLM-ready grounding chunks | Brave Web, News, Images, and LLM Context |
 | Web + News in one call, live `knowledge` cards, `full_page` Markdown, URL extraction | You.com Search and Contents |
 | Natural-language objectives with ranked excerpts, batch URL extraction, semantic image search | Parallel Search, Extract, and Images |
-| Fast search with long query-relevant highlights | Octen Search |
+| Fast search with long query-relevant highlights; URL extraction | Octen Search and Extract |
 | Managed extraction, mapping, crawling, and research | Tavily official MCP |
 | Search, scrape, crawl, map, and structured extraction | Firecrawl official MCP |
 | Sourced answers and research jobs | LinkUp official MCP |
 | Manual general or vertical search, parallel batches, URL extraction | AnySearch official MCP |
 | Native Web + X search with model synthesis and image or video understanding; `depth` up to 16 research agents | Grok / xAI Responses |
+| Chromium-rendered page reading, free up to 1,000 URLs a day | TinyFish Fetch |
 | Compact search, manual only | Querit, TinyFish Search, Jina Search |
 | Chinese local search with explicit quota use, manual only | Doubao |
 
@@ -85,7 +86,8 @@ Optional top-level settings:
 - `profile`: `full` (default), `curated`, or `lean`; see [Context cost](#context-cost). `--profile` and `SEARCH_TOOLKIT_PROFILE` override it.
 - `cache`: `enabled` (default `true`), `searchTtlSeconds` (900), `newsTtlSeconds` (300, for `mode: current`), `fetchTtlSeconds` (1800); see [Cache](#cache).
 - `shaping`: `maxDescriptionChars` (default 700) and `maxParamDescriptionChars` (default 220); `0` keeps upstream text untouched.
-- Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (replacement descriptions keyed by upstream tool name). Firecrawl defaults to seven retrieval tools; `toolPolicy.allow: ["*"]` exposes its whole catalog.
+- Per provider, `strategy`, `defaultTier`, `paidTools`, and annotated keys; see [Key rotation](#key-rotation).
+- Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (replacement descriptions keyed by upstream tool name). Firecrawl defaults to nine retrieval tools (scrape, map, search, crawl, crawl status, developer search, paper search, government search, credit usage); AnySearch hides `score`, a feedback tool whose description asks to be called after every search; `toolPolicy.allow: ["*"]` exposes its whole catalog.
 
 Version 1 configs (`automatic` / `manualOnly`) still load. To upgrade one:
 
@@ -106,7 +108,8 @@ node dist/src/cli.js fetch https://example.com/a https://example.com/b --max-cha
 node dist/src/cli.js call serper_scholar '{"query":"retrieval augmented generation survey","limit":5}'
 node dist/src/cli.js tools --profile curated  # names; --json for full schemas
 node dist/src/cli.js status --verbose         # masked key health, cool-downs, last errors
-node dist/src/cli.js reset brave              # clear key cool-downs (optionally one slot)
+node dist/src/cli.js reset brave              # clear key cool-downs and exhaustion (optionally one slot)
+node dist/src/cli.js quota                    # remaining credit per key, from each provider's billing API
 node dist/src/cli.js cache-clear
 ```
 
@@ -185,23 +188,58 @@ node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/provid
 
 Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. `allowedArgumentValues` limits argument values for every tool, for example `{"depth":["fast","deep"]}` keeps a shared token off 16-agent Grok research; an omitted argument is allowed. Put public deployments behind HTTPS; provider keys stay on the server.
 
-The HTTP endpoint uses MCP SDK 1.32.1, limits JSON requests to 100 KiB and tool arguments to 10,000 total array elements and object keys before schema validation. Each session has its own server and transport. These HTTP limits do not apply to STDIO.
+The HTTP endpoint uses MCP SDK 1.32.2, limits JSON requests to 100 KiB and tool arguments to 10,000 total array elements and object keys before schema validation. Each session has its own server and transport. These HTTP limits do not apply to STDIO.
 
 ## Key rotation
 
-Each request takes one healthy key from the provider's pool. The cursor persists across restarts and is shared by concurrent processes through SQLite. Health is recorded per key fingerprint, so reordering or trimming a pool does not misattribute history.
+Each request takes one key from the provider's pool. How the pool is walked is set per provider with `strategy`:
+
+| `strategy` | Picks | Suits |
+| --- | --- | --- |
+| `round_robin` (default) | The next healthy key after the last one used | Free monthly quotas and per-key rate limits (Serper, Tavily, Exa) |
+| `sticky` | The same key until it fails, then the next healthy one, and stays there | Upstream MCP servers, where one key means one session or child process (AnySearch) |
+| `drain` | The first healthy key in configured order | Spending one balance before another: an old prepaid balance, or a monthly allowance before bought credits (Parallel, Firecrawl) |
+
+The cursor persists across restarts and is shared by concurrent processes through SQLite. Health is recorded per key fingerprint, so reordering or trimming a pool does not misattribute history.
 
 | Outcome | Effect on the key | Retry |
 | --- | --- | --- |
-| Success | Strikes cleared | |
+| Success | Strikes cleared; an exhausted key is healthy again | |
+| Out of credit or quota (`402`, Tavily `432`/`433`, or wording such as "Insufficient balance" or `spend_cap_exceeded` under any status) | Exhausted: benched 30 min, 6 h, then 24 h, and afterwards kept behind every healthy key | Next key; automatic routes move on when the pool is spent |
+| Plan limit ("not allowed for free accounts", "Payment method required") | Not benched | A `paid` key if the pool has one, otherwise the next provider |
 | `401` / `403` | Benched 1 h, then 6 h, then 24 h | Up to 3 keys |
-| `402` | Benched 30 min, then 6 h, then 24 h | Up to 3 keys |
 | `429` | Benched 1, 5, then 15 min, or for `Retry-After` | Up to 3 keys |
 | `5xx` or dropped connection | Not benched | One more key |
 | Timeout | Not benched | None; the route moves to the next provider |
 | `400` / `404` / `422`, an upstream tool's own error, or the status of a page being read | Not benched | None |
 
-Benches are never permanent. Only error text clearly about the key (invalid key, quota, balance, rate limit) counts as a key fault; a site answering a reader with 403 does not. A pool whose keys are all benched fails at once and says when the first recovers; `reset <provider>` clears benches by hand. `providers.json`, raw keys, and state are ignored by Git, and output shows only masked key slots.
+An exhausted key is used again when nothing healthy is left, and under `drain` once per window, so a first key whose monthly allowance has reset is spent first again. Benches are never permanent. Only error text clearly about the key (invalid key, quota, balance, rate limit) counts as a key fault; a site answering a reader with 403 does not. A pool whose keys are all benched fails at once and says when the first recovers; `reset <provider> [slot]` clears benches and exhaustion by hand.
+
+### Plans and per-key rules
+
+A key is a string or an object, and both forms can be mixed in one pool:
+
+```json
+"octen": {
+  "enabled": true,
+  "auto": ["search"],
+  "defaultTier": "free",
+  "paidTools": ["octen_extract"],
+  "keys": [
+    "plain-key",
+    { "key": "another-key", "tier": "paid", "label": "card on file", "denyTools": ["octen_search"] }
+  ],
+  "integration": { "kind": "rest", "adapter": "octen" }
+}
+```
+
+`tier` (`free` or `paid`) falls back to `defaultTier`. A tool listed in `paidTools` runs only on paid keys; `allowTools` and `denyTools` limit a single key (upstream or exposed tool names). When no key may run a tool, the call fails before any request, and automatic routes move to the next provider. A call limited to some keys does not move a sticky pool's pointer. `search_pool_status` and `config` show each slot's tier and label, never the key.
+
+### Balances
+
+`search-toolkit quota [provider]` reads the remaining credit of every key from the provider's own billing API, which costs nothing: Serper `/account`, Tavily `/usage`, Firecrawl `/v2/team/credit-usage`, LinkUp `/v1/credits/balance`, You.com `/v1/billing/account_balance`, TinyFish `/v1/wallet`. Each reading is stored: a key at zero is marked exhausted, an exhausted key with credit again (a recharge or a new billing period) returns to rotation, and `search_pool_status` shows the last reading and its age. It only runs when asked. `search_rotation_probe` makes one live call on each slot (or `slot`), so sticky and drain pools are probed key by key.
+
+`providers.json`, raw keys, and state are ignored by Git, and output shows only masked key slots.
 
 ## Skill
 

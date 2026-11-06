@@ -2,18 +2,24 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AutoCapability, ProviderConfig, ToolkitConfig } from "./types.js";
+import type { AutoCapability, KeyMeta, KeyStrategy, KeyTier, ProviderConfig, ToolkitConfig } from "./types.js";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const CAPABILITIES: readonly AutoCapability[] = ["search", "images", "fetch"];
 // Providers whose upstream tools can fetch a known URL; granted "fetch" when migrating a v1 config.
-const FETCH_CAPABLE = new Set(["exa", "tavily", "firecrawl", "linkup", "anysearch"]);
+const FETCH_CAPABLE = new Set(["exa", "tavily", "firecrawl", "linkup", "anysearch", "parallel", "you"]);
+const STRATEGIES: readonly KeyStrategy[] = ["round_robin", "sticky", "drain"];
+const TIERS: readonly KeyTier[] = ["free", "paid"];
+const KEY_FIELDS = new Set(["key", "tier", "label", "allowTools", "denyTools"]);
 // Provider options that some adapter actually reads. Everything else is dead weight.
 const CONSUMED_OPTIONS: Record<string, readonly string[]> = {
   grok: ["model", "multiAgentModel", "reasoningEffort", "systemPrompt", "customUrl"],
 };
-const PROVIDER_FIELDS = new Set(["enabled", "automatic", "manualOnly", "auto", "keys", "integration", "toolPolicy", "options"]);
+const PROVIDER_FIELDS = new Set([
+  "enabled", "automatic", "manualOnly", "auto", "keys", "integration", "toolPolicy", "options",
+  "strategy", "defaultTier", "paidTools",
+]);
 
 export interface LoadedConfig {
   config: ToolkitConfig;
@@ -94,10 +100,67 @@ function normalizeProvider(name: string, raw: Record<string, unknown>, version: 
   const consumed = integration?.kind === "rest" ? CONSUMED_OPTIONS[integration.adapter] ?? [] : [];
   const unused = Object.keys(options ?? {}).filter((key) => !consumed.includes(key));
   if (unused.length) notes.push(`${name}.options.{${unused.join(",")}} is never read by this server`);
-  const provider: ProviderConfig = { enabled: raw.enabled === true, auto, keys: raw.keys as string[], integration };
+  const { keys, keyMeta } = normalizeKeys(name, raw.keys, notes);
+  const provider: ProviderConfig = { enabled: raw.enabled === true, auto, keys, integration };
+  if (keyMeta.some((meta) => Object.keys(meta).length)) provider.keyMeta = keyMeta;
+  if (raw.strategy !== undefined) provider.strategy = raw.strategy as KeyStrategy;
+  if (raw.defaultTier !== undefined) provider.defaultTier = raw.defaultTier as KeyTier;
+  if (raw.paidTools !== undefined) provider.paidTools = raw.paidTools as string[];
   if (raw.toolPolicy !== undefined) provider.toolPolicy = raw.toolPolicy as NonNullable<ProviderConfig["toolPolicy"]>;
   if (options && Object.keys(options).length && consumed.length) provider.options = options;
   return provider;
+}
+
+/**
+ * A key is either its plain string or `{ key, tier?, label?, allowTools?, denyTools? }`.
+ * Both shapes become a plain key list plus parallel annotations.
+ */
+function normalizeKeys(name: string, raw: unknown, notes: string[]): { keys: string[]; keyMeta: KeyMeta[] } {
+  if (!Array.isArray(raw)) throw new Error(`${name}.keys must be an array`);
+  const keys: string[] = [];
+  const keyMeta: KeyMeta[] = [];
+  raw.forEach((entry, slot) => {
+    if (typeof entry === "string") {
+      keys.push(entry);
+      keyMeta.push({});
+      return;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof (entry as { key?: unknown }).key !== "string") {
+      throw new Error(`${name}.keys[${slot}] must be a string or an object with a string key`);
+    }
+    const record = entry as Record<string, unknown>;
+    for (const field of Object.keys(record)) {
+      if (!KEY_FIELDS.has(field)) notes.push(`${name}.keys[${slot}].${field} is not a recognised field and is ignored`);
+    }
+    const meta: KeyMeta = {};
+    if (record.tier !== undefined) {
+      if (!TIERS.includes(record.tier as KeyTier)) throw new Error(`${name}.keys[${slot}].tier must be "free" or "paid"`);
+      meta.tier = record.tier as KeyTier;
+    }
+    if (record.label !== undefined) {
+      if (typeof record.label !== "string") throw new Error(`${name}.keys[${slot}].label must be a string`);
+      meta.label = record.label;
+    }
+    for (const field of ["allowTools", "denyTools"] as const) {
+      if (record[field] === undefined) continue;
+      meta[field] = toolNames(record[field], `${name}.keys[${slot}].${field}`);
+    }
+    keys.push(record.key as string);
+    keyMeta.push(meta);
+  });
+  return { keys, keyMeta };
+}
+
+function toolNames(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(`${label} must contain non-blank tool names`);
+  }
+  return value as string[];
+}
+
+/** The written form of one key: a bare string unless it carries annotations. */
+function keyDocument(key: string, meta: KeyMeta | undefined): unknown {
+  return meta && Object.keys(meta).length ? { key, ...meta } : key;
 }
 
 /**
@@ -109,11 +172,14 @@ export function migrateConfig(raw: unknown): { document: Record<string, unknown>
   const { config, notes } = normalizeConfig(raw);
   const source = asRecord(raw, "config");
   const changes = notes.filter((note) => !note.startsWith("config uses the v1 format"));
-  if (source.version === 1) changes.unshift("version 1 → 2: automatic/manualOnly replaced by auto[] (exa, tavily, firecrawl, linkup, anysearch also get fetch where they were automatic or Firecrawl)");
+  if (source.version === 1) changes.unshift("version 1 → 2: automatic/manualOnly replaced by auto[] (exa, tavily, firecrawl, linkup, anysearch, parallel, you also get fetch where they were automatic or Firecrawl)");
   const providers = Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [name, {
     enabled: provider.enabled,
     auto: provider.auto,
-    keys: provider.keys,
+    ...(provider.strategy ? { strategy: provider.strategy } : {}),
+    ...(provider.defaultTier ? { defaultTier: provider.defaultTier } : {}),
+    keys: provider.keys.map((key, slot) => keyDocument(key, provider.keyMeta?.[slot])),
+    ...(provider.paidTools ? { paidTools: provider.paidTools } : {}),
     integration: provider.integration,
     ...(provider.toolPolicy ? { toolPolicy: provider.toolPolicy } : {}),
     ...(provider.options ? { options: provider.options } : {}),
@@ -161,6 +227,16 @@ function validateProvider(name: string, provider: ProviderConfig): void {
   }
   const unique = new Set(provider.keys.map((key) => key.trim()).filter(Boolean));
   if (unique.size !== provider.keys.length) throw new Error(`${name}.keys contains blanks or duplicates`);
+  if (provider.strategy !== undefined && !STRATEGIES.includes(provider.strategy)) {
+    throw new Error(`${name}.strategy must be one of ${STRATEGIES.join(", ")}`);
+  }
+  if (provider.defaultTier !== undefined && !TIERS.includes(provider.defaultTier)) {
+    throw new Error(`${name}.defaultTier must be "free" or "paid"`);
+  }
+  if (provider.paidTools !== undefined) toolNames(provider.paidTools, `${name}.paidTools`);
+  if (provider.keyMeta !== undefined && provider.keyMeta.length !== provider.keys.length) {
+    throw new Error(`${name}.keyMeta must match keys`);
+  }
   for (const [policyName, values] of Object.entries(provider.toolPolicy ?? {})) {
     if (policyName === "descriptions") {
       if (!values || typeof values !== "object" || Array.isArray(values)
@@ -188,11 +264,23 @@ export function sanitizedConfig(config: ToolkitConfig): unknown {
         enabled: value.enabled,
         auto: value.auto,
         keyCount: value.keys.length,
+        ...(value.strategy ? { strategy: value.strategy } : {}),
+        ...tierCounts(value),
         integration: value.integration.kind,
         toolPolicy: value.toolPolicy,
       }]),
     ),
   };
+}
+
+/** How many keys sit on each plan, when any plan is known. Never includes key material. */
+function tierCounts(provider: ProviderConfig): { tiers?: Record<string, number> } {
+  const tiers: Record<string, number> = {};
+  provider.keys.forEach((_, slot) => {
+    const tier = provider.keyMeta?.[slot]?.tier ?? provider.defaultTier ?? "unset";
+    tiers[tier] = (tiers[tier] ?? 0) + 1;
+  });
+  return Object.keys(tiers).length === 1 && tiers.unset ? {} : { tiers };
 }
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {

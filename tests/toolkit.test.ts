@@ -226,7 +226,8 @@ test("autoCandidates translates domain filters, freshness, and maxCharsPerResult
     query: "mcp transport",
     maxResults: 7,
     mode: "fast",
-    maxAgeSeconds: 2592000,
+    // A publish-date filter; maxAgeSeconds would only bound cache staleness.
+    afterDate: new Date(Date.now() - 2_592_000_000).toISOString().slice(0, 10),
     maxCharsPerResult: 900,
     includeDomains: ["modelcontextprotocol.io", "github.com"],
     excludeDomains: ["reddit.com"],
@@ -241,12 +242,13 @@ test("autoCandidates translates domain filters, freshness, and maxCharsPerResult
     startPublishedDate: new Date(Date.now() - 2_592_000_000).toISOString().slice(0, 10),
   });
   assert.deepEqual(byName.get("brave_web_search"), {
-    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com) -site:reddit.com",
+    // site: keeps the path prefix; native filters get the host.
+    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com/modelcontextprotocol) -site:reddit.com",
     limit: 7,
     freshness: "pm",
   });
   assert.deepEqual(byName.get("serper_search"), {
-    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com) -site:reddit.com",
+    query: "mcp transport (site:modelcontextprotocol.io OR site:github.com/modelcontextprotocol) -site:reddit.com",
     limit: 7,
     tbs: "qdr:m",
   });

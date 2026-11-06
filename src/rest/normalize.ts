@@ -73,6 +73,8 @@ export function normalizeItem(value: unknown, options: NormalizeOptions = {}): S
   const scholarMeta = [
     typeof item.publicationInfo === "string" ? item.publicationInfo.trim() : "",
     typeof item.citedBy === "number" ? `Cited by ${item.citedBy}` : "",
+    // Serper Scholar names an open-access copy when one exists.
+    typeof item.pdfUrl === "string" && item.pdfUrl.trim() ? `PDF: ${item.pdfUrl.trim()}` : "",
   ].filter(Boolean).join(" · ");
   const combined = [scholarMeta, primaryText, ...extraSnippets].filter(Boolean).join("\n");
   return {

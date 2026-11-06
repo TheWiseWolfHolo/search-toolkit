@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { IntegrationConfig } from "./types.js";
@@ -57,8 +57,24 @@ export class ToolCatalogCache {
   }
 }
 
+/**
+ * Identity of an integration for the catalog cache. A local stdio server is
+ * often started by a fixed script path, so the script's modification time is
+ * folded in: upgrading the package in place then rediscovers its tools.
+ */
 export function integrationFingerprint(integration: IntegrationConfig): string {
-  return createHash("sha256").update(JSON.stringify(integration)).digest("hex").slice(0, 16);
+  const hash = createHash("sha256").update(JSON.stringify(integration));
+  if (integration.kind === "stdio_mcp") {
+    for (const arg of integration.args) {
+      if (!/\.[cm]?js$/i.test(arg)) continue;
+      try {
+        hash.update(`|${statSync(arg).mtimeMs}`);
+      } catch {
+        // not a local file (a package spec or a missing path): the config text alone identifies it
+      }
+    }
+  }
+  return hash.digest("hex").slice(0, 16);
 }
 
 export function toolsFingerprint(tools: Tool[]): string {

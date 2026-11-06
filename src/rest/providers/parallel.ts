@@ -1,7 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TargetPageError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import { endpointOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import {
   arrayArg, normalizeParallelImage, normalizeParallelItem, objectRecord, stringArg, stringValue,
 } from "../normalize.js";
@@ -34,7 +34,7 @@ export class ParallelAdapter implements RestAdapter {
         includeDomains: { type: "array", items: { type: "string" } },
         excludeDomains: { type: "array", items: { type: "string" } },
         afterDate: { type: "string", format: "date", description: "Only include content published on or after this YYYY-MM-DD date" },
-        maxAgeSeconds: { type: "integer", minimum: 0 },
+        maxAgeSeconds: { type: "integer", minimum: 600, description: "Max cached page age in seconds before a live fetch (not a publish-date filter; use afterDate)" },
         location: { type: "string", minLength: 2, maxLength: 2, description: "ISO 3166-1 alpha-2 country code" },
         sessionId: { type: "string", maxLength: 1000 },
         clientModel: { type: "string" },
@@ -86,6 +86,7 @@ export class ParallelAdapter implements RestAdapter {
           items: { type: "string", maxLength: 200 },
           description: "Concise keyword image queries; defaults to [query]",
         },
+        limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
         mode: {
           type: "string",
           enum: ["fast", "advanced"],
@@ -127,11 +128,12 @@ export class ParallelAdapter implements RestAdapter {
     const include = arrayArg(args, "includeDomains");
     const exclude = arrayArg(args, "excludeDomains");
     const afterDate = stringArg(args, "afterDate");
+    // Parallel ignores exclude_domains next to include_domains; an include list already decides.
     if (include.length) sourcePolicy.include_domains = include;
-    if (exclude.length) sourcePolicy.exclude_domains = exclude;
+    else if (exclude.length) sourcePolicy.exclude_domains = exclude;
     if (afterDate) sourcePolicy.after_date = afterDate;
     if (Object.keys(sourcePolicy).length) advanced.source_policy = sourcePolicy;
-    if (typeof args.maxAgeSeconds === "number") advanced.fetch_policy = { max_age_seconds: args.maxAgeSeconds };
+    if (typeof args.maxAgeSeconds === "number") advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
     if (typeof args.maxCharsPerResult === "number") advanced.excerpt_settings = { max_chars_per_result: args.maxCharsPerResult };
     const maxResults = typeof args.maxResults === "number"
       ? args.maxResults
@@ -141,8 +143,7 @@ export class ParallelAdapter implements RestAdapter {
     if (maxResults !== undefined) advanced.max_results = maxResults;
     if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
-    const base = baseUrlOf(config, "https://api.parallel.ai/v1/search");
-    const data = await requestJson(base, {
+    const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/search"), {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -183,8 +184,7 @@ export class ParallelAdapter implements RestAdapter {
       advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
     }
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
-    const base = baseUrlOf(config, "https://api.parallel.ai/v1/extract").replace(/\/v1\/search\/?$/, "/v1/extract");
-    const data = await requestJson(base, {
+    const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/extract"), {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -239,8 +239,7 @@ export class ParallelAdapter implements RestAdapter {
     if (typeof args.limit === "number") advanced.max_results = args.limit;
     if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
-    const base = baseUrlOf(config, "https://api.parallel.ai/v1/images/search").replace(/\/v1\/search\/?$/, "/v1/images/search");
-    const data = await requestJson(base, {
+    const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/images/search"), {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),

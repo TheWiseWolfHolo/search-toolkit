@@ -11,6 +11,7 @@ import { isRouteContentBlock, routeBlock } from "../src/provenance.js";
 import { RotationStore } from "../src/rotation.js";
 import { trimText } from "../src/shape.js";
 import { SearchToolkit } from "../src/toolkit.js";
+import type { ProviderConfig } from "../src/types.js";
 
 type Json = Record<string, unknown>;
 
@@ -25,9 +26,13 @@ function withStore(run: (store: RotationStore) => Promise<void>): Promise<void> 
 
 const KEYS = ["key-one-123456", "key-two-123456", "key-three-123456"];
 
+function pool(keys: string[], extra: Partial<ProviderConfig> = {}): ProviderConfig {
+  return { enabled: true, auto: [], keys, integration: { kind: "rest", adapter: "serper" }, ...extra };
+}
+
 async function countAttempts(store: RotationStore, error: unknown): Promise<number> {
   let calls = 0;
-  await assert.rejects(callWithRotation(store, "exa", KEYS, async () => {
+  await assert.rejects(callWithRotation(store, "exa", pool(KEYS), { tools: ["web_search_exa"] }, async () => {
     calls += 1;
     throw error;
   }));
