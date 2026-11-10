@@ -1,10 +1,15 @@
 import { TargetPageError, textOfContent } from "./errors.js";
-import { bodyBlocks, cleanError, isRouteContentBlock, routeBlock, type Route } from "./provenance.js";
+import { bodyBlocks, cleanError, isRouteContentBlock, routeBlock, updateAutoMetadata, type Route } from "./provenance.js";
 import type { AutoQuality } from "./routes.js";
 
 export interface TruncateOptions {
   offset?: number;
   section?: string;
+}
+
+interface FetchPage {
+  status: "readable" | "partial";
+  nextOffset?: number;
 }
 
 const MIN_FETCH_CHARS = 80;
@@ -16,10 +21,23 @@ export function bodyText(output: unknown): string {
 }
 
 export function isUsableFetchText(text: string): boolean {
-  const trimmed = text.trim();
+  // Some adapters prepend a Markdown title and source URL. These are not page text.
+  const trimmed = text.trim().replace(/^(?:#[^\n]*\n+)?URL: [^\n]*(?:\n+|$)/, "");
   if (trimmed.length < MIN_FETCH_CHARS) return false;
   if (trimmed.length < 1_200 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
   return true;
+}
+
+export function isUsableFetchResult(output: unknown): boolean {
+  const structured = (output as {
+    structuredContent?: { provider?: string; data?: { results?: Array<{ full_content?: unknown }> } };
+  } | undefined)?.structuredContent;
+  if (structured?.provider === "parallel") {
+    // Extract returns excerpts separately; their length does not make them the page body.
+    const body = structured.data?.results?.[0]?.full_content;
+    return typeof body === "string" && isUsableFetchText(body);
+  }
+  return isUsableFetchText(bodyText(output));
 }
 
 /**
@@ -115,6 +133,7 @@ export function combineBatchFetch(
 ): unknown {
   const routes: Array<Route & { url: string }> = [];
   const failed: Array<{ url: string; error: string }> = [];
+  const pages: Array<FetchPage & { url: string }> = [];
   const sections: string[] = [];
   settled.forEach((outcome, index) => {
     const url = urls[index] as string;
@@ -125,24 +144,27 @@ export function combineBatchFetch(
     }
     const value = outcome.value as {
       content?: Array<{ type: string; text?: string }>;
-      structuredContent?: { route?: Route };
+      structuredContent?: { route?: Route; searchAuto?: { page?: FetchPage } };
     };
     const route: Route = value?.structuredContent?.route ?? { provider: "unknown", tool: "fetch_auto", upstreamTool: "fetch_auto" };
     routes.push({ url, ...route });
+    const page = value.structuredContent?.searchAuto?.page ?? { status: "readable" };
+    pages.push({ url, ...page });
     const text = bodyText(value).trim();
-    sections.push(`=== [${index + 1}/${urls.length}] ${url} (${String(route.provider ?? "unknown")}) ===\n${text}`);
+    sections.push(`=== [${index + 1}/${urls.length}] ${url} (${route.provider}, ${page.status}) ===\n${text}`);
   });
   if (routes.length === 0) {
     throw new Error(`fetch_auto failed for all ${urls.length} URLs: ${failed.map((f) => `${f.url}: ${f.error}`).join("; ")}`);
   }
   const primaryRoute = routes[0] as Route & { url: string };
-  const auto = { mode: "fetch", quality, batch: { total: urls.length, succeeded: routes.length, routes, failed } };
+  const partial = pages.filter((page) => page.status === "partial").map((page) => page.url);
+  const auto = { mode: "fetch", quality, batch: { total: urls.length, succeeded: pages.length - partial.length, partial, routes, failed } };
   return {
     content: [
       routeBlock(primaryRoute, auto),
       { type: "text", text: sections.join("\n\n") },
     ],
-    structuredContent: { route: primaryRoute, searchAuto: auto, result: { urls, routes, failed } },
+    structuredContent: { route: primaryRoute, searchAuto: auto, result: { urls, routes, pages, failed } },
     _meta: { searchToolkit: { route: primaryRoute, auto } },
   };
 }
@@ -192,7 +214,7 @@ function filterTextBySection(text: string, sectionQuery: string): string {
 }
 
 /** Cap the readable text of a result, supporting optional section filtering and character offset. */
-export function truncateBody(output: unknown, maxChars: number, options: TruncateOptions = {}): unknown {
+export function truncateBody(output: unknown, maxChars: number, options: TruncateOptions = {}, status?: FetchPage["status"]): unknown {
   if (!output || typeof output !== "object") return output;
   const record = output as { content?: unknown };
   if (!Array.isArray(record.content)) return output;
@@ -220,12 +242,15 @@ export function truncateBody(output: unknown, maxChars: number, options: Truncat
     remaining = 0;
     return { ...text, text: kept };
   });
+  const nextOffset = dropped > 0 && status !== "partial" ? Math.max(0, Math.floor(options.offset ?? 0)) + maxChars : undefined;
   if (dropped > 0) {
-    const nextOffset = (options.offset && options.offset > 0 ? Math.floor(options.offset) : 0) + maxChars;
     content.push({
       type: "text",
-      text: `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`,
+      text: nextOffset !== undefined
+        ? `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`
+        : `…[partial response trimmed by ${dropped} characters]`,
     });
   }
-  return { ...(output as object), content };
+  const clipped = { ...record, content };
+  return status ? updateAutoMetadata(clipped, { page: { status, ...(nextOffset !== undefined ? { nextOffset } : {}) } }) : clipped;
 }

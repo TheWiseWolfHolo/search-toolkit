@@ -267,7 +267,7 @@ test("search_auto max quality falls to Parallel Advanced without Exa and reports
   let requestBody: Record<string, unknown> = {};
   globalThis.fetch = async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(JSON.stringify({ search_id: "search-id", results: [] }), {
+    return new Response(JSON.stringify({ search_id: "search-id", results: [{ url: "https://example.com/", title: "Example" }] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -331,7 +331,7 @@ test("search_auto tries one compatible retrieval provider after an availability 
     urls.push(url);
     if (url.includes("parallel.ai")) return new Response("temporary", { status: 503 });
     youBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(JSON.stringify({ results: { web: [], news: [] } }), {
+    return new Response(JSON.stringify({ results: { web: [{ url: "https://example.com/", title: "Example" }], news: [] } }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });

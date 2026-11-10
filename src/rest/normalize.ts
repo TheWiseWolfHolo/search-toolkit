@@ -155,6 +155,7 @@ export function extractUpstreamSearchItems(upstreamTool: string, output: unknown
 
   const fromStructured = itemsFromObject(record.structuredContent);
   if (fromStructured?.length) return fromStructured;
+  let foundEmptyList = fromStructured?.length === 0;
 
   const content = Array.isArray(record.content) ? record.content : [];
   const texts = content
@@ -162,7 +163,7 @@ export function extractUpstreamSearchItems(upstreamTool: string, output: unknown
     .filter((block) => block.type === "text" && typeof block.text === "string")
     .map((block) => String(block.text).trim())
     .filter(Boolean);
-  if (!texts.length) return undefined;
+  if (!texts.length) return fromStructured;
 
   for (const text of texts) {
     if (text.startsWith("{") || text.startsWith("[")) {
@@ -171,6 +172,7 @@ export function extractUpstreamSearchItems(upstreamTool: string, output: unknown
         if (parsed && typeof parsed === "object" && "searchToolkitRoute" in (parsed as Record<string, unknown>)) continue;
         const items = itemsFromObject(parsed);
         if (items?.length) return items;
+        if (items?.length === 0) foundEmptyList = true;
       } catch {
         // Not JSON; try structured text parsing below.
       }
@@ -180,7 +182,7 @@ export function extractUpstreamSearchItems(upstreamTool: string, output: unknown
   const combined = texts
     .filter((text) => !text.startsWith('{"searchToolkitRoute"'))
     .join("\n\n");
-  return parseTitleUrlBlocks(combined) ?? parseMarkdownResultBlocks(combined);
+  return parseTitleUrlBlocks(combined) ?? parseMarkdownResultBlocks(combined) ?? (foundEmptyList ? [] : undefined);
 }
 
 /** AnySearch-style Markdown: `### 1. Title`, then `- **URL**: …`, then bullet text ending in `date: …`. */
@@ -204,18 +206,21 @@ function parseMarkdownResultBlocks(text: string): SearchItem[] | undefined {
 
 function itemsFromObject(value: unknown): SearchItem[] | undefined {
   if (Array.isArray(value)) {
+    if (!value.length) return [];
     const items = value.map((entry) => normalizeItem(entry)).filter((item) => Boolean(item.url));
     return items.length ? items : undefined;
   }
   const obj = objectRecord(value);
+  let foundEmptyList = false;
   for (const key of ["results", "items", "data", "organic", "web"]) {
     const candidate = obj[key];
     if (Array.isArray(candidate)) {
+      if (!candidate.length) foundEmptyList = true;
       const items = candidate.map((entry) => normalizeItem(entry)).filter((item) => Boolean(item.url));
       if (items.length) return items;
     }
   }
-  return undefined;
+  return foundEmptyList ? [] : undefined;
 }
 
 function parseTitleUrlBlocks(text: string): SearchItem[] | undefined {

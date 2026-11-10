@@ -43,22 +43,46 @@ function modelVisibleAuto(auto: Record<string, unknown>): Record<string, unknown
     }
   }
   if (crossCheck && typeof crossCheck === "object") {
-    const check = crossCheck as { routes?: Array<{ provider?: string }>; failed?: unknown; corroborated?: unknown };
+    const check = crossCheck as {
+      routes?: Array<{ provider?: string }>; failed?: unknown; empty?: unknown; status?: unknown; corroborated?: unknown;
+    };
     visible.crossCheck = {
       providers: (check.routes ?? []).map((item) => item.provider),
       ...(Array.isArray(check.failed) && check.failed.length ? { failed: check.failed } : {}),
+      ...(Array.isArray(check.empty) && check.empty.length ? { empty: check.empty } : {}),
+      status: check.status,
       corroborated: check.corroborated,
     };
   }
   if (batch && typeof batch === "object") {
-    const summary = batch as { total?: number; succeeded?: number; failed?: Array<{ url?: string }> };
+    const summary = batch as { total?: number; succeeded?: number; partial?: string[]; failed?: Array<{ url?: string }> };
     visible.batch = {
       total: summary.total,
       succeeded: summary.succeeded,
+      ...(summary.partial?.length ? { partial: summary.partial } : {}),
       ...(summary.failed?.length ? { failed: summary.failed.map((item) => item.url) } : {}),
     };
   }
   return visible;
+}
+
+/** Update the same route metadata in the text, structured result, and MCP _meta. */
+export function updateAutoMetadata(output: unknown, fields: Record<string, unknown>): unknown {
+  const record = output as {
+    content?: unknown[];
+    structuredContent?: { route?: Route; searchAuto?: Record<string, unknown> };
+    _meta?: { searchToolkit?: Record<string, unknown> };
+  } | undefined;
+  const route = record?.structuredContent?.route;
+  if (!route || !Array.isArray(record?.content)) return output;
+  const auto = { ...record.structuredContent?.searchAuto, ...fields };
+  const body = isRouteContentBlock(record.content[0]) ? record.content.slice(1) : record.content;
+  return {
+    ...record,
+    content: [routeBlock(route, auto), ...body],
+    structuredContent: { ...record.structuredContent, searchAuto: auto },
+    _meta: { ...record._meta, searchToolkit: { ...record._meta?.searchToolkit, auto } },
+  };
 }
 
 export function attachRouteMetadata(

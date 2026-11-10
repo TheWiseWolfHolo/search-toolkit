@@ -1,6 +1,6 @@
 {
   "name": "@thewisewolfholo/search-toolkit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Official-first web tools for AI agents with multi-key rotation, MCP, CLI, and Agent Skills.",
   "type": "module",
   "license": "MIT",

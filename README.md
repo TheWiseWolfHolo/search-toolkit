@@ -150,11 +150,15 @@ Each result starts with one compact route block, then readable text:
 
 `attempts` (such as `["parallel_search:429", "you_search:success"]`) appears only when a fallback happened, and `"cached":"4m"` only when the answer was reused. Excerpts are bounded, lose page furniture (copy buttons, anchors, table rules, image and link syntax), and keep the sentences that mention the query when they are too long. Image results list the image, thumbnail, source page, and publisher.
 
+An empty search list advances to the next provider within the attempt limit. `crossCheck.status` is `complete` when both providers found results, `partial` when one did, or `unavailable` when a cross-check could not be completed. `foundBy` lists which providers found the same URL.
+
+`fetch_auto` marks pages with substantial body text as `readable` and fragments as `partial`. A batch counts only readable pages in `succeeded` and lists retrieval errors in `failed`. For clipped readable text, use `nextOffset` to continue reading the same URL. Batch results show the continuation beside the corresponding page.
+
 Over MCP only `content` and `_meta` are sent. Claude Code and other clients show `structuredContent` to the model instead of `content` when both are present, which would replace the readable text with raw JSON, and upstream `outputSchema` declarations are dropped for the same reason. The full structured result is available from the CLI with `--json`.
 
 ### Cache
 
-`search_auto`, `search_images`, and `fetch_auto` keep successful answers for a short time in the shared state database, so a search or page repeated by another turn, agent, or client within the window costs no provider call. A cached page also serves later `offset` and `section` reads of the same document. Failures and thin fetch fallbacks are never cached. Turn it off with `cache.enabled: false`, `SEARCH_TOOLKIT_CACHE=off`, or `--no-cache`.
+`search_auto`, `search_images`, and `fetch_auto` keep successful answers for a short time in the shared state database, so a search or page repeated by another turn, agent, or client within the window costs no provider call. A cached page also serves later `offset` and `section` reads of the same document. Empty searches, two-provider checks with missing results, and fragment-only reads skip the cache. Turn it off with `cache.enabled: false`, `SEARCH_TOOLKIT_CACHE=off`, or `--no-cache`.
 
 ### Result hygiene and provider health
 

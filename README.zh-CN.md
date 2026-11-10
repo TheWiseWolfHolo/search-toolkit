@@ -150,11 +150,15 @@ default_tools_approval_mode = "writes"
 
 只有发生降级时才会出现 `attempts`（形如 `["parallel_search:429", "you_search:success"]`），只有复用缓存时才会出现 `"cached":"4m"`。摘录有长度上限，会去掉复制按钮、锚点、表格分隔线、图片和链接语法这类页面残渣，过长时保留提到查询词的句子。图片结果会列出原图、缩略图、来源页面和发布方。
 
+搜索遇到空列表会在尝试次数内换下一家。`crossCheck.status` 为 `complete` 时两家都有结果，为 `partial` 时只有一家有结果，为 `unavailable` 时未完成交叉搜索。`foundBy` 列出找到同一 URL 的 Provider。
+
+`fetch_auto` 将读到足量正文的页面标为 `readable`，只有片段的页面标为 `partial`。批量结果的 `succeeded` 只统计前者，`failed` 列出读取失败的 URL。正文被裁剪时，可用 `nextOffset` 作为同一 URL 的续读位置。批量结果会在对应页面旁显示续读位置。
+
 通过 MCP 只发送 `content` 和 `_meta`。Claude Code 等客户端在两者都有时会把 `structuredContent` 交给模型而丢掉 `content`，可读正文就会变成原始 JSON；上游声明的 `outputSchema` 也因此去掉。完整的结构化结果可以用 CLI 的 `--json` 查看。
 
 ### 缓存
 
-`search_auto`、`search_images`、`fetch_auto` 的成功结果会在共享状态库里保留一小段时间。窗口内另一轮对话、另一个 agent 或另一个客户端重复同样的搜索或抓取，不再调用 Provider。抓过的页面还能直接服务同一文档后续的 `offset` 和 `section` 读取。失败和内容过少的抓取不会缓存。关闭方法是设 `cache.enabled: false`、`SEARCH_TOOLKIT_CACHE=off`，或在 CLI 加 `--no-cache`。
+`search_auto`、`search_images`、`fetch_auto` 的成功结果会在共享状态库里保留一小段时间。窗口内另一轮对话、另一个 agent 或另一个客户端重复同样的搜索或抓取，不再调用 Provider。抓过的页面还能直接服务同一文档后续的 `offset` 和 `section` 读取。空搜索、两家都参与但没有都找到结果的交叉搜索，以及只有片段的读取会跳过缓存。关闭方法是设 `cache.enabled: false`、`SEARCH_TOOLKIT_CACHE=off`，或在 CLI 加 `--no-cache`。
 
 ### 结果去重与 Provider 健康度
 

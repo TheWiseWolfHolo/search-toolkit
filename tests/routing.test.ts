@@ -89,6 +89,7 @@ test("fetch_auto returns the fullest thin answer rather than failing when nothin
     const output = await toolkit.callTool("fetch_auto", { url: "https://example.com/page" });
     assert.match(text(output), /a bit more text/);
     assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
+    assert.deepEqual(autoMeta(output).page, { status: "partial" });
   });
 });
 
@@ -139,7 +140,8 @@ test("fetch_auto stops at a missing page but moves past a blocked page or an ava
     assert.equal((route(output).searchToolkitRoute as Json).provider, "tavily");
     // The fallback is visible to the model; a first-try success is not spelled out.
     assert.deepEqual(route(output).searchToolkitAuto, {
-      mode: "fetch", quality: "balanced", attempts: ["exa_web_fetch_exa:error", "tavily_tavily_extract:success"],
+      mode: "fetch", quality: "balanced", page: { status: "readable" },
+      attempts: ["exa_web_fetch_exa:error", "tavily_tavily_extract:success"],
     });
   });
   await withToolkit({
@@ -167,6 +169,57 @@ function stubSearchFetch(handlers: Record<string, unknown>) {
 
 const restProvider = (adapter: string, auto: string[] = ["search"]): Json => ({
   enabled: true, auto, keys: ["k1"], integration: { kind: "rest", adapter },
+});
+
+test("empty search lists fall through without caching incomplete cross-checks", async () => {
+  const original = globalThis.fetch;
+  const hosts: string[] = [];
+  const parallelItems: unknown[] = [];
+  const braveItems: unknown[] = [];
+  globalThis.fetch = async (input) => {
+    const host = new URL(String(input)).hostname;
+    hosts.push(host);
+    if (host === "api.parallel.ai") return Response.json({ results: parallelItems });
+    if (host === "google.serper.dev") return Response.json({ organic: [] });
+    if (host === "api.search.brave.com") return Response.json({ web: { results: braveItems } });
+    throw new Error("Unexpected provider");
+  };
+  try {
+    await withToolkit({ parallel: restProvider("parallel"), serper: restProvider("serper"), brave: restProvider("brave") }, async (toolkit) => {
+      const args = { query: "q", crossCheck: true };
+      const empty = await toolkit.callTool("search_auto", args);
+      assert.match(text(empty), /No results/);
+      assert.deepEqual(hosts, ["api.parallel.ai", "google.serper.dev", "api.search.brave.com"]);
+      assert.deepEqual((autoMeta(empty).crossCheck as Json).empty, ["parallel", "serper"]);
+
+      braveItems.push({ url: "https://found.example/", title: "Found", description: "Readable result" });
+      const found = await toolkit.callTool("search_auto", args);
+      assert.match(text(found), /Found/);
+      assert.equal((autoMeta(found).crossCheck as Json).status, "unavailable");
+      assert.match(text(await toolkit.callTool("search_auto", { query: "q" })), /Found/);
+
+      parallelItems.push({ url: "https://one.example/", title: "One", excerpts: ["First index has results"] });
+      const partial = await toolkit.callTool("search_auto", args);
+      assert.equal((autoMeta(partial).crossCheck as Json).status, "partial");
+      assert.deepEqual((autoMeta(partial).crossCheck as Json).empty, ["serper"]);
+    });
+  } finally { globalThis.fetch = original; }
+});
+
+test("search_auto recognizes an explicit empty list from an upstream MCP server", async () => {
+  const restore = stubSearchFetch({
+    "api.search.brave.com": { web: { results: [{ url: "https://example.com/", title: "Fallback" }] } },
+  });
+  try {
+    await withToolkit({
+      exa: upstream("web_search_advanced_exa", '{"results":[]}', ["search"]),
+      brave: restProvider("brave"),
+    }, async (toolkit) => {
+      const output = await toolkit.callTool("search_auto", { query: "q", mode: "official" });
+      assert.match(text(output), /Fallback/);
+      assert.deepEqual((autoMeta(output).attempts as Json[]).map((attempt) => attempt.outcome), ["empty", "success"]);
+    });
+  } finally { restore(); }
 });
 
 test("crossCheck merges two independent indexes and reports which provider found what", async () => {
@@ -212,12 +265,12 @@ test("crossCheck degrades to the surviving provider when one index fails", async
   } finally { restore(); }
 });
 
-test("crossCheck with a single eligible provider is just a normal search", async () => {
+test("crossCheck with a single eligible provider returns results and reports that the check was unavailable", async () => {
   const restore = stubSearchFetch({ "api.search.brave.com": { web: { results: [{ url: "https://x.example/", title: "X", description: "d" }] } } });
   try {
     await withToolkit({ brave: restProvider("brave") }, async (toolkit) => {
       const output = await toolkit.callTool("search_auto", { query: "q", crossCheck: true });
-      assert.equal((autoMeta(output) as Json).crossCheck, undefined);
+      assert.equal((autoMeta(output).crossCheck as Json).status, "unavailable");
       assert.match(text(output), /X/);
     });
   } finally { restore(); }
@@ -295,8 +348,8 @@ test("fetch_auto supports concurrent batch URLs and per-page section extraction"
       maxChars: 800,
     });
     const rendered = text(output);
-    assert.match(rendered, /=== \[1\/2\] https:\/\/example\.com\/one \(exa\) ===/);
-    assert.match(rendered, /=== \[2\/2\] https:\/\/example\.com\/two \(exa\) ===/);
+    assert.match(rendered, /=== \[1\/2\] https:\/\/example\.com\/one \(exa, readable\) ===/);
+    assert.match(rendered, /=== \[2\/2\] https:\/\/example\.com\/two \(exa, readable\) ===/);
     assert.match(rendered, /## API Reference/);
     assert.doesNotMatch(rendered, /# Title/);
     assert.doesNotMatch(rendered, /## Changelog/);
@@ -304,6 +357,35 @@ test("fetch_auto supports concurrent batch URLs and per-page section extraction"
     assert.equal(auto.batch.total, 2);
     assert.equal(auto.batch.succeeded, 2);
   });
+});
+
+test("fetch_auto counts full bodies separately from excerpts and provides a continuation at a reader limit", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const args = JSON.parse(String(init?.body));
+    const url = args.urls[0];
+    const limit = args.advanced_settings.full_content.max_chars_per_result;
+    return Response.json({ results: [url.endsWith("/excerpt")
+      ? { url, excerpts: [LONG] }
+      : { url, full_content: LONG.slice(0, limit) }] });
+  };
+  try {
+    await withToolkit({ parallel: restProvider("parallel", ["fetch"]) }, async (toolkit) => {
+      const output = await toolkit.callTool("fetch_auto", {
+        urls: ["https://example.com/excerpt", "https://example.com/full"], maxChars: 500,
+      });
+      assert.deepEqual((route(output).searchToolkitAuto as Json).batch, {
+        total: 2, succeeded: 1, partial: ["https://example.com/excerpt"],
+      });
+      assert.match(text(output), /\(parallel, partial\)/);
+      assert.match(text(output), /pass offset=250/);
+      const pages = (output as { structuredContent: { result: { pages: unknown[] } } }).structuredContent.result.pages;
+      assert.deepEqual(pages, [
+        { url: "https://example.com/excerpt", status: "partial" },
+        { url: "https://example.com/full", status: "readable", nextOffset: 250 },
+      ]);
+    });
+  } finally { globalThis.fetch = original; }
 });
 
 test("crossCheck merges and corroborates results across REST and MCP providers", async () => {
