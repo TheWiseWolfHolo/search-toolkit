@@ -64,10 +64,49 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
   const stateless = options.stateless === true;
   const rateWindows = new Map<number, { startedAt: number; count: number }>();
   let currentToolkit = toolkit;
-  let reloadInFlight: Promise<SearchToolkit> | undefined;
+  let appClosed = false;
+  const activeCalls = new WeakMap<SearchToolkit, number>();
+  const retiredToolkits = new Map<SearchToolkit, NodeJS.Timeout>();
+  let reloadInFlight: Promise<{ tools: number; warnings: string[] }> | undefined;
+
+  const acquireToolkit = (): SearchToolkit => {
+    const tk = currentToolkit;
+    activeCalls.set(tk, (activeCalls.get(tk) ?? 0) + 1);
+    return tk;
+  };
+
+  const releaseToolkit = (tk: SearchToolkit): void => {
+    const remaining = Math.max(0, (activeCalls.get(tk) ?? 1) - 1);
+    activeCalls.set(tk, remaining);
+    if (remaining === 0 && retiredToolkits.has(tk)) {
+      const timer = retiredToolkits.get(tk);
+      if (timer) clearTimeout(timer);
+      retiredToolkits.delete(tk);
+      void tk.close().catch(() => undefined);
+    }
+  };
+
+  const retireToolkit = (previous: SearchToolkit): void => {
+    if ((activeCalls.get(previous) ?? 0) === 0) {
+      void previous.close().catch(() => undefined);
+      return;
+    }
+    const timer = setTimeout(() => {
+      retiredToolkits.delete(previous);
+      void previous.close().catch(() => undefined);
+    }, 15_000);
+    timer.unref();
+    retiredToolkits.set(previous, timer);
+  };
 
   const isOwnerPolicy = (policy: ParsedTokenPolicy | undefined): boolean =>
-    Boolean(policy && !policy.tools && !policy.allowedArgumentValues);
+    Boolean(
+      policy
+      && !policy.tools
+      && !policy.allowedArgumentValues
+      && policy.requestsPerMinute === undefined
+      && policy.maxSessions === undefined,
+    );
 
   const protocolOptionsFor = (tokenId: number, policy: ParsedTokenPolicy) => ({
     maxToolInputElements: MAX_HTTP_TOOL_INPUT_ELEMENTS,
@@ -119,19 +158,25 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
       }
       try {
         if (!reloadInFlight) {
-          reloadInFlight = reloadHandler().finally(() => { reloadInFlight = undefined; });
+          reloadInFlight = (async () => {
+            const nextToolkit = await reloadHandler();
+            if (appClosed) {
+              await nextToolkit.close().catch(() => undefined);
+              throw new Error("Server is shutting down");
+            }
+            const previous = currentToolkit;
+            currentToolkit = nextToolkit;
+            await Promise.allSettled(Array.from(sessions.values(), (session) => session.transport.close()));
+            sessions.clear();
+            if (previous !== nextToolkit) retireToolkit(previous);
+            return {
+              tools: currentToolkit.listTools().length,
+              warnings: [...currentToolkit.warnings],
+            };
+          })().finally(() => { reloadInFlight = undefined; });
         }
-        const nextToolkit = await reloadInFlight;
-        const previous = currentToolkit;
-        currentToolkit = nextToolkit;
-        await Promise.allSettled(Array.from(sessions.values(), (session) => session.transport.close()));
-        sessions.clear();
-        if (previous !== nextToolkit) await previous.close().catch(() => undefined);
-        response.json({
-          ok: true,
-          tools: currentToolkit.listTools().length,
-          warnings: currentToolkit.warnings,
-        });
+        const summary = await reloadInFlight;
+        response.json({ ok: true, ...summary });
       } catch (error) {
         response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
       }
@@ -194,7 +239,8 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
         response.status(405).json(protocolError(-32_000, "Method Not Allowed"));
         return;
       }
-      const server = createProtocolServer(currentToolkit, protocolOptionsFor(tokenId, policy));
+      const active = acquireToolkit();
+      const server = createProtocolServer(active, protocolOptionsFor(tokenId, policy));
       const transport = new StreamableHTTPServerTransport({
         maxRequestBodySize: MAX_HTTP_REQUEST_BYTES,
       });
@@ -211,6 +257,7 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
       } finally {
         await transport.close().catch(() => undefined);
         await server.close().catch(() => undefined);
+        releaseToolkit(active);
       }
       return;
     }
@@ -309,9 +356,15 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
     app,
     currentToolkit: () => currentToolkit,
     close: async () => {
+      appClosed = true;
       if (cleanupTimer) clearInterval(cleanupTimer);
+      if (reloadInFlight) await reloadInFlight.catch(() => undefined);
       await Promise.allSettled(Array.from(sessions.values(), (session) => session.transport.close()));
       sessions.clear();
+      const retired = Array.from(retiredToolkits.entries());
+      retiredToolkits.clear();
+      for (const [, timer] of retired) clearTimeout(timer);
+      await Promise.allSettled(retired.map(([tk]) => tk.close()));
     },
   };
 }

@@ -246,6 +246,7 @@ test("Stateless Streamable HTTP supports per-token profiles, fast 405 on GET, an
     ])),
     onReload: async () => {
       reloads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
       const next = new SearchToolkit(configPath, { profile: "full" });
       await next.initialize();
       return next;
@@ -283,6 +284,13 @@ test("Stateless Streamable HTTP supports per-token profiles, fast 405 on GET, an
       "fetch_auto", "provider_call", "provider_tools", "search_auto",
       "search_images", "search_pool_status", "search_rotation_probe",
     ]);
+    const leanStatusRaw = await leanClient.callTool({ name: "search_pool_status", arguments: { verbose: true } });
+    const leanStatus = JSON.parse(String((leanStatusRaw.content as Array<{ text?: string }>)[0]?.text ?? "{}")) as {
+      profile?: string;
+      tools?: string[];
+    };
+    assert.equal(leanStatus.profile, "lean");
+    assert.deepEqual(leanStatus.tools?.slice().sort(), leanNames);
 
     const deniedReload = await fetch(`${baseUrl}/admin/reload`, {
       method: "POST",
@@ -290,11 +298,12 @@ test("Stateless Streamable HTTP supports per-token profiles, fast 405 on GET, an
     });
     assert.equal(deniedReload.status, 403);
 
-    const okReload = await fetch(`${baseUrl}/admin/reload`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${fullToken}` },
-    });
-    assert.equal(okReload.status, 200);
+    const [okReloadA, okReloadB] = await Promise.all([
+      fetch(`${baseUrl}/admin/reload`, { method: "POST", headers: { Authorization: `Bearer ${fullToken}` } }),
+      fetch(`${baseUrl}/admin/reload`, { method: "POST", headers: { Authorization: `Bearer ${fullToken}` } }),
+    ]);
+    assert.equal(okReloadA.status, 200);
+    assert.equal(okReloadB.status, 200);
     assert.equal(reloads, 1);
 
     await Promise.all([fullClient.close(), leanClient.close()]);

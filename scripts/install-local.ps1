@@ -17,12 +17,14 @@ try {
   Pop-Location
 }
 
+$DataDir = $DataDir.TrimEnd('\')
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $DataDir "logs") -Force | Out-Null
 
 # Restrict runtime data directory to current user.
 icacls $DataDir /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls failed for $DataDir (exit $LASTEXITCODE)" }
 
 foreach ($sub in @("dist", "skills")) {
   $dest = Join-Path $InstallDir $sub

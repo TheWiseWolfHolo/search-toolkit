@@ -176,12 +176,13 @@ export class SearchToolkit {
   async callTool(
     name: string,
     arguments_: Record<string, unknown>,
-    callOptions?: { allowTool?: (tool: Tool) => boolean },
+    callOptions?: { profile?: ToolkitProfile; allowTool?: (tool: Tool) => boolean },
   ): Promise<unknown> {
     const binding = this.bindings.get(name);
     if (!binding) throw new Error(`Unknown Search Toolkit tool: ${name}`);
     const args = this.validateArguments(binding.exposed, arguments_);
     if (name === GATEWAY_LIST_TOOL.name) return this.gatewayList(args, callOptions?.allowTool);
+    if (name === STATUS_TOOL.name) return result(this.status(args.verbose === true, callOptions));
     return this.invokeBinding(binding, args);
   }
 
@@ -222,12 +223,13 @@ export class SearchToolkit {
     this.cache?.close();
   }
 
-  status(verbose = false): unknown {
-    const tools = this.listTools();
+  status(verbose = false, scope?: { profile?: ToolkitProfile; allowTool?: (tool: Tool) => boolean }): unknown {
+    const activeProfile = scope?.profile ?? this.profile;
+    const tools = this.listTools(activeProfile).filter((tool) => scope?.allowTool?.(tool) ?? true);
     const failureScores = this.rotation.providerFailureScores();
     return {
       version: 2,
-      profile: this.profile,
+      profile: activeProfile,
       verbose,
       providers: Object.entries(this.config.providers).map(([name, config]) => ({
         name,

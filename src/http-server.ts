@@ -28,6 +28,7 @@ const sessionTtlMs = boundedInteger(
   24 * 60 * 60_000,
 );
 const loopbackOnly = host === "127.0.0.1" || host === "::1" || host === "localhost";
+const adminEnabled = loopbackOnly && allowedHosts.length === 0;
 
 const buildToolkit = async () => {
   const next = new SearchToolkit(configPath, profile ? { profile: profile as ToolkitProfile } : {});
@@ -37,28 +38,30 @@ const buildToolkit = async () => {
 
 const initialToolkit = await buildToolkit();
 
-let shuttingDown = false;
+let shutdownPromise: Promise<void> | undefined;
 let httpServer: ReturnType<typeof createServer> | undefined;
 let runtime: ReturnType<typeof createSearchToolkitHttpApp> | undefined;
 
-const shutdown = async () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  const activeServer = httpServer;
-  const closed = activeServer
-    ? new Promise<void>((resolve) => activeServer.close(() => resolve()))
-    : Promise.resolve();
-  await runtime?.close().catch(() => undefined);
-  activeServer?.closeIdleConnections?.();
-  await Promise.race([
-    closed,
-    new Promise<void>((resolve) => setTimeout(() => {
-      activeServer?.closeAllConnections?.();
-      resolve();
-    }, 3_000).unref()),
-  ]);
-  const activeToolkit = runtime?.currentToolkit() ?? initialToolkit;
-  await activeToolkit.close().catch(() => undefined);
+const shutdown = (): Promise<void> => {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const activeServer = httpServer;
+    const closed = activeServer
+      ? new Promise<void>((resolve) => activeServer.close(() => resolve()))
+      : Promise.resolve();
+    await runtime?.close().catch(() => undefined);
+    activeServer?.closeIdleConnections?.();
+    await Promise.race([
+      closed,
+      new Promise<void>((resolve) => setTimeout(() => {
+        activeServer?.closeAllConnections?.();
+        resolve();
+      }, 2_000).unref()),
+    ]);
+    const activeToolkit = runtime?.currentToolkit() ?? initialToolkit;
+    await activeToolkit.close().catch(() => undefined);
+  })();
+  return shutdownPromise;
 };
 
 runtime = createSearchToolkitHttpApp(initialToolkit, {
@@ -68,7 +71,7 @@ runtime = createSearchToolkitHttpApp(initialToolkit, {
   allowedOrigins,
   sessionTtlMs,
   stateless,
-  ...(loopbackOnly
+  ...(adminEnabled
     ? {
       onReload: buildToolkit,
       onShutdown: async () => {

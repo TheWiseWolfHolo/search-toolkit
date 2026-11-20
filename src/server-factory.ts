@@ -57,7 +57,10 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
       if (options.maxToolInputElements !== undefined) enforceInputElementLimit(arguments_, options.maxToolInputElements);
       options.beforeCall?.(tool.name, arguments_);
       return forModel(
-        await toolkit.callTool(tool.name, arguments_, options.allowTool ? { allowTool: options.allowTool } : undefined),
+        await toolkit.callTool(tool.name, arguments_, {
+          profile: activeProfile,
+          ...(options.allowTool ? { allowTool: options.allowTool } : {}),
+        }),
       ) as never;
     } catch (error) {
       const text = redact(error instanceof Error ? error.message : String(error)).slice(0, 1_000);
