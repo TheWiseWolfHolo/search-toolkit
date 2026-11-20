@@ -609,3 +609,60 @@ test("direct_markdown skipped probe does not consume fetch_auto failover slots a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("fetch_auto auto-fills schema-required objective for Firecrawl hosted v2 MCP", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "search-toolkit-fc-obj-"));
+  const configPath = join(dir, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(dir, "state.db"),
+    providers: {
+      firecrawl: {
+        enabled: true,
+        auto: ["fetch"],
+        keys: ["fc-test"],
+        integration: { kind: "remote_mcp", url: "https://mcp.firecrawl.dev/v2/mcp", auth: { kind: "bearer" } },
+        toolPolicy: { allow: ["firecrawl_scrape"] },
+      },
+    },
+  }));
+  const toolkit = new SearchToolkit(configPath, { cache: false });
+  let capturedArgs: Record<string, unknown> = {};
+  const bindings = (toolkit as unknown as { bindings: Map<string, unknown> }).bindings;
+  bindings.set("firecrawl_firecrawl_scrape", {
+    provider: "firecrawl",
+    upstreamName: "firecrawl_scrape",
+    exposed: {
+      name: "firecrawl_firecrawl_scrape",
+      description: "Scrape one URL",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string" },
+          formats: { type: "array", items: { type: "string" } },
+          onlyMainContent: { type: "boolean" },
+          objective: { type: "string", minLength: 1 },
+        },
+        required: ["url", "objective"],
+        additionalProperties: false,
+      },
+    },
+    call: async (args: Record<string, unknown>) => {
+      capturedArgs = args;
+      return { content: [{ type: "text", text: "# Example\n\n" + "Readable scraped body content from Firecrawl hosted v2. ".repeat(4) }] };
+    },
+  });
+  for (const managed of (toolkit as unknown as { managementBindings: () => Array<{ exposed: { name: string } }> }).managementBindings()) {
+    bindings.set(managed.exposed.name, managed);
+  }
+  try {
+    const out = await toolkit.callTool("fetch_auto", { url: "https://example.com", quality: "max" }) as { isError?: boolean };
+    assert.equal(out.isError, undefined);
+    assert.equal(capturedArgs.url, "https://example.com/");
+    assert.equal(typeof capturedArgs.objective, "string");
+    assert.ok(String(capturedArgs.objective).length > 5);
+  } finally {
+    await toolkit.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -497,7 +497,7 @@ export class SearchToolkit {
       const base = { provider: entry.binding.provider, tool: entry.binding.exposed.name, candidateRank: entry.candidateRank };
       const isZeroCostProbe = entry.binding.exposed.name === "direct_markdown_fetch";
       try {
-        const raw = await entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) });
+        const raw = await entry.binding.call(adaptCandidateArguments(entry.binding.exposed, entry.candidate.nativeArguments ?? {}));
         if (isToolErrorResult(raw)) {
           throw new ToolResultError(textOfContent(bodyBlocks(raw)).slice(0, 500), bodyBlocks(raw));
         }
@@ -723,6 +723,21 @@ function profileFromEnv(): ToolkitProfile | undefined {
 
 function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
   return { exposed: tool, provider: "search_toolkit", upstreamName: tool.name, call };
+}
+
+/**
+ * Fill schema-required metadata fields added by newer upstream MCP servers
+ * (such as Firecrawl hosted v2 MCP requiring `objective` on `firecrawl_scrape`)
+ * without sending unknown keys to older schemas that reject them.
+ */
+function adaptCandidateArguments(tool: Tool, args: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...args };
+  const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
+  if (required.includes("objective") && (typeof next.objective !== "string" || !next.objective.trim())) {
+    const query = typeof next.query === "string" && next.query.trim() ? next.query.trim() : undefined;
+    next.objective = query ?? "Read the main readable content of this web page as clean Markdown.";
+  }
+  return next;
 }
 
 /** A routed answer whose last attempt succeeded; thin fetch fallbacks and failures are not reused. */
