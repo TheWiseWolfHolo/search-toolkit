@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { boundedInteger, createSearchToolkitHttpApp, parseHttpTokenPolicies } from "./http.js";
 import { SearchToolkit } from "./toolkit.js";
@@ -12,48 +13,78 @@ if (profile !== undefined && profile !== "full" && profile !== "curated" && prof
 }
 const host = process.env.SEARCH_TOOLKIT_HTTP_HOST ?? "127.0.0.1";
 const port = boundedInteger(Number(process.env.SEARCH_TOOLKIT_HTTP_PORT ?? 18_473), 18_473, 1, 65_535);
-const tokens = parseHttpTokenPolicies(process.env.SEARCH_TOOLKIT_HTTP_TOKENS);
+const rawTokens = process.env.SEARCH_TOOLKIT_HTTP_TOKENS
+  ?? (process.env.SEARCH_TOOLKIT_HTTP_TOKENS_FILE
+    ? readFileSync(process.env.SEARCH_TOOLKIT_HTTP_TOKENS_FILE, "utf8")
+    : undefined);
+const tokens = parseHttpTokenPolicies(rawTokens);
 const allowedHosts = listEnv("SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS");
 const allowedOrigins = listEnv("SEARCH_TOOLKIT_HTTP_ALLOWED_ORIGINS");
+const stateless = /^(?:1|true|yes)$/i.test((process.env.SEARCH_TOOLKIT_HTTP_STATELESS ?? "").trim());
 const sessionTtlMs = boundedInteger(
   Number(process.env.SEARCH_TOOLKIT_HTTP_SESSION_TTL_MS ?? 30 * 60_000),
   30 * 60_000,
   1_000,
   24 * 60 * 60_000,
 );
+const loopbackOnly = host === "127.0.0.1" || host === "::1" || host === "localhost";
 
-const toolkit = new SearchToolkit(configPath, profile ? { profile: profile as ToolkitProfile } : {});
-await toolkit.initialize();
-const runtime = createSearchToolkitHttpApp(toolkit, {
+const buildToolkit = async () => {
+  const next = new SearchToolkit(configPath, profile ? { profile: profile as ToolkitProfile } : {});
+  await next.initialize();
+  return next;
+};
+
+const initialToolkit = await buildToolkit();
+
+let shuttingDown = false;
+let httpServer: ReturnType<typeof createServer> | undefined;
+let runtime: ReturnType<typeof createSearchToolkitHttpApp> | undefined;
+
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const activeServer = httpServer;
+  const closed = activeServer
+    ? new Promise<void>((resolve) => activeServer.close(() => resolve()))
+    : Promise.resolve();
+  await runtime?.close().catch(() => undefined);
+  activeServer?.closeIdleConnections?.();
+  await Promise.race([
+    closed,
+    new Promise<void>((resolve) => setTimeout(() => {
+      activeServer?.closeAllConnections?.();
+      resolve();
+    }, 3_000).unref()),
+  ]);
+  const activeToolkit = runtime?.currentToolkit() ?? initialToolkit;
+  await activeToolkit.close().catch(() => undefined);
+};
+
+runtime = createSearchToolkitHttpApp(initialToolkit, {
   tokens,
   host,
   ...(allowedHosts.length ? { allowedHosts } : {}),
   allowedOrigins,
   sessionTtlMs,
+  stateless,
+  ...(loopbackOnly
+    ? {
+      onReload: buildToolkit,
+      onShutdown: async () => {
+        await shutdown();
+        process.exit(0);
+      },
+    }
+    : {}),
 });
-const httpServer = createServer(runtime.app);
+httpServer = createServer(runtime.app);
 httpServer.keepAliveTimeout = 65_000;
 httpServer.headersTimeout = 66_000;
 httpServer.listen(port, host, () => {
-  console.log(`Search Toolkit Streamable HTTP listening on http://${host}:${port}/mcp`);
+  console.log(`Search Toolkit Streamable HTTP (${stateless ? "stateless" : "stateful"}) listening on http://${host}:${port}/mcp`);
 });
 
-let shuttingDown = false;
-const shutdown = async () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
-  await runtime.close().catch(() => undefined);
-  httpServer.closeIdleConnections?.();
-  await Promise.race([
-    closed,
-    new Promise<void>((resolve) => setTimeout(() => {
-      httpServer.closeAllConnections?.();
-      resolve();
-    }, 3_000).unref()),
-  ]);
-  await toolkit.close().catch(() => undefined);
-};
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
 

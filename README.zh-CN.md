@@ -194,7 +194,7 @@ $env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
 node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
-客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions`。`allowedArgumentValues` 可按参数名限制所有工具的取值，例如 `{"depth":["fast","deep"]}` 可防止共享 token 触发 16-Agent Grok 研究（未传该参数时放行）。`tools` 白名单和 `allowedArgumentValues` 同样会在 `provider_call` 内部生效，`provider_tools` 也会按白名单过滤。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
+客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions` 或按 token 独立的 `profile`（`full`、`curated`、`lean`）。`allowedArgumentValues` 可按参数名限制所有工具的取值，例如 `{"depth":["fast","deep"]}` 可防止共享 token 触发 16-Agent Grok 研究（未传该参数时放行）。`tools` 白名单和 `allowedArgumentValues` 同样会在 `provider_call` 内部生效，`provider_tools` 也会按白名单过滤。本地多客户端共享常驻时，可开启 `SEARCH_TOOLKIT_HTTP_STATELESS=1`（无状态、重启不报 404、`GET /mcp` 立即回 405）并用 `SEARCH_TOOLKIT_HTTP_TOKENS_FILE` 从文件读取 token 策略；回环监听还会开放仅限 owner token 的 `POST /admin/reload` 与 `POST /admin/shutdown`。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
 
 HTTP 入口使用 MCP SDK 1.32.2，JSON 请求上限为 100 KiB，工具参数中的数组元素与对象键总数上限为 10,000，计数发生在参数 Schema 验证之前。每个会话使用独立的 server 与 transport。这两项 HTTP 限制不影响 STDIO。
 

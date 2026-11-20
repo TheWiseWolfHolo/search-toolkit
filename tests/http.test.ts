@@ -219,3 +219,89 @@ test("HTTP token policies can restrict argument values before any provider is ca
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Stateless Streamable HTTP supports per-token profiles, fast 405 on GET, and owner-only admin reload", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-http-stateless-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      brave: { enabled: true, auto: ["search"], keys: ["test-key"], integration: { kind: "rest", adapter: "brave" } },
+      serper: { enabled: true, auto: ["search"], keys: ["test-key-2"], integration: { kind: "rest", adapter: "serper" } },
+    },
+  }));
+  const fullToken = "owner-full-token";
+  const leanToken = "owner-lean-token";
+  const scopedToken = "scoped-guest-token";
+  const toolkit = new SearchToolkit(configPath, { profile: "full" });
+  await toolkit.initialize();
+  let reloads = 0;
+  const runtime = createSearchToolkitHttpApp(toolkit, {
+    stateless: true,
+    tokens: parseHttpTokenPolicies(JSON.stringify([
+      { hash: createHash("sha256").update(fullToken).digest("hex"), profile: "full" },
+      { hash: createHash("sha256").update(leanToken).digest("hex"), profile: "lean" },
+      { hash: createHash("sha256").update(scopedToken).digest("hex"), tools: ["search_auto"] },
+    ])),
+    onReload: async () => {
+      reloads += 1;
+      const next = new SearchToolkit(configPath, { profile: "full" });
+      await next.initialize();
+      return next;
+    },
+  });
+  const listener = runtime.app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => listener.once("listening", resolve));
+  const port = (listener.address() as AddressInfo).port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    const health = await fetch(`${baseUrl}/healthz`).then((r) => r.json()) as { ok: boolean; mode: string };
+    assert.deepEqual(health, { ok: true, mode: "stateless" });
+
+    // Stateless GET /mcp must return 405 immediately rather than hanging on SSE.
+    const getResp = await fetch(`${baseUrl}/mcp`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${fullToken}`, Accept: "text/event-stream" },
+    });
+    assert.equal(getResp.status, 405);
+
+    const fullClient = new Client({ name: "full-client", version: "1.0.0" });
+    await fullClient.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${fullToken}` } },
+    }) as unknown as Parameters<typeof fullClient.connect>[0]);
+    const fullNames = (await fullClient.listTools()).tools.map((t) => t.name);
+    assert.ok(fullNames.includes("brave_web_search"));
+    assert.ok(!fullNames.includes("provider_call"));
+
+    const leanClient = new Client({ name: "lean-client", version: "1.0.0" });
+    await leanClient.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${leanToken}` } },
+    }) as unknown as Parameters<typeof leanClient.connect>[0]);
+    const leanNames = (await leanClient.listTools()).tools.map((t) => t.name).sort();
+    assert.deepEqual(leanNames, [
+      "fetch_auto", "provider_call", "provider_tools", "search_auto",
+      "search_images", "search_pool_status", "search_rotation_probe",
+    ]);
+
+    const deniedReload = await fetch(`${baseUrl}/admin/reload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${scopedToken}` },
+    });
+    assert.equal(deniedReload.status, 403);
+
+    const okReload = await fetch(`${baseUrl}/admin/reload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fullToken}` },
+    });
+    assert.equal(okReload.status, 200);
+    assert.equal(reloads, 1);
+
+    await Promise.all([fullClient.close(), leanClient.close()]);
+  } finally {
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    await runtime.close();
+    await runtime.currentToolkit().close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

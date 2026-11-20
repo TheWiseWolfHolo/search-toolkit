@@ -158,11 +158,12 @@ export class SearchToolkit {
     for (const managed of this.managementBindings()) this.bindings.set(managed.exposed.name, managed);
   }
 
-  /** Tools visible to MCP clients under the active profile. */
-  listTools(): Tool[] {
+  /** Tools visible to MCP clients under the active profile (or a per-token HTTP profile override). */
+  listTools(profileOverride?: ToolkitProfile): Tool[] {
+    const active = profileOverride ?? this.profile;
     const exposed = Array.from(this.bindings.values(), (binding) => binding.exposed);
-    if (this.profile === "lean") return exposed.filter((tool) => LEAN_TOOL_NAMES.has(tool.name));
-    if (this.profile === "curated") return exposed.filter((tool) => CURATED_TOOL_NAMES.has(tool.name));
+    if (active === "lean") return exposed.filter((tool) => LEAN_TOOL_NAMES.has(tool.name));
+    if (active === "curated") return exposed.filter((tool) => CURATED_TOOL_NAMES.has(tool.name));
     return exposed.filter((tool) => !GATEWAY_TOOL_NAMES.has(tool.name));
   }
 

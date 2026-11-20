@@ -2,11 +2,13 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { redact } from "./provenance.js";
 import { SearchToolkit } from "./toolkit.js";
+import type { ToolkitProfile } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
 
 const instructions = "Search with search_auto (web), search_images (images), and fetch_auto (1-5 known URLs) first; they pick a provider and report the route used. Reach for a provider tool directly only when its specific capability is needed. Brave LLM Context gives token-bounded multi-source grounding, You.com gives Web+News with highlights, Parallel suits semantic objectives. Doubao is manual-only, and Grok (X/Web synthesis) is manual-only by default. Rotation probes consume quota. Tools that create, update, delete, start jobs, or submit feedback need explicit user intent; respect annotations and approval prompts.";
 
 interface ProtocolServerOptions {
+  profile?: ToolkitProfile;
   allowTool?: (tool: Tool) => boolean;
   beforeCall?: (toolName: string, arguments_: Record<string, unknown>) => void;
   maxToolInputElements?: number;
@@ -34,20 +36,21 @@ export function createProtocolServer(toolkit: SearchToolkit, options: ProtocolSe
     { name: "search-toolkit", version: PACKAGE_VERSION },
     { capabilities: { tools: { listChanged: true } }, instructions },
   );
-  const visibleTools = () => toolkit.listTools().filter((tool) => options.allowTool?.(tool) ?? true);
+  const activeProfile = options.profile ?? toolkit.profile;
+  const visibleTools = () => toolkit.listTools(activeProfile).filter((tool) => options.allowTool?.(tool) ?? true);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: visibleTools() }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const tool = visibleTools().find((candidate) => candidate.name === request.params.name);
       if (!tool) {
         if (options.allowTool) throw new Error("Tool is not available for this token");
-        if (toolkit.profile === "full") {
+        if (activeProfile === "full") {
           throw new Error(
             `Unknown tool "${request.params.name}". Check tools/list or call search_pool_status(verbose=true) to see available tools.`,
           );
         }
         throw new Error(
-          `Tool "${request.params.name}" is not exposed in profile "${toolkit.profile}"; use provider_tools and provider_call to inspect and invoke provider tools.`,
+          `Tool "${request.params.name}" is not exposed in profile "${activeProfile}"; use provider_tools and provider_call to inspect and invoke provider tools.`,
         );
       }
       const arguments_ = request.params.arguments ?? {};
