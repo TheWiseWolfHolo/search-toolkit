@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import { createProtocolServer } from "./server-factory.js";
 import { SearchToolkit } from "./toolkit.js";
 
@@ -45,8 +45,10 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
   if (!tokens.length) throw new Error("At least one Search Toolkit HTTP token policy is required");
   const host = options.host ?? "127.0.0.1";
   const app = createMcpExpressApp({ host, ...(options.allowedHosts ? { allowedHosts: options.allowedHosts } : {}) });
+  app.disable("x-powered-by");
   const allowedOrigins = new Set(options.allowedOrigins ?? []);
   const sessions = new Map<string, Session>();
+  const pendingInits = new Map<number, number>();
   const sessionTtlMs = boundedInteger(options.sessionTtlMs, 30 * 60_000, 1_000, 24 * 60 * 60_000);
   const rateWindows = new Map<number, { startedAt: number; count: number }>();
 
@@ -72,7 +74,12 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
         return;
       }
       existing.lastSeenAt = Date.now();
-      await existing.transport.handleRequest(request, response, request.body);
+      try {
+        await existing.transport.handleRequest(request, response, request.body);
+      } catch (error) {
+        console.error("Search Toolkit HTTP session request failed", error);
+        if (!response.headersSent) response.status(500).json(protocolError(-32_603, "Internal server error"));
+      }
       return;
     }
     if (sessionId) {
@@ -91,19 +98,32 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
     }
     const activeSessions = policy.maxSessions === undefined
       ? 0
-      : Array.from(sessions.values()).filter((session) => session.tokenId === tokenId).length;
+      : Array.from(sessions.values()).filter((session) => session.tokenId === tokenId).length + (pendingInits.get(tokenId) ?? 0);
     if (policy.maxSessions !== undefined && activeSessions >= policy.maxSessions) {
       response.status(429).json(protocolError(-32_000, "Too many active sessions for this token"));
       return;
     }
+    pendingInits.set(tokenId, (pendingInits.get(tokenId) ?? 0) + 1);
     const protocolOptions = {
       maxToolInputElements: MAX_HTTP_TOOL_INPUT_ELEMENTS,
       ...(policy.tools ? { allowTool: (tool: { name: string }) => policy.tools?.has(tool.name) === true } : {}),
-      ...(policy.requestsPerMinute || policy.allowedArgumentValues
+      ...(policy.tools || policy.requestsPerMinute || policy.allowedArgumentValues
         ? {
           beforeCall: (toolName: string, arguments_: Record<string, unknown>) => {
-            if (policy.allowedArgumentValues) enforceArgumentValues(toolName, arguments_, policy.allowedArgumentValues);
             if (policy.requestsPerMinute) enforceRateLimit(tokenId, policy.requestsPerMinute, rateWindows);
+            if (toolName === "provider_call") {
+              const target = typeof arguments_.name === "string" ? arguments_.name : "";
+              if (policy.tools && !policy.tools.has(target)) {
+                throw new Error(`Tool ${target || "(missing)"} is not available for this token`);
+              }
+              if (policy.allowedArgumentValues && arguments_.arguments && typeof arguments_.arguments === "object" && !Array.isArray(arguments_.arguments)) {
+                enforceArgumentValues(target || toolName, arguments_.arguments as Record<string, unknown>, policy.allowedArgumentValues);
+              }
+            }
+            if (toolName === "search_rotation_probe" && policy.tools && typeof arguments_.tool === "string" && !policy.tools.has(arguments_.tool)) {
+              throw new Error(`Tool ${arguments_.tool} is not available for this token`);
+            }
+            if (policy.allowedArgumentValues) enforceArgumentValues(toolName, arguments_, policy.allowedArgumentValues);
           },
         }
         : {}),
@@ -123,17 +143,42 @@ export function createSearchToolkitHttpApp(toolkit: SearchToolkit, options: Http
     try {
       await server.connect(transport);
       await transport.handleRequest(request, response, request.body);
+      if (!transport.sessionId) {
+        await transport.close().catch(() => undefined);
+      }
     } catch (error) {
       console.error("Search Toolkit HTTP request failed", error);
-      await transport.close();
+      await transport.close().catch(() => undefined);
       if (!response.headersSent) response.status(500).json(protocolError(-32_603, "Internal server error"));
+    } finally {
+      const remaining = (pendingInits.get(tokenId) ?? 1) - 1;
+      if (remaining > 0) pendingInits.set(tokenId, remaining);
+      else pendingInits.delete(tokenId);
     }
+  });
+
+  app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+    if (response.headersSent) return;
+    const status = typeof (error as { status?: unknown })?.status === "number"
+      ? (error as { status: number }).status
+      : typeof (error as { statusCode?: unknown })?.statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 500;
+    if (status === 413) {
+      response.status(413).json(protocolError(-32_600, "Request body exceeds limit"));
+      return;
+    }
+    if (status >= 400 && status < 500) {
+      response.status(status).json(protocolError(-32_700, "Invalid request body"));
+      return;
+    }
+    response.status(500).json(protocolError(-32_603, "Internal server error"));
   });
 
   const cleanupTimer = setInterval(() => {
     const cutoff = Date.now() - sessionTtlMs;
     for (const session of sessions.values()) {
-      if (session.lastSeenAt < cutoff) void session.transport.close();
+      if (session.lastSeenAt < cutoff) void session.transport.close().catch(() => undefined);
     }
   }, Math.min(sessionTtlMs, 60_000));
   cleanupTimer.unref();

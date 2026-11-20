@@ -1,7 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import { baseUrlOf, requestJson, type RestAdapter } from "../base.js";
 import { arrayArg, collectCitations, extractResponseText, numberArg, objectRecord, stringArg, stringValue } from "../normalize.js";
 
 // grok2api Console runs both native tools on this model in 3-10 s; its reasoning and multi-agent
@@ -42,8 +42,11 @@ async function postResponses(url: string, init: RequestInit, timeoutMs: number):
   }
 }
 
-function usageLine(depth: Depth, counts: { web: number; x: number; posts: number }): string {
+function usageLine(depth: Depth, counts: { web: number; x: number; posts: number; hasDetails: boolean }, citationCount: number): string {
   const agents = depth === "max" ? "16 agents" : depth === "deep" ? "4 agents" : "single model";
+  if (!counts.hasDetails && citationCount > 0) {
+    return `(Grok ${depth}, ${agents}: ${citationCount} cited source${citationCount === 1 ? "" : "s"})`;
+  }
   const parts = [`${counts.web} web search${counts.web === 1 ? "" : "es"}`];
   if (counts.x || counts.posts) parts.push(`${counts.x} X search${counts.x === 1 ? "" : "es"} over ${counts.posts} posts`);
   return `(Grok ${depth}, ${agents}: ${parts.join(", ")})`;
@@ -95,11 +98,49 @@ function normalizeCitations(data: Record<string, unknown>): unknown[] {
   return found;
 }
 
-/** xAI reports tool counts under usage.server_side_tool_usage_details; older gateways used a top-level field. */
-function toolCounts(data: Record<string, unknown>): { web: number; x: number; posts: number } {
-  const detail = objectRecord(objectRecord(data.usage).server_side_tool_usage_details);
+/** xAI reports tool counts under usage.server_side_tool_usage_details; older gateways omit it. */
+function toolCounts(data: Record<string, unknown>): {
+  web: number;
+  x: number;
+  posts: number;
+  users: number;
+  hasDetails: boolean;
+  costUsd?: number;
+} {
+  const usage = objectRecord(data.usage);
+  const rawDetail = usage.server_side_tool_usage_details;
+  const hasDetails = Boolean(rawDetail && typeof rawDetail === "object");
+  const detail = objectRecord(rawDetail);
   const count = (value: unknown) => (typeof value === "number" ? value : 0);
-  return { web: count(detail.web_search_calls), x: count(detail.x_search_calls), posts: count(detail.x_posts_fetched) };
+  const ticks = typeof usage.cost_in_usd_ticks === "number" && Number.isFinite(usage.cost_in_usd_ticks)
+    ? Number((usage.cost_in_usd_ticks / 1e10).toFixed(6))
+    : undefined;
+  return {
+    web: count(detail.web_search_calls),
+    x: count(detail.x_search_calls),
+    posts: count(detail.x_posts_fetched),
+    users: count(detail.x_users_fetched),
+    hasDetails,
+    ...(ticks !== undefined ? { costUsd: ticks } : {}),
+  };
+}
+
+function grokTool(name: string, title: string, description: string, properties: Record<string, unknown>): Tool {
+  return {
+    name,
+    title,
+    description,
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1, description: "Search question or research prompt" },
+        ...properties,
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  };
 }
 
 export class GrokAdapter implements RestAdapter {
@@ -129,15 +170,15 @@ export class GrokAdapter implements RestAdapter {
       enableVideoUnderstanding: { type: "boolean", default: false, description: "Allow Grok to inspect videos in X posts" },
     };
     return [
-      searchTool("grok_web_search", "Grok Web Search", "Grok answers from xAI's native web_search with citations. Set depth=deep or max for multi-agent research.", {
+      grokTool("grok_web_search", "Grok Web Search", "Grok answers from xAI's native web_search with citations. Set depth=deep or max for multi-agent research.", {
         ...common,
         ...webProps,
       }),
-      searchTool("grok_x_search", "Grok X Search", "Grok answers from xAI's native x_search over X posts, users, and threads. Set depth=deep or max for multi-agent research.", {
+      grokTool("grok_x_search", "Grok X Search", "Grok answers from xAI's native x_search over X posts, users, and threads. Set depth=deep or max for multi-agent research.", {
         ...common,
         ...xProps,
       }),
-      searchTool("grok_web_x_search", "Grok Web + X Search", "Grok answers from both web_search and x_search in one request. depth=max runs 16 agents for deep, multi-faceted research.", {
+      grokTool("grok_web_x_search", "Grok Web + X Search", "Grok answers from both web_search and x_search in one request. depth=max runs 16 agents for deep, multi-faceted research.", {
         ...common,
         ...webProps,
         ...xProps,
@@ -147,7 +188,10 @@ export class GrokAdapter implements RestAdapter {
 
   async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
     const options = config.options ?? {};
-    const base = baseUrlOf(config, String(options.customUrl ?? "https://api.x.ai/v1/responses"));
+    const customUrl = typeof options.customUrl === "string" && options.customUrl.trim()
+      ? options.customUrl.trim()
+      : "https://api.x.ai/v1/responses";
+    const base = baseUrlOf(config, customUrl);
     const tools: Array<Record<string, unknown>> = [];
     if (tool !== "grok_x_search") {
       const web: Record<string, unknown> = { type: "web_search" };
@@ -163,8 +207,9 @@ export class GrokAdapter implements RestAdapter {
     }
     if (tool !== "grok_web_search") {
       const x: Record<string, unknown> = { type: "x_search" };
-      const allowed = arrayArg(args, "allowedXHandles");
-      const excluded = arrayArg(args, "excludedXHandles");
+      const stripAt = (handle: string) => handle.replace(/^@+/, "");
+      const allowed = arrayArg(args, "allowedXHandles").map(stripAt).filter(Boolean);
+      const excluded = arrayArg(args, "excludedXHandles").map(stripAt).filter(Boolean);
       if (allowed.length) x.allowed_x_handles = allowed;
       else if (excluded.length) x.excluded_x_handles = excluded;
       if (stringArg(args, "fromDate")) x.from_date = stringArg(args, "fromDate");
@@ -176,18 +221,25 @@ export class GrokAdapter implements RestAdapter {
     const depthArg = stringArg(args, "depth");
     const depth: Depth = depthArg === "deep" || depthArg === "max" ? depthArg : "fast";
     const multiAgent = depth !== "fast";
+    const model = multiAgent ? String(options.multiAgentModel ?? MULTI_AGENT_MODEL) : String(options.model ?? DEFAULT_MODEL);
     // Without today's date the model reads "this week" as a week in its training year.
     const today = `Today's date is ${new Date().toISOString().slice(0, 10)} (UTC).`;
     const configuredPrompt = typeof options.systemPrompt === "string" ? options.systemPrompt.trim() : "";
     const systemPrompt = `${configuredPrompt || DEFAULT_INSTRUCTIONS}\n${today}`;
     const body: Record<string, unknown> = {
-      model: multiAgent ? String(options.multiAgentModel ?? MULTI_AGENT_MODEL) : String(options.model ?? DEFAULT_MODEL),
+      model,
       instructions: systemPrompt,
       input: [{ role: "user", content: stringArg(args, "query") + filterHints(args, tool !== "grok_x_search", tool !== "grok_web_search") }],
       tools,
       max_turns: numberArg(args, "maxTurns", 3),
     };
-    const effort = multiAgent ? DEPTHS[depth].effort : String(options.reasoningEffort ?? "").trim();
+    const configuredEffort = typeof options.reasoningEffort === "string" ? options.reasoningEffort.trim() : "";
+    const isNonReasoning = /non-reasoning/i.test(model);
+    const effort = multiAgent
+      ? DEPTHS[depth].effort
+      : isNonReasoning
+        ? ""
+        : (configuredEffort || (model.startsWith("grok-4.7") ? "low" : ""));
     if (effort) body.reasoning = { effort };
     const data = await postResponses(base, {
       method: "POST",
@@ -195,16 +247,26 @@ export class GrokAdapter implements RestAdapter {
       body: JSON.stringify(body),
     }, DEPTHS[depth].timeoutMs);
     const counts = toolCounts(data);
+    const citations = normalizeCitations(data);
     const notes: string[] = [];
-    if (tool !== "grok_x_search" && counts.web === 0) notes.push("no web search was run");
-    if (tool !== "grok_web_search" && counts.x === 0) notes.push("no X search was run");
+    // Only stamp the unsourced warning when the gateway reported tool counts (or returned no citations at all).
+    if (counts.hasDetails || citations.length === 0) {
+      if (tool !== "grok_x_search" && counts.web === 0) notes.push("no web search was run");
+      if (tool !== "grok_web_search" && counts.x === 0) notes.push("no X search was run");
+    }
     const answer = cleanAnswer(extractResponseText(data));
     return {
-      text: `${notes.length ? `[Grok ${notes.join(" and ")}; treat this answer as unsourced model knowledge.]\n` : ""}${answer}\n\n${usageLine(depth, counts)}`,
-      citations: normalizeCitations(data),
+      text: `${notes.length ? `[Grok ${notes.join(" and ")}; treat this answer as unsourced model knowledge.]\n` : ""}${answer}\n\n${usageLine(depth, counts, citations.length)}`,
+      citations,
       depth,
       model: data.model ?? body.model,
-      toolUsage: { webSearches: counts.web, xSearches: counts.x, xPosts: counts.posts },
+      toolUsage: {
+        webSearches: counts.web,
+        xSearches: counts.x,
+        xPosts: counts.posts,
+        ...(counts.users > 0 ? { xUsers: counts.users } : {}),
+      },
+      ...(counts.costUsd !== undefined ? { costUsd: counts.costUsd } : {}),
       usage: data.usage,
       responseId: data.id,
     };

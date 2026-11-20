@@ -33,7 +33,7 @@ export function renderItems(items: unknown[], options: RenderOptions = {}): stri
   const maxChars = options.maxCharsPerItem && options.maxCharsPerItem > 0 ? options.maxCharsPerItem : 0;
   return list.map((value, index) => {
     const item = objectRecord(value);
-    const title = String(item.title ?? "").trim() || String(item.url ?? "").trim() || "(untitled)";
+    const title = String(item.title ?? "").replace(/\s+/g, " ").trim() || String(item.url ?? "").trim() || "(untitled)";
     const date = stringValue(item.date);
     const lines = [`${index + 1}. ${title}${date ? ` (${date})` : ""}`];
     const imageUrl = stringValue(item.imageUrl);
@@ -70,13 +70,20 @@ function renderGrounding(data: Record<string, unknown>): string {
   return groups.map((value) => {
     const group = objectRecord(value);
     const url = stringValue(group.url) ?? "";
-    const source = objectRecord(sources[url]);
-    const title = stringValue(group.title) ?? stringValue(group.name) ?? stringValue(source.title) ?? url;
+    const source = Object.hasOwn(sources, url) ? objectRecord(sources[url]) : {};
+    const title = (stringValue(group.title) ?? stringValue(group.name) ?? stringValue(source.title) ?? url).replace(/\s+/g, " ").trim();
     const host = stringValue(source.hostname);
-    const age = Array.isArray(source.age) ? source.age.map(String).find((entry) => /^\d{4}-\d{2}-\d{2}/.test(entry)) ?? source.age.map(String)[0] : undefined;
-    const meta = [host, age?.slice(0, 10)].filter(Boolean).join(", ");
+    const rawAge = Array.isArray(source.age)
+      ? source.age.map(String).find((entry) => /^\d{4}-\d{2}-\d{2}/.test(entry)) ?? source.age.map(String)[0]
+      : undefined;
+    const age = rawAge && /^\d{4}-\d{2}-\d{2}/.test(rawAge) ? rawAge.slice(0, 10) : rawAge;
+    const meta = [host, age].filter(Boolean).join(", ");
     const snippets = Array.isArray(group.snippets) ? group.snippets.map(String).filter(Boolean) : [];
-    return [`### ${title}${meta ? ` (${meta})` : ""}`, url, ...snippets.map((snippet) => `- ${snippet.trim()}`)].filter(Boolean).join("\n");
+    return [
+      `### ${title}${meta ? ` (${meta})` : ""}`,
+      url,
+      ...snippets.map((snippet) => `- ${snippet.trim().replace(/\r?\n/g, "\n  ")}`),
+    ].filter(Boolean).join("\n");
   }).join("\n\n");
 }
 

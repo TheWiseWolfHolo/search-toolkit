@@ -18,7 +18,7 @@ const LENS_TOOL: Tool = {
     required: ["url"],
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
 };
 
 export const LENS_NO_MATCHES = "Google Lens found no matches. Some image hosts, Wikimedia originals among them, do not serve Google's fetcher; a smaller or re-hosted copy of the same image usually works.";
@@ -36,7 +36,7 @@ export class SerperAdapter implements RestAdapter {
       {
         gl: { type: "string", description: "Country code" },
         hl: { type: "string", description: "Language code" },
-        tbs: { type: "string", description: "Google time filter" },
+        ...(kind === "scholar" ? {} : { tbs: { type: "string", description: "Google time filter" } }),
         page: { type: "integer", minimum: 1, description: "1-based result page number" },
         autocorrect: { type: "boolean", description: "Enable Google query autocorrect" },
       },
@@ -75,7 +75,7 @@ export class SerperAdapter implements RestAdapter {
     // Lens sometimes names the matched image with an internal x-raw-image:// reference; the thumbnail is the usable copy.
     const items = rows.map((row) => {
       const item = normalizeSerperImage(row);
-      return item.imageUrl.startsWith("x-raw-image:") ? { ...item, imageUrl: item.thumbnailUrl ?? "" } : item;
+      return item.imageUrl?.startsWith("x-raw-image:") ? { ...item, imageUrl: item.thumbnailUrl ?? "" } : item;
     });
     return items.length ? { items } : { items, warnings: [LENS_NO_MATCHES] };
   }

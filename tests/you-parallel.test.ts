@@ -131,7 +131,6 @@ test("Parallel uses the v1 semantic Search contract and advanced settings", asyn
       advanced_settings: {
         source_policy: { include_domains: ["example.com"] },
         fetch_policy: { max_age_seconds: 3600 },
-        excerpt_settings: { max_chars_per_result: 2000 },
         max_results: 5,
         location: "sg",
       },
@@ -507,12 +506,12 @@ test("You.com supports knowledge cards and Contents API extraction", async () =>
     const url = String(input);
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     requests.push({ url, body });
-    if (url.endsWith("/v1/contents")) {
-      return new Response(JSON.stringify([{
+    if (url.endsWith("/v1/extract")) {
+      return new Response(JSON.stringify({
         url: "https://you.com/docs",
         title: "You Docs",
-        markdown: "## Overview\nClean markdown from You.com.",
-      }]), { status: 200, headers: { "Content-Type": "application/json" } });
+        contents: { markdown: "## Overview\nClean markdown from You.com." },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
     }
     return new Response(JSON.stringify({
       results: {
@@ -551,7 +550,11 @@ test("You.com supports knowledge cards and Contents API extraction", async () =>
     const contentsOut = await adapter.call("you_contents", {
       url: "https://you.com/docs",
     }, "test-key", config) as { text: string };
-    assert.equal(requests[1]?.url, "https://ydc-index.io/v1/contents");
+    assert.equal(requests[1]?.url, "https://ydc-index.io/v1/extract");
+    assert.deepEqual(requests[1]?.body, {
+      url: "https://you.com/docs",
+      full_page: { extraction_formats: ["markdown"] },
+    });
     assert.match(contentsOut.text, /# You Docs/);
     assert.match(contentsOut.text, /## Overview\nClean markdown from You\.com\./);
   } finally {

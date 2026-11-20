@@ -12,21 +12,21 @@ Three tools cover almost every lookup. Each picks a provider, falls back when on
 | --- | --- | --- |
 | `search_auto` | Web search | Seven modes, each with a provider order measured on real queries (see below). Chinese queries switch to Chinese-market settings automatically. |
 | `search_images` | Images by text, or by image | Text: Brave Images → Serper Images → Parallel Images. Image URL: Google Lens reverse search, to identify a picture or trace where it appears. |
-| `fetch_auto` | Read 1 to 5 known URLs | Exa → Tavily → Parallel Extract → You.com Contents → Firecrawl → LinkUp → AnySearch, skipping readers that return challenge pages, almost nothing, or a refusal. |
+| `fetch_auto` | Read 1 to 5 known URLs | Balanced: Direct Markdown (opt-in) → Exa → DeepSeek → Vercel DeepSeek → Tavily → Parallel Extract → TinyFish → You.com Extract → Octen → Firecrawl → LinkUp → AnySearch; `quality: max` leads with Firecrawl → TinyFish → Tavily → Parallel. Skips challenge shells, fragments, and site blocks. |
 
 `search_auto` modes, in balanced quality:
 
 | Mode | For | English order | Chinese order |
 | --- | --- | --- | --- |
-| `general` | Everyday lookup | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
-| `exact` | Quoted strings, error messages | Parallel → Brave → Serper → You.com → Tavily | Brave → Serper → You.com → Parallel |
-| `official` | Vendor, product, or government sites | Exa Lite → Brave → Serper → You.com | Exa Lite → Serper → Parallel → Brave |
-| `current` | News | You.com → Exa news → Octen → Serper News → Brave News → Tavily news | Exa news → You.com → Octen → Serper News → Brave News → Tavily news |
-| `scholar` | Papers, preprints, reviews | Exa Lite → Parallel → You.com → Serper Scholar | same |
-| `code` | Repositories, examples, API usage | Exa Lite (GitHub category) → Parallel → Serper → Exa Lite | same |
-| `context` | Grounding chunks within a token budget | Brave LLM Context → Parallel → You.com → Tavily | same |
+| `general` | Everyday lookup | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | Brave → Serper → DeepSeek → Vercel DeepSeek → You.com → Parallel → Vercel Parallel Fast → Tavily |
+| `exact` | Quoted strings, error messages | Parallel → Brave → Serper → You.com → Tavily → DeepSeek → Vercel DeepSeek | Brave → Serper → DeepSeek → Vercel DeepSeek → You.com → Parallel |
+| `official` | Vendor, product, or government sites | Exa Lite → Brave → Serper → You.com → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | Exa Lite → Serper → DeepSeek → Vercel DeepSeek → Parallel → Brave |
+| `current` | News | You.com (`preferNews`) → Exa news → Octen → Serper News → Brave News → Tavily news → DeepSeek → Vercel DeepSeek | Exa news → You.com (`preferNews`) → Octen → Serper News → Brave News → Tavily news → DeepSeek → Vercel DeepSeek |
+| `scholar` | Papers, preprints, reviews | Exa Lite (`category: publication`) → Parallel → You.com → Serper Scholar → Vercel Parallel Fast | same |
+| `code` | Repositories, examples, API usage | Exa Lite (`includeDomains: github.com`) → Parallel → Serper → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | same |
+| `context` | Grounding chunks within a token budget | Brave LLM Context → Parallel → You.com → Tavily → DeepSeek → Vercel DeepSeek | same |
 
-`quality: max` is for broad or multi-hop questions: English general starts with Exa Auto with highlights, Exa Lite becomes Exa Auto elsewhere, and Parallel, You.com, Brave, and Tavily switch to their deeper settings. Every mode accepts `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult`, translated into each provider's own parameters. `crossCheck: true` asks two independent indexes at once and marks which found each result.
+`quality: max` is for broad or multi-hop questions: English general starts with Exa Auto with highlights, `context` puts Parallel Advanced ahead of Brave LLM Context, Exa Lite becomes Exa Auto elsewhere, DeepSeek enables `needContent: true`, and Parallel, You.com, Brave, and Tavily switch to their deeper settings. Every mode accepts `includeDomains`, `excludeDomains`, `freshness`, and `maxCharsPerResult`, translated into each provider's own parameters (preserving path prefixes like `github.com/org` on Exa, Parallel, and `site:` providers while automatically skipping providers whose query-length limit would be exceeded: DeepSeek 128 chars, Serper 32 words, Brave 600/400 chars). `crossCheck: true` asks two independent indexes at once and marks which found each result.
 
 ### Where the orders come from
 
@@ -39,19 +39,22 @@ Three tools cover almost every lookup. Each picks a provider, falls back when on
 | Semantic discovery, official sites, papers, code repositories, page content | Exa official MCP |
 | Concise Google results, news, images, Scholar papers, and Google Lens | Serper (`serper_search`, `serper_news`, `serper_images`, `serper_scholar`, `serper_lens`) |
 | Independent web and news index (`extraSnippets`, `goggles`) and LLM-ready grounding chunks | Brave Web, News, Images, and LLM Context |
-| Web + News in one call, live `knowledge` cards, `full_page` Markdown, URL extraction | You.com Search and Contents |
-| Natural-language objectives with ranked excerpts, batch URL extraction, semantic image search | Parallel Search, Extract, and Images |
-| Fast search with long query-relevant highlights; URL extraction | Octen Search and Extract |
-| Managed extraction, mapping, crawling, and research | Tavily official MCP |
-| Search, scrape, crawl, map, and structured extraction | Firecrawl official MCP |
+| Web + News in one call (`preferNews`), live `knowledge` cards, `full_page` Markdown, `/v1/extract` URL extraction | You.com Search and Extract (`you_contents`) |
+| Natural-language objectives with ranked excerpts (`max_chars_total`), batch URL extraction (`links`), semantic image search | Parallel Search, Extract, and Images |
+| Fast search with long query-relevant highlights (`/search-premier`, 1,200 domains); URL extraction | Octen Search and Extract |
+| Chinese and bilingual search with summaries, rerank scores, native operators (max 128 chars), and Markdown fetch | DeepSeek (`deepseek_search`, `deepseek_fetch`) |
+| Hosted DeepSeek Search/Fetch ($0.75/1k via gateway free/paid credits) and Parallel Fast ($0 promo through 2027-01-31) on $0 default host model | Vercel AI Gateway (`vercel_deepseek_search`, `vercel_deepseek_fetch`, `vercel_parallel_fast`) |
+| Zero-cost host-side `Accept: text/markdown` negotiation (Cloudflare, Vercel Docs, Mintlify) with SSRF guardrails; opt-in, keyless | Direct Markdown (`direct_markdown_fetch`) |
+| Managed extraction, mapping, crawling, and research | Tavily official MCP (Bearer auth) |
+| Search, scrape, crawl, map, and structured extraction (local `firecrawl-mcp@3.41.0` STDIO or hosted remote MCP `https://mcp.firecrawl.dev/v2/mcp`; note Ultrasearch surcharges on narrow single-entity queries) | Firecrawl official MCP |
 | Sourced answers and research jobs | LinkUp official MCP |
 | Manual general or vertical search, parallel batches, URL extraction | AnySearch official MCP |
 | Native Web + X search with model synthesis and image or video understanding; `depth` up to 16 research agents | Grok / xAI Responses |
-| Chromium-rendered page reading, free up to 1,000 URLs a day | TinyFish Fetch |
-| Compact search, manual only | Querit, TinyFish Search, Jina Search |
-| Chinese local search with explicit quota use, manual only | Doubao |
+| Chromium-rendered page reading (free up to 1,000 URLs/day) plus web/news/research paper search | TinyFish Fetch and Search |
+| Filtered search (`code`/`finance` verticals), URL extraction (`querit_contents`), low-latency snippet search (`X-Respond-With: no-content`) | Querit, Jina Search |
+| Chinese local search with summaries and domain/time filters, manual only | Doubao |
 
-Remote MCP servers (Exa, Tavily, LinkUp, AnySearch) and the STDIO Firecrawl server are proxied with their official tool names and schemas. Everything else is a thin adapter over the provider's official REST API.
+Remote MCP servers (Exa, Tavily, LinkUp, AnySearch, and optionally Firecrawl `https://mcp.firecrawl.dev/v2/mcp`) and the STDIO Firecrawl server are proxied with their official tool names and schemas. Keyless `remote_mcp` (`auth.kind: "none"`) and `direct_markdown` require no keys. Everything else is a thin adapter over the provider's official REST or Gateway API.
 
 ## Install
 
@@ -86,7 +89,8 @@ Optional top-level settings:
 - `profile`: `full` (default), `curated`, or `lean`; see [Context cost](#context-cost). `--profile` and `SEARCH_TOOLKIT_PROFILE` override it.
 - `cache`: `enabled` (default `true`), `searchTtlSeconds` (900), `newsTtlSeconds` (300, for `mode: current`), `fetchTtlSeconds` (1800); see [Cache](#cache).
 - `shaping`: `maxDescriptionChars` (default 700) and `maxParamDescriptionChars` (default 220); `0` keeps upstream text untouched.
-- Per provider, `strategy`, `defaultTier`, `paidTools`, and annotated keys; see [Key rotation](#key-rotation).
+- Per provider, `strategy`, `defaultTier`, `paidTools`, and annotated keys; keys may be plain strings or `"env:VAR_NAME"` / `"file:/path/to/secret"` (with `~/` expansion), preserved by `migrate-config`; see [Key rotation](#key-rotation).
+- Per provider, `options` for adapters that read them: `grok` (`model`, `multiAgentModel`, `reasoningEffort`, `systemPrompt`, `customUrl`), `deepseek` (`localization`), `vercel_gateway` (`model`, `reasoning`, `enableParallelFast`, `localization`, `fallbackModels`, `authMethod`), `direct_markdown` (`timeoutMs`).
 - Per provider, `toolPolicy.allow`, `toolPolicy.deny`, and `toolPolicy.descriptions` (replacement descriptions keyed by upstream tool name). Firecrawl defaults to nine retrieval tools (scrape, map, search, crawl, crawl status, developer search, paper search, government search, credit usage); AnySearch hides `score`, a feedback tool whose description asks to be called after every search; `toolPolicy.allow: ["*"]` exposes its whole catalog.
 
 Version 1 configs (`automatic` / `manualOnly`) still load. To upgrade one:
@@ -162,23 +166,23 @@ Over MCP only `content` and `_meta` are sent. Claude Code and other clients show
 
 ### Result hygiene and provider health
 
-Within one result list, duplicate URLs (including `.md` / `.html` documentation mirrors) and the same page in another release (same site, same title once `x.y.z` versions are dropped) keep only their best-ranked copy, and providers are asked for two extra results so the list stays full. A provider whose automatic calls failed twice in a row is tried after its healthy peers until one success or a quiet half hour; `search_pool_status` shows the score as `recentFailure`.
+Within one result list, duplicate URLs (including `.md` / `.html` documentation mirrors) and the same page in another release (same site, same title once `x.y.z` versions are dropped) keep only their best-ranked copy, and providers are asked for two extra results so the list stays full (Serper caps `num` at 10 when `limit <= 10` to stay in its 1-credit tier). A provider whose automatic calls failed twice in a row is tried after its healthy peers until one success or a quiet half hour; health is isolated per capability (`search`, `images`, `fetch`) so fetch failures never demote search, and `search_pool_status` reports the worst active score as `recentFailure`.
 
 ### Context cost
 
-Every tool schema a client loads costs context. Descriptions are trimmed at a sentence boundary and parameter descriptions are capped; types, enums, defaults, and required lists stay as the upstream defined them. With every provider in the example config enabled:
+Every tool schema a client loads costs context. Descriptions are trimmed at a sentence boundary and parameter descriptions are capped; types, enums, defaults, and required lists stay as the upstream defined them. Profiles:
 
-| Profile | Exposes | Tools | Schema tokens |
-| --- | --- | --- | --- |
-| `full` (default) | Unified tools and every provider tool | 49 | about 20,000 |
-| `curated` | Unified tools, the gateway, and specialist tools (`exa_web_search_advanced_exa`, `brave_llm_context`, `parallel_extract`, `you_contents`, `serper_scholar`, `firecrawl_*`, `tavily_tavily_research`, `linkup_linkup_research`, `grok_*`, `doubao_search`, `anysearch_batch_search`) | 22 | about 9,400 |
-| `lean` | Unified tools, status, probe, and the gateway | 7 | about 2,100 |
+| Profile | Exposes |
+| --- | --- |
+| `full` (default) | Unified tools and every enabled provider tool |
+| `curated` | Unified tools, the gateway, and specialist tools (`exa_web_search_advanced_exa`, `exa_agent_run`, `brave_llm_context`, `parallel_search`, `parallel_extract`, `you_search`, `you_contents`, `deepseek_search`, `deepseek_fetch`, `vercel_deepseek_search`, `vercel_deepseek_fetch`, `vercel_parallel_fast`, `serper_scholar`, `firecrawl_firecrawl_map`, `firecrawl_firecrawl_crawl`, `firecrawl_firecrawl_check_crawl_status`, `tavily_tavily_research`, `linkup_linkup_research`, `grok_x_search`, `grok_web_x_search`, `doubao_search`, `anysearch_batch_search`) |
+| `lean` | Unified tools, status, probe, and the gateway (`7` tools, about 2,100 schema tokens) |
 
-`npm run measure -- --profile lean` reports startup time and tool-list size.
+`npm run measure -- --profile lean` reports exact startup time, tool counts, and schema token estimates for your enabled config.
 
 ### Startup
 
-Providers are discovered concurrently and each upstream's tool catalog is cached beside the state database, so later starts are ready in under half a second and connect to an upstream (including spawning Firecrawl) only when one of its tools is first called. A catalog older than 12 hours is refreshed in the background and announced with `notifications/tools/list_changed` when it changed.
+Providers are discovered concurrently and each upstream's tool catalog is cached beside the state database, so later starts are ready in under half a second and connect to an upstream (including spawning local STDIO Firecrawl, if configured) only when one of its tools is first called. Idle local `stdio_mcp` child processes are closed automatically after 10 minutes of inactivity (configurable via `integration.idleTimeoutMs`, `0` disables) and respawn transparently on the next call. A catalog older than 12 hours is refreshed in the background and announced with `notifications/tools/list_changed` when it changed.
 
 ## Streamable HTTP
 
@@ -190,7 +194,7 @@ $env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
 node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
-Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. `allowedArgumentValues` limits argument values for every tool, for example `{"depth":["fast","deep"]}` keeps a shared token off 16-agent Grok research; an omitted argument is allowed. Put public deployments behind HTTPS; provider keys stay on the server.
+Clients connect to `/mcp` with `Authorization: Bearer <client-token>`. A token without `tools` is an owner token. Shared tokens should carry a tool allowlist, a `requestsPerMinute` limit, and optionally `maxSessions`. `allowedArgumentValues` limits argument values for every tool, for example `{"depth":["fast","deep"]}` keeps a shared token off 16-agent Grok research; an omitted argument is allowed. Both `tools` and `allowedArgumentValues` are also enforced inside `provider_call`, and `provider_tools` filters out disallowed tools. Put public deployments behind HTTPS; provider keys stay on the server.
 
 The HTTP endpoint uses MCP SDK 1.32.2, limits JSON requests to 100 KiB and tool arguments to 10,000 total array elements and object keys before schema validation. Each session has its own server and transport. These HTTP limits do not apply to STDIO.
 
@@ -212,7 +216,7 @@ The cursor persists across restarts and is shared by concurrent processes throug
 | Out of credit or quota (`402`, Tavily `432`/`433`, or wording such as "Insufficient balance" or `spend_cap_exceeded` under any status) | Exhausted: benched 30 min, 6 h, then 24 h, and afterwards kept behind every healthy key | Next key; automatic routes move on when the pool is spent |
 | Plan limit ("not allowed for free accounts", "Payment method required") | Not benched | Up to 3 keys not marked `free` (paid, or plan unknown), otherwise the next provider |
 | `401` / `403` | Benched 1 h, then 6 h, then 24 h | Up to 3 keys |
-| `429` | Benched 1, 5, then 15 min, or for `Retry-After` | Up to 3 keys |
+| `429` / Tavily `434` | Benched 1, 5, then 15 min, or for `Retry-After` | Up to 3 keys |
 | `5xx` or dropped connection | Not benched | One more key |
 | Timeout | Not benched | None; the route moves to the next provider |
 | `400` / `404` / `422`, an upstream tool's own error, or the status of a page being read | Not benched | None |
@@ -241,7 +245,7 @@ A key is a string or an object, and both forms can be mixed in one pool:
 
 ### Balances
 
-`search-toolkit quota [provider]` reads the remaining credit of every key from the provider's own billing API, which costs nothing: Serper `/account`, Tavily `/usage`, Firecrawl `/v2/team/credit-usage`, LinkUp `/v1/credits/balance`, You.com `/v1/billing/account_balance`, TinyFish `/v1/wallet`. Each reading is stored: a key at zero is marked exhausted, an exhausted key with credit again (a recharge or a new billing period) returns to rotation, and `search_pool_status` shows the last reading and its age. It only runs when asked. `search_rotation_probe` makes one live call on each slot (or `slot`), so sticky and drain pools are probed key by key.
+`search-toolkit quota [provider]` reads the remaining credit of every key from the provider's own billing API, which costs nothing: Serper `/account`, Tavily `/usage`, Firecrawl `/v2/team/credit-usage`, LinkUp `/v1/credits/balance`, You.com `/v1/billing/account_balance`, TinyFish `/v1/wallet`, DeepSeek `/user/balance`, and Vercel AI Gateway `/v1/credits`. Each reading is stored: a key at zero is marked exhausted (except TinyFish, whose `$0` paid wallet is displayed without benching its separate free 1,000 URLs/day Fetch tier, and Vercel AI Gateway, whose `$0` credit balance does not bench `$0` promo tools such as `vercel_parallel_fast`), an exhausted key with credit again (a recharge or a new billing period) returns to rotation, and `search_pool_status` shows the last reading and its age. With `--json`, all queried providers are aggregated into a single JSON array. It only runs when asked. `search_rotation_probe` makes one live call on each slot (or `slot`), so sticky and drain pools are probed key by key.
 
 `providers.json`, raw keys, and state are ignored by Git, and output shows only masked key slots.
 

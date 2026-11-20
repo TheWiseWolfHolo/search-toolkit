@@ -12,9 +12,39 @@ export function result(value: unknown): unknown {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
 }
 
-/** Hide anything shaped like a key or token: long runs of key-safe characters. */
+const KNOWN_SECRETS = new Set<string>();
+const KNOWN_KEY_PREFIX = /\b(?:sk-[A-Za-z0-9_-]{12,}|tvly-[A-Za-z0-9_-]{12,}|fc-[A-Za-z0-9_-]{12,}|vck_[A-Za-z0-9_-]{12,}|BSA[A-Za-z0-9_-]{16,}|pplx-[A-Za-z0-9_-]{12,}|xai-[A-Za-z0-9_-]{12,}|exa-[A-Za-z0-9_-]{12,})/g;
+const BEARER_HEADER = /\b(Bearer\s+)[^\s"'`<>]+/gi;
+const SECRET_QUERY_PARAM = /([?&][a-z0-9_-]*(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|key)=)[^&\s"'`<>]+/gi;
+const PLAIN_SNAKE_IDENTIFIER = /^[a-z]+(?:_[a-z]+)+$/;
+
+/** Register configured key literals so `redact()` always masks them regardless of shape. */
+export function registerKnownSecrets(keys: Iterable<string>): void {
+  for (const raw of keys) {
+    const value = raw.trim();
+    if (value.length >= 6 && !value.startsWith("env:") && !value.startsWith("file:")) {
+      KNOWN_SECRETS.add(value);
+    }
+  }
+}
+
+/**
+ * Hide configured secrets, bearer tokens, secret query parameters, known key
+ * prefixes, and high-entropy key-like runs while preserving plain lowercase
+ * snake_case identifiers such as error codes and tool names.
+ */
 export function redact(text: string): string {
-  return text.replace(/[A-Za-z0-9_-]{24,}/g, "<redacted>");
+  let out = text;
+  if (KNOWN_SECRETS.size > 0) {
+    for (const secret of Array.from(KNOWN_SECRETS).sort((a, b) => b.length - a.length)) {
+      if (out.includes(secret)) out = out.split(secret).join("<redacted>");
+    }
+  }
+  return out
+    .replace(BEARER_HEADER, "$1<redacted>")
+    .replace(SECRET_QUERY_PARAM, "$1<redacted>")
+    .replace(KNOWN_KEY_PREFIX, "<redacted>")
+    .replace(/[A-Za-z0-9_-]{24,}/g, (token) => (PLAIN_SNAKE_IDENTIFIER.test(token) ? token : "<redacted>"));
 }
 
 export function cleanError(error: unknown): string {
@@ -36,8 +66,9 @@ function modelVisibleAuto(auto: Record<string, unknown>): Record<string, unknown
   const { candidateRank: _rank, providerAttempt: _attempt, attempts, crossCheck, batch, ...rest } = auto;
   const visible: Record<string, unknown> = { ...rest };
   if (Array.isArray(attempts)) {
-    const list = attempts as Array<{ tool?: string; outcome?: string; status?: number }>;
-    // A first-try success says nothing the route does not already say.
+    const list = (attempts as Array<{ tool?: string; outcome?: string; status?: number }>)
+      .filter((attempt) => attempt.outcome !== "skipped");
+    // A first-try success (ignoring zero-cost optional probes) says nothing the route does not already say.
     if (list.length > 1 || list.some((attempt) => attempt.outcome !== "success")) {
       visible.attempts = list.map((attempt) => `${attempt.tool}:${attempt.status ?? attempt.outcome}`);
     }

@@ -8,13 +8,24 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const CAPABILITIES: readonly AutoCapability[] = ["search", "images", "fetch"];
 // Providers whose upstream tools can fetch a known URL; granted "fetch" when migrating a v1 config.
-const FETCH_CAPABLE = new Set(["exa", "tavily", "firecrawl", "linkup", "anysearch", "parallel", "you"]);
+const FETCH_CAPABLE = new Set([
+  "exa", "tavily", "firecrawl", "linkup", "anysearch", "parallel", "you",
+  "tinyfish", "octen", "querit", "deepseek", "vercel_gateway", "direct_markdown",
+]);
 const STRATEGIES: readonly KeyStrategy[] = ["round_robin", "sticky", "drain"];
 const TIERS: readonly KeyTier[] = ["free", "paid"];
 const KEY_FIELDS = new Set(["key", "tier", "label", "allowTools", "denyTools"]);
+const KNOWN_REST_ADAPTERS = new Set([
+  "querit", "serper", "doubao", "jina", "tinyfish", "brave", "you", "parallel", "grok", "octen",
+  "deepseek", "vercel_gateway", "direct_markdown",
+]);
+const KNOWN_AUTH_KINDS = new Set(["header", "bearer", "query", "none"]);
 // Provider options that some adapter actually reads. Everything else is dead weight.
 const CONSUMED_OPTIONS: Record<string, readonly string[]> = {
   grok: ["model", "multiAgentModel", "reasoningEffort", "systemPrompt", "customUrl"],
+  deepseek: ["localization"],
+  vercel_gateway: ["model", "reasoning", "enableParallelFast", "localization", "fallbackModels", "authMethod"],
+  direct_markdown: ["timeoutMs"],
 };
 const PROVIDER_FIELDS = new Set([
   "enabled", "automatic", "manualOnly", "auto", "keys", "integration", "toolPolicy", "options",
@@ -55,11 +66,11 @@ export function loadConfig(path = defaultConfigPath()): ToolkitConfig {
 }
 
 export function loadConfigWithNotes(path = defaultConfigPath()): LoadedConfig {
-  return normalizeConfig(readConfigFile(path));
+  return normalizeConfig(readConfigFile(path), dirname(resolve(path)));
 }
 
 /** Accept v1 and v2 files and return the v2 shape the rest of the code uses. */
-export function normalizeConfig(raw: unknown): LoadedConfig {
+export function normalizeConfig(raw: unknown, baseDir?: string): LoadedConfig {
   const record = asRecord(raw, "config");
   const version = record.version;
   if (version !== 1 && version !== 2) throw new Error(`Unsupported config version: ${String(version)}`);
@@ -70,7 +81,7 @@ export function normalizeConfig(raw: unknown): LoadedConfig {
   const providersRaw = asRecord(record.providers, "providers");
   const providers: Record<string, ProviderConfig> = {};
   for (const [name, value] of Object.entries(providersRaw)) {
-    providers[name] = normalizeProvider(name, asRecord(value, `${name}`), version, notes);
+    providers[name] = normalizeProvider(name, asRecord(value, `${name}`), version, notes, baseDir);
   }
   const config: ToolkitConfig = { version: 2, statePath: record.statePath as string, providers };
   if (record.profile !== undefined) config.profile = record.profile as NonNullable<ToolkitConfig["profile"]>;
@@ -80,7 +91,7 @@ export function normalizeConfig(raw: unknown): LoadedConfig {
   return { config, notes };
 }
 
-function normalizeProvider(name: string, raw: Record<string, unknown>, version: unknown, notes: string[]): ProviderConfig {
+function normalizeProvider(name: string, raw: Record<string, unknown>, version: unknown, notes: string[], baseDir?: string): ProviderConfig {
   for (const field of Object.keys(raw)) {
     if (!PROVIDER_FIELDS.has(field)) notes.push(`${name}.${field} is not a recognised field and is ignored`);
   }
@@ -95,60 +106,121 @@ function normalizeProvider(name: string, raw: Record<string, unknown>, version: 
     }
     auto = raw.auto as AutoCapability[];
   }
-  const options = raw.options && typeof raw.options === "object" ? raw.options as Record<string, unknown> : undefined;
+  const options = raw.options && typeof raw.options === "object" && !Array.isArray(raw.options)
+    ? raw.options as Record<string, unknown>
+    : undefined;
   const integration = raw.integration as ProviderConfig["integration"];
   const consumed = integration?.kind === "rest" ? CONSUMED_OPTIONS[integration.adapter] ?? [] : [];
   const unused = Object.keys(options ?? {}).filter((key) => !consumed.includes(key));
   if (unused.length) notes.push(`${name}.options.{${unused.join(",")}} is never read by this server`);
-  const { keys, keyMeta } = normalizeKeys(name, raw.keys, notes);
-  const provider: ProviderConfig = { enabled: raw.enabled === true, auto, keys, integration };
+  const enabled = raw.enabled === true;
+  const { keys, keyRefs, keyMeta } = normalizeKeys(name, raw.keys, enabled, notes, baseDir);
+  const provider: ProviderConfig = { enabled, auto, keys, integration };
+  if (keyRefs.some((ref) => ref !== undefined)) provider.keyRefs = keyRefs;
   if (keyMeta.some((meta) => Object.keys(meta).length)) provider.keyMeta = keyMeta;
   if (raw.strategy !== undefined) provider.strategy = raw.strategy as KeyStrategy;
   if (raw.defaultTier !== undefined) provider.defaultTier = raw.defaultTier as KeyTier;
   if (raw.paidTools !== undefined) provider.paidTools = raw.paidTools as string[];
   if (raw.toolPolicy !== undefined) provider.toolPolicy = raw.toolPolicy as NonNullable<ProviderConfig["toolPolicy"]>;
-  if (options && Object.keys(options).length && consumed.length) provider.options = options;
+  if (options && consumed.length) {
+    const kept = Object.fromEntries(Object.entries(options).filter(([key]) => consumed.includes(key)));
+    if (Object.keys(kept).length) provider.options = kept;
+  }
   return provider;
 }
 
 /**
- * A key is either its plain string or `{ key, tier?, label?, allowTools?, denyTools? }`.
- * Both shapes become a plain key list plus parallel annotations.
+ * Resolve `env:VAR_NAME` and `file:/path/to/secret` indirections so credentials
+ * do not need to sit in plaintext inside providers.json. Disabled providers skip
+ * env/file reads so example or paused entries stay valid and never fail on
+ * unreadable paths.
  */
-function normalizeKeys(name: string, raw: unknown, notes: string[]): { keys: string[]; keyMeta: KeyMeta[] } {
+function resolveKeyRef(
+  rawKey: string,
+  enabled: boolean,
+  label: string,
+  baseDir?: string,
+): { value: string; ref?: string } {
+  const trimmed = rawKey.trim();
+  if (trimmed.startsWith("env:")) {
+    const varName = trimmed.slice(4).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
+      throw new Error(`${label} has invalid env reference: ${trimmed}`);
+    }
+    if (!enabled) return { value: trimmed, ref: trimmed };
+    const envVal = process.env[varName]?.trim();
+    if (!envVal) throw new Error(`${label}: environment variable ${varName} is not set`);
+    if (/[\r\n]/.test(envVal)) throw new Error(`${label}: resolved key from ${varName} contains newline characters`);
+    return { value: envVal, ref: trimmed };
+  }
+  if (trimmed.startsWith("file:")) {
+    const filePath = trimmed.slice(5).trim();
+    if (!filePath) throw new Error(`${label} has empty file reference`);
+    if (!enabled) return { value: trimmed, ref: trimmed };
+    const resolved = filePath.startsWith("~/") || filePath.startsWith("~\\")
+      ? resolve(homedir(), filePath.slice(2))
+      : resolve(baseDir ?? process.cwd(), filePath);
+    if (!existsSync(resolved)) throw new Error(`${label}: secret file not found: ${resolved}`);
+    const contents = readFileSync(resolved, "utf8").trim();
+    if (!contents) throw new Error(`${label}: secret file is empty: ${resolved}`);
+    if (/[\r\n]/.test(contents)) throw new Error(`${label}: secret file contains newline characters`);
+    return { value: contents, ref: trimmed };
+  }
+  if (/[\r\n]/.test(trimmed)) throw new Error(`${label}: key contains newline characters`);
+  return { value: trimmed };
+}
+
+/**
+ * A key is either its plain string (or `env:VAR` / `file:PATH`) or
+ * `{ key, tier?, label?, allowTools?, denyTools? }`. Both shapes become a plain
+ * key list plus parallel references and annotations.
+ */
+function normalizeKeys(
+  name: string,
+  raw: unknown,
+  enabled: boolean,
+  notes: string[],
+  baseDir?: string,
+): { keys: string[]; keyRefs: Array<string | undefined>; keyMeta: KeyMeta[] } {
   if (!Array.isArray(raw)) throw new Error(`${name}.keys must be an array`);
   const keys: string[] = [];
+  const keyRefs: Array<string | undefined> = [];
   const keyMeta: KeyMeta[] = [];
   raw.forEach((entry, slot) => {
+    const label = `${name}.keys[${slot}]`;
     if (typeof entry === "string") {
-      keys.push(entry);
+      const resolved = resolveKeyRef(entry, enabled, label, baseDir);
+      keys.push(resolved.value);
+      keyRefs.push(resolved.ref);
       keyMeta.push({});
       return;
     }
     if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof (entry as { key?: unknown }).key !== "string") {
-      throw new Error(`${name}.keys[${slot}] must be a string or an object with a string key`);
+      throw new Error(`${label} must be a string or an object with a string key`);
     }
     const record = entry as Record<string, unknown>;
     for (const field of Object.keys(record)) {
-      if (!KEY_FIELDS.has(field)) notes.push(`${name}.keys[${slot}].${field} is not a recognised field and is ignored`);
+      if (!KEY_FIELDS.has(field)) notes.push(`${label}.${field} is not a recognised field and is ignored`);
     }
     const meta: KeyMeta = {};
     if (record.tier !== undefined) {
-      if (!TIERS.includes(record.tier as KeyTier)) throw new Error(`${name}.keys[${slot}].tier must be "free" or "paid"`);
+      if (!TIERS.includes(record.tier as KeyTier)) throw new Error(`${label}.tier must be "free" or "paid"`);
       meta.tier = record.tier as KeyTier;
     }
     if (record.label !== undefined) {
-      if (typeof record.label !== "string") throw new Error(`${name}.keys[${slot}].label must be a string`);
+      if (typeof record.label !== "string") throw new Error(`${label}.label must be a string`);
       meta.label = record.label;
     }
     for (const field of ["allowTools", "denyTools"] as const) {
       if (record[field] === undefined) continue;
-      meta[field] = toolNames(record[field], `${name}.keys[${slot}].${field}`);
+      meta[field] = toolNames(record[field], `${label}.${field}`);
     }
-    keys.push(record.key as string);
+    const resolved = resolveKeyRef(record.key as string, enabled, label, baseDir);
+    keys.push(resolved.value);
+    keyRefs.push(resolved.ref);
     keyMeta.push(meta);
   });
-  return { keys, keyMeta };
+  return { keys, keyRefs, keyMeta };
 }
 
 function toolNames(value: unknown, label: string): string[] {
@@ -168,8 +240,8 @@ function keyDocument(key: string, meta: KeyMeta | undefined): unknown {
  * `auto`, and options no adapter reads are dropped. Returns what changed so the
  * caller can show it before writing.
  */
-export function migrateConfig(raw: unknown): { document: Record<string, unknown>; changes: string[] } {
-  const { config, notes } = normalizeConfig(raw);
+export function migrateConfig(raw: unknown, baseDir?: string): { document: Record<string, unknown>; changes: string[] } {
+  const { config, notes } = normalizeConfig(raw, baseDir);
   const source = asRecord(raw, "config");
   const changes = notes.filter((note) => !note.startsWith("config uses the v1 format"));
   if (source.version === 1) changes.unshift("version 1 → 2: automatic/manualOnly replaced by auto[] (exa, tavily, firecrawl, linkup, anysearch, parallel, you also get fetch where they were automatic or Firecrawl)");
@@ -178,7 +250,7 @@ export function migrateConfig(raw: unknown): { document: Record<string, unknown>
     auto: provider.auto,
     ...(provider.strategy ? { strategy: provider.strategy } : {}),
     ...(provider.defaultTier ? { defaultTier: provider.defaultTier } : {}),
-    keys: provider.keys.map((key, slot) => keyDocument(key, provider.keyMeta?.[slot])),
+    keys: provider.keys.map((key, slot) => keyDocument(provider.keyRefs?.[slot] ?? key, provider.keyMeta?.[slot])),
     ...(provider.paidTools ? { paidTools: provider.paidTools } : {}),
     integration: provider.integration,
     ...(provider.toolPolicy ? { toolPolicy: provider.toolPolicy } : {}),
@@ -204,8 +276,19 @@ export function validateConfig(config: ToolkitConfig): void {
   if (config.profile !== undefined && config.profile !== "full" && config.profile !== "curated" && config.profile !== "lean") {
     throw new Error("profile must be \"full\", \"curated\", or \"lean\"");
   }
+  if (config.shaping !== undefined) validateShaping(config.shaping);
   if (config.cache !== undefined) validateCache(config.cache);
   for (const [name, provider] of Object.entries(config.providers)) validateProvider(name, provider);
+}
+
+function validateShaping(shaping: NonNullable<ToolkitConfig["shaping"]>): void {
+  if (!shaping || typeof shaping !== "object" || Array.isArray(shaping)) throw new Error("shaping must be an object");
+  for (const field of ["maxDescriptionChars", "maxParamDescriptionChars"] as const) {
+    const value = shaping[field];
+    if (value !== undefined && (!Number.isInteger(value) || value < 0 || value > 100_000)) {
+      throw new Error(`shaping.${field} must be an integer from 0 to 100000`);
+    }
+  }
 }
 
 function validateCache(cache: NonNullable<ToolkitConfig["cache"]>): void {
@@ -219,10 +302,77 @@ function validateCache(cache: NonNullable<ToolkitConfig["cache"]>): void {
   }
 }
 
+function validateIntegration(name: string, integration: ProviderConfig["integration"]): void {
+  if (!integration || typeof integration !== "object" || Array.isArray(integration)) {
+    throw new Error(`${name}.integration must be an object`);
+  }
+  if (integration.kind === "rest") {
+    if (!KNOWN_REST_ADAPTERS.has(integration.adapter)) {
+      throw new Error(`${name}.integration.adapter is unknown: ${String(integration.adapter)}`);
+    }
+    if (integration.baseUrl !== undefined) {
+      let parsed: URL;
+      try {
+        parsed = new URL(integration.baseUrl);
+      } catch {
+        throw new Error(`${name}.integration.baseUrl must be a valid http(s) URL`);
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`${name}.integration.baseUrl must be a valid http(s) URL`);
+      }
+    }
+    if (integration.timeoutMs !== undefined && (!Number.isInteger(integration.timeoutMs) || integration.timeoutMs < 1_000 || integration.timeoutMs > 300_000)) {
+      throw new Error(`${name}.integration.timeoutMs must be an integer from 1000 to 300000`);
+    }
+    return;
+  }
+  if (integration.kind === "remote_mcp") {
+    if (typeof integration.url !== "string" || !integration.url.trim()) {
+      throw new Error(`${name}.integration.url is required`);
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(integration.url);
+    } catch {
+      throw new Error(`${name}.integration.url must be a valid http(s) URL`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(`${name}.integration.url must be a valid http(s) URL`);
+    }
+    const auth = integration.auth as { kind?: unknown; name?: unknown } | undefined;
+    if (!auth || typeof auth !== "object" || typeof auth.kind !== "string" || !KNOWN_AUTH_KINDS.has(auth.kind)) {
+      throw new Error(`${name}.integration.auth.kind must be one of header, bearer, query, none`);
+    }
+    if ((auth.kind === "header" || auth.kind === "query") && (typeof auth.name !== "string" || !auth.name.trim())) {
+      throw new Error(`${name}.integration.auth.name is required for ${auth.kind} auth`);
+    }
+    return;
+  }
+  if (integration.kind === "stdio_mcp") {
+    if (typeof integration.command !== "string" || !integration.command.trim()) {
+      throw new Error(`${name}.integration.command is required`);
+    }
+    if (!Array.isArray(integration.args) || integration.args.some((arg) => typeof arg !== "string")) {
+      throw new Error(`${name}.integration.args must be a string array`);
+    }
+    if (typeof integration.envKey !== "string" || !integration.envKey.trim()) {
+      throw new Error(`${name}.integration.envKey is required`);
+    }
+    if (integration.idleTimeoutMs !== undefined && (!Number.isInteger(integration.idleTimeoutMs) || integration.idleTimeoutMs < 0 || integration.idleTimeoutMs > 86_400_000)) {
+      throw new Error(`${name}.integration.idleTimeoutMs must be an integer from 0 to 86400000`);
+    }
+    return;
+  }
+  throw new Error(`${name}.integration.kind must be "remote_mcp", "stdio_mcp", or "rest"`);
+}
+
 function validateProvider(name: string, provider: ProviderConfig): void {
   if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error(`Invalid provider name: ${name}`);
+  validateIntegration(name, provider.integration);
   if (!Array.isArray(provider.keys)) throw new Error(`${name}.keys must be an array`);
-  if (provider.enabled && provider.keys.length === 0 && provider.integration.kind !== "remote_mcp") {
+  const keylessAllowed = (provider.integration.kind === "remote_mcp" && provider.integration.auth.kind === "none")
+    || (provider.integration.kind === "rest" && provider.integration.adapter === "direct_markdown");
+  if (provider.enabled && provider.keys.length === 0 && !keylessAllowed) {
     throw new Error(`${name} is enabled but has no keys`);
   }
   const unique = new Set(provider.keys.map((key) => key.trim()).filter(Boolean));
@@ -236,6 +386,12 @@ function validateProvider(name: string, provider: ProviderConfig): void {
   if (provider.paidTools !== undefined) toolNames(provider.paidTools, `${name}.paidTools`);
   if (provider.keyMeta !== undefined && provider.keyMeta.length !== provider.keys.length) {
     throw new Error(`${name}.keyMeta must match keys`);
+  }
+  if (provider.integration.kind === "rest" && provider.integration.adapter === "direct_markdown") {
+    const timeoutMs = provider.options?.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1_000 || (timeoutMs as number) > 15_000)) {
+      throw new Error(`${name}.options.timeoutMs must be an integer from 1000 to 15000`);
+    }
   }
   for (const [policyName, values] of Object.entries(provider.toolPolicy ?? {})) {
     if (policyName === "descriptions") {

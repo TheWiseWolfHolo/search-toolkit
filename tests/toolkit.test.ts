@@ -124,7 +124,7 @@ test("automatic route profiles keep their measured provider order", () => {
   const names = (mode: Parameters<typeof autoCandidates>[0], quality: Parameters<typeof autoCandidates>[1] = "balanced", extra = {}) =>
     autoCandidates(mode, quality, { ...request, ...extra }).map((item) => item.name);
   assert.deepEqual(names("general"), [
-    "parallel_search", "serper_search", "exa_web_search_advanced_exa", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search",
+    "parallel_search", "serper_search", "exa_web_search_advanced_exa", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search", "deepseek_search", "vercel_deepseek_search", "vercel_parallel_fast",
   ]);
   // Providers are asked for two extra results; duplicates are dropped before the list is capped.
   assert.deepEqual(autoCandidates("general", "balanced", request)[0]?.nativeArguments, {
@@ -134,44 +134,55 @@ test("automatic route profiles keep their measured provider order", () => {
     query: "route contract", numResults: 9, type: "lite",
   });
   assert.deepEqual(names("general", "max"), [
-    "exa_web_search_advanced_exa", "parallel_search", "serper_search", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search",
+    "exa_web_search_advanced_exa", "parallel_search", "serper_search", "you_search", "octen_search", "brave_web_search", "tavily_tavily_search", "deepseek_search", "vercel_deepseek_search", "vercel_parallel_fast",
   ]);
   assert.deepEqual(autoCandidates("general", "max", request)[0]?.nativeArguments, {
     query: "route contract", numResults: 9, type: "auto", enableHighlights: true,
   });
   assert.equal(autoCandidates("general", "max", request)[1]?.nativeArguments?.mode, "advanced");
   assert.equal(autoCandidates("general", "max", request)[3]?.nativeArguments?.contentLevel, "highlights");
-  assert.deepEqual(names("exact"), ["parallel_search", "brave_web_search", "serper_search", "you_search", "tavily_tavily_search"]);
+  assert.deepEqual(names("exact"), [
+    "parallel_search", "brave_web_search", "serper_search", "you_search", "tavily_tavily_search", "deepseek_search", "vercel_deepseek_search",
+  ]);
   assert.deepEqual(autoCandidates("exact", "max", request)[4]?.nativeArguments, {
     query: "route contract", max_results: 9, search_depth: "advanced", exact_match: true,
   });
-  assert.deepEqual(names("official"), ["exa_web_search_advanced_exa", "brave_web_search", "serper_search", "you_search"]);
+  assert.deepEqual(names("official"), [
+    "exa_web_search_advanced_exa", "brave_web_search", "serper_search", "you_search", "deepseek_search", "vercel_deepseek_search", "vercel_parallel_fast",
+  ]);
   assert.equal(autoCandidates("official", "balanced", request)[0]?.nativeArguments?.type, "lite");
   assert.equal(autoCandidates("official", "max", request)[0]?.nativeArguments?.type, "auto");
   assert.equal(autoCandidates("official", "max", request)[1]?.nativeArguments?.extraSnippets, true);
-  assert.deepEqual(names("context"), ["brave_llm_context", "parallel_search", "you_search", "tavily_tavily_search"]);
+  assert.deepEqual(names("context"), [
+    "brave_llm_context", "parallel_search", "you_search", "tavily_tavily_search", "deepseek_search", "vercel_deepseek_search",
+  ]);
   assert.deepEqual(autoCandidates("context", "balanced", request)[0]?.nativeArguments, {
     query: "route contract", count: 20, maximumNumberOfTokens: 4096,
   });
   assert.equal(autoCandidates("context", "max", request)[0]?.nativeArguments?.mode, "advanced");
-  assert.deepEqual(names("current"), ["you_search", "exa_web_search_advanced_exa", "octen_search", "serper_news", "brave_news_search", "tavily_tavily_search"]);
+  assert.deepEqual(names("current"), [
+    "you_search", "exa_web_search_advanced_exa", "octen_search", "serper_news", "brave_news_search", "tavily_tavily_search", "deepseek_search", "vercel_deepseek_search",
+  ]);
   const weekAgo = new Date(Date.now() - 604_800_000).toISOString().slice(0, 10);
-  assert.deepEqual(autoCandidates("current", "balanced", request).map((item) => item.nativeArguments), [
-    { query: "route contract", limit: 9, contentLevel: "snippets", freshness: "week" },
+  assert.deepEqual(autoCandidates("current", "balanced", request).slice(0, 6).map((item) => item.nativeArguments), [
+    { query: "route contract", limit: 9, contentLevel: "snippets", freshness: "week", preferNews: true },
     { query: "route contract", numResults: 9, type: "lite", category: "news", startPublishedDate: weekAgo },
     { query: "route contract", limit: 9, freshness: "week" },
     { query: "route contract", limit: 9, tbs: "qdr:w" },
     { query: "route contract", limit: 9, freshness: "pw" },
     { query: "route contract", max_results: 9, search_depth: "basic", topic: "news", time_range: "week" },
   ]);
+  assert.equal(autoCandidates("current", "max", { ...request, freshness: "month" })[1]?.nativeArguments?.type, "auto");
   assert.equal(autoCandidates("current", "max", { ...request, freshness: "month" })[5]?.nativeArguments?.time_range, "month");
-  assert.deepEqual(names("scholar"), ["exa_web_search_advanced_exa", "parallel_search", "you_search", "serper_scholar"]);
+  assert.deepEqual(names("scholar"), ["exa_web_search_advanced_exa", "parallel_search", "you_search", "serper_scholar", "vercel_parallel_fast"]);
   assert.equal(autoCandidates("scholar", "balanced", request)[0]?.nativeArguments?.type, "lite");
+  assert.equal(autoCandidates("scholar", "balanced", request)[0]?.nativeArguments?.category, "publication");
   assert.match(String(autoCandidates("scholar", "max", request)[0]?.nativeArguments?.objective), /Research papers.*route contract/);
-  assert.deepEqual(names("code"), ["exa_web_search_advanced_exa", "parallel_search", "serper_search", "exa_web_search_advanced_exa"]);
-  assert.equal(autoCandidates("code", "balanced", request)[0]?.nativeArguments?.category, "github");
+  assert.deepEqual(names("code"), ["exa_web_search_advanced_exa", "parallel_search", "serper_search", "deepseek_search", "vercel_deepseek_search", "vercel_parallel_fast"]);
+  assert.deepEqual(autoCandidates("code", "balanced", request)[0]?.nativeArguments?.includeDomains, ["github.com"]);
+  assert.equal(autoCandidates("code", "balanced", request)[0]?.nativeArguments?.category, undefined);
   assert.equal(autoCandidates("code", "balanced", request)[0]?.nativeArguments?.type, "lite");
-  assert.equal(autoCandidates("code", "max", request)[0]?.nativeArguments?.type, undefined);
+  assert.equal(autoCandidates("code", "max", request)[0]?.nativeArguments?.type, "auto");
   assert.deepEqual(imageCandidates({ query: "route contract", limit: 9 }).map((item) => item.name), [
     "brave_image_search", "serper_images", "parallel_image_search",
   ]);
@@ -185,18 +196,19 @@ test("Chinese queries lead with Brave and Serper in Chinese-market settings", ()
   assert.equal(isChineseQuery("深圳地铁16号线二期开通时间"), true);
   assert.equal(isChineseQuery("MySQL 联合索引"), true);
   assert.equal(isChineseQuery("東京の天気"), false, "kana marks Japanese");
+  assert.equal(isChineseQuery("漢字 한글"), false, "Hangul marks Korean");
   assert.equal(isChineseQuery("node 中"), false, "one character is not enough");
   const general = autoCandidates("general", "balanced", { query: "深圳地铁16号线", limit: 6 });
   assert.deepEqual(general.map((item) => item.name), [
-    "brave_web_search", "serper_search", "you_search", "parallel_search", "tavily_tavily_search",
+    "brave_web_search", "serper_search", "deepseek_search", "vercel_deepseek_search", "you_search", "parallel_search", "vercel_parallel_fast", "tavily_tavily_search",
   ]);
   assert.deepEqual(general[0]?.nativeArguments, { query: "深圳地铁16号线", limit: 8, searchLang: "zh-hans", country: "CN" });
   assert.deepEqual(general[1]?.nativeArguments, { query: "深圳地铁16号线", limit: 8, gl: "cn", hl: "zh-cn" });
   assert.deepEqual(autoCandidates("exact", "balanced", { query: "报错 内存不足" }).map((item) => item.name), [
-    "brave_web_search", "serper_search", "you_search", "parallel_search",
+    "brave_web_search", "serper_search", "deepseek_search", "vercel_deepseek_search", "you_search", "parallel_search",
   ]);
   assert.deepEqual(autoCandidates("official", "balanced", { query: "微信小程序 开发文档" }).map((item) => item.name), [
-    "exa_web_search_advanced_exa", "serper_search", "parallel_search", "brave_web_search",
+    "exa_web_search_advanced_exa", "serper_search", "deepseek_search", "vercel_deepseek_search", "parallel_search", "brave_web_search",
   ]);
   // Chinese news leads with Exa news filtered by publish date (2026-10 eval), then You.com.
   assert.equal(autoCandidates("current", "balanced", { query: "台风 预警" })[0]?.nativeArguments?.category, "news");
@@ -207,8 +219,9 @@ test("Chinese queries lead with Brave and Serper in Chinese-market settings", ()
     query: "台风 预警", limit: 8, tbs: "qdr:w", gl: "cn", hl: "zh-cn",
   });
   assert.equal(autoCandidates("context", "balanced", { query: "大模型 评测" })[0]?.nativeArguments?.searchLang, "zh-hans");
+  assert.equal(autoCandidates("context", "balanced", { query: "大模型 评测" })[0]?.nativeArguments?.country, "CN");
   assert.deepEqual(autoCandidates("current", "balanced", { query: "台风 预警" })[1]?.nativeArguments, {
-    query: "台风 预警", limit: 8, language: "zh-hans", country: "CN", contentLevel: "snippets", freshness: "week",
+    query: "台风 预警", limit: 8, language: "zh-hans", country: "CN", contentLevel: "snippets", freshness: "week", preferNews: true,
   });
 });
 
@@ -229,15 +242,15 @@ test("autoCandidates translates domain filters, freshness, and maxCharsPerResult
     // A publish-date filter; maxAgeSeconds would only bound cache staleness.
     afterDate: new Date(Date.now() - 2_592_000_000).toISOString().slice(0, 10),
     maxCharsPerResult: 900,
-    includeDomains: ["modelcontextprotocol.io", "github.com"],
+    includeDomains: ["modelcontextprotocol.io", "github.com/modelcontextprotocol"],
     excludeDomains: ["reddit.com"],
   });
-  // Exa Lite takes native domain and publish-date filters, but not contextMaxCharacters.
+  // Exa Lite takes native domain (with path prefixes) and publish-date filters, but not contextMaxCharacters.
   assert.deepEqual(byName.get("exa_web_search_advanced_exa"), {
     query: "mcp transport",
     numResults: 7,
     type: "lite",
-    includeDomains: ["modelcontextprotocol.io", "github.com"],
+    includeDomains: ["modelcontextprotocol.io", "github.com/modelcontextprotocol"],
     excludeDomains: ["reddit.com"],
     startPublishedDate: new Date(Date.now() - 2_592_000_000).toISOString().slice(0, 10),
   });

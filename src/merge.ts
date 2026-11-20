@@ -4,7 +4,7 @@ export interface MergedItem extends SearchItem {
   foundBy: string[];
 }
 
-const TRACKING_PARAM = /^(?:utm_|fbclid$|gclid$|mc_|ref$|ref_src$|spm$)/i;
+const TRACKING_PARAM = /^(?:utm_|fbclid$|gclid$|msclkid$|mc_|ref$|ref_src$|spm$|si$|vd_source$|share_source$|share_medium$|ved$|ei$|usg$)/i;
 
 /** URL identity for de-duplication: scheme, www, fragment, trailing slash, doc suffix (.md/.html) and tracking parameters are ignored. */
 export function canonicalUrl(value: string): string {
@@ -102,14 +102,33 @@ export function mergeItems(lists: Array<{ provider: string; items: SearchItem[] 
         continue;
       }
       if (!existing.foundBy.includes(list.provider)) existing.foundBy.push(list.provider);
-      if (item.text.length > existing.text.length) existing.text = item.text;
+      if ((item.text?.length ?? 0) > (existing.text?.length ?? 0)) existing.text = item.text;
       if (!existing.date && item.date) existing.date = item.date;
+      if (!existing.title && item.title) existing.title = item.title;
       if (/\.md(?:$|[?#])/i.test(existing.url) && !/\.md(?:$|[?#])/i.test(item.url)) {
         existing.url = item.url;
       }
     }
   }
-  return Array.from(merged.values())
+  const ranked = Array.from(merged.values())
+    .sort((a, b) => (b.foundBy.length - a.foundBy.length) || (a.rank - b.rank));
+  // Collapse release/mirror near-duplicates across indexes while merging corroboration and richer excerpts.
+  const collapsed = new Map<string, MergedItem & { rank: number }>();
+  for (const entry of ranked) {
+    const nearKey = nearDuplicateKey(entry);
+    const existing = collapsed.get(nearKey);
+    if (!existing) {
+      collapsed.set(nearKey, { ...entry, foundBy: [...entry.foundBy] });
+      continue;
+    }
+    for (const provider of entry.foundBy) {
+      if (!existing.foundBy.includes(provider)) existing.foundBy.push(provider);
+    }
+    if ((entry.text?.length ?? 0) > (existing.text?.length ?? 0)) existing.text = entry.text;
+    if (!existing.date && entry.date) existing.date = entry.date;
+    if (!existing.title && entry.title) existing.title = entry.title;
+  }
+  return Array.from(collapsed.values())
     .sort((a, b) => (b.foundBy.length - a.foundBy.length) || (a.rank - b.rank))
     .slice(0, limit)
     .map(({ rank: _rank, ...item }) => item);

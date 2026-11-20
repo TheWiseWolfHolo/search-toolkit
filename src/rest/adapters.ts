@@ -1,5 +1,7 @@
 import type { RestAdapter } from "./base.js";
 import { BraveAdapter } from "./providers/brave.js";
+import { DeepSeekAdapter } from "./providers/deepseek.js";
+import { DirectMarkdownAdapter } from "./providers/direct-markdown.js";
 import { DoubaoAdapter } from "./providers/doubao.js";
 import { GrokAdapter } from "./providers/grok.js";
 import { JinaAdapter } from "./providers/jina.js";
@@ -8,11 +10,13 @@ import { ParallelAdapter } from "./providers/parallel.js";
 import { QueritAdapter } from "./providers/querit.js";
 import { SerperAdapter } from "./providers/serper.js";
 import { TinyfishAdapter } from "./providers/tinyfish.js";
+import { VercelGatewayAdapter } from "./providers/vercel-gateway.js";
 import { YouAdapter } from "./providers/you.js";
 
 export {
-  BraveAdapter, DoubaoAdapter, GrokAdapter, JinaAdapter, OctenAdapter, ParallelAdapter,
-  QueritAdapter, SerperAdapter, TinyfishAdapter, YouAdapter,
+  BraveAdapter, DeepSeekAdapter, DirectMarkdownAdapter, DoubaoAdapter, GrokAdapter, JinaAdapter,
+  OctenAdapter, ParallelAdapter, QueritAdapter, SerperAdapter, TinyfishAdapter, VercelGatewayAdapter,
+  YouAdapter,
 };
 
 const ADAPTERS: Record<string, () => RestAdapter> = {
@@ -26,6 +30,9 @@ const ADAPTERS: Record<string, () => RestAdapter> = {
   parallel: () => new ParallelAdapter(),
   grok: () => new GrokAdapter(),
   octen: () => new OctenAdapter(),
+  deepseek: () => new DeepSeekAdapter(),
+  vercel_gateway: () => new VercelGatewayAdapter(),
+  direct_markdown: () => new DirectMarkdownAdapter(),
 };
 
 export const REST_ADAPTER_NAMES = Object.keys(ADAPTERS);

@@ -62,11 +62,18 @@ export interface NormalizeOptions {
   html?: boolean;
 }
 
+function firstNonEmptyString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
 export function normalizeItem(value: unknown, options: NormalizeOptions = {}): SearchItem {
   const item = objectRecord(value);
   const clean = options.html ? cleanHighlightText : (text: string) => text;
   const date = pickDate(item, options.dateKeys);
-  const primaryText = String(item.text ?? item.snippet ?? item.description ?? item.content ?? item.Summary ?? "");
+  const primaryText = firstNonEmptyString(item.text, item.snippet, item.description, item.content, item.summary, item.Summary);
   const extraSnippets = Array.isArray(item.extra_snippets)
     ? item.extra_snippets.map((entry) => String(entry ?? "").trim()).filter(Boolean)
     : [];
@@ -78,9 +85,9 @@ export function normalizeItem(value: unknown, options: NormalizeOptions = {}): S
   ].filter(Boolean).join(" · ");
   const combined = [scholarMeta, primaryText, ...extraSnippets].filter(Boolean).join("\n");
   return {
-    title: clean(String(item.title ?? item.name ?? item.Title ?? item.url ?? "")),
-    url: String(item.url ?? item.link ?? item.Url ?? ""),
-    text: clean(combined.slice(0, 4_000)),
+    title: clean(firstNonEmptyString(item.title, item.name, item.Title, item.url, item.link, item.Url)),
+    url: firstNonEmptyString(item.url, item.link, item.Url),
+    text: clean(combined).slice(0, 4_000),
     ...(date ? { date } : {}),
   };
 }
@@ -319,8 +326,12 @@ export function normalizeParallelImage(value: unknown): ImageSearchItem {
   });
 }
 
+const REQUIRED_IMAGE_KEYS = new Set(["title", "url", "text", "imageUrl"]);
+
 function compactImageItem(item: Record<string, unknown>): ImageSearchItem {
-  return Object.fromEntries(Object.entries(item).filter(([, value]) => value !== undefined && value !== "")) as unknown as ImageSearchItem;
+  return Object.fromEntries(
+    Object.entries(item).filter(([key, value]) => REQUIRED_IMAGE_KEYS.has(key) || (value !== undefined && value !== "")),
+  ) as unknown as ImageSearchItem;
 }
 
 export function extractResponseText(data: Record<string, unknown>): string {

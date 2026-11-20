@@ -22,7 +22,7 @@
       "integration": {
         "kind": "remote_mcp",
         "url": "https://mcp.tavily.com/mcp/",
-        "auth": { "kind": "query", "name": "tavilyApiKey" }
+        "auth": { "kind": "bearer" }
       }
     },
     "linkup": {
@@ -60,7 +60,7 @@
       "integration": {
         "kind": "stdio_mcp",
         "command": "npx",
-        "args": ["-y", "firecrawl-mcp@3.37.0"],
+        "args": ["-y", "firecrawl-mcp@3.41.0"],
         "envKey": "FIRECRAWL_API_KEY"
       },
       "toolPolicy": {
@@ -146,6 +146,36 @@
       "auto": [],
       "keys": ["replace-me"],
       "integration": { "kind": "rest", "adapter": "doubao" }
+    },
+    "deepseek": {
+      "enabled": false,
+      "auto": ["search", "fetch"],
+      "keys": ["env:DEEPSEEK_API_KEY"],
+      "integration": { "kind": "rest", "adapter": "deepseek" }
+    },
+    "vercel_gateway": {
+      "enabled": false,
+      "auto": ["search", "fetch"],
+      "keys": ["env:AI_GATEWAY_API_KEY"],
+      "integration": { "kind": "rest", "adapter": "vercel_gateway" },
+      "options": {
+        "model": "nvidia/nemotron-3.5-lightning-free",
+        "reasoning": "none",
+        "enableParallelFast": true
+      }
+    },
+    "direct_markdown": {
+      "enabled": false,
+      "auto": ["fetch"],
+      "keys": [],
+      "integration": { "kind": "rest", "adapter": "direct_markdown" },
+      "options": { "timeoutMs": 4000 }
+    },
+    "jina": {
+      "enabled": false,
+      "auto": [],
+      "keys": ["file:~/.config/search-toolkit/jina.key"],
+      "integration": { "kind": "rest", "adapter": "jina" }
     }
   }
 }

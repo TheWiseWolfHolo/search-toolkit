@@ -115,6 +115,50 @@
         "Passes section set to Security Considerations to extract the relevant heading section.",
         "Does not run a search query for URLs it already has."
       ]
+    },
+    {
+      "id": 11,
+      "prompt": "只在 github.com/modelcontextprotocol 路径下找 StreamableHTTPServerTransport 的用法和示例，返回 5 条即可。",
+      "expected_output": "Uses search_auto in code mode with includeDomains preserving the github.com/modelcontextprotocol path prefix.",
+      "files": [],
+      "expectations": [
+        "Uses search_auto with mode code and includeDomains set to github.com/modelcontextprotocol.",
+        "Caps limit around 5.",
+        "Does not use deprecated category github."
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "帮我反搜这张公开图片的来源和最早出现页面：https://example.com/photo.jpg 。另外，我电脑桌面上的 local.png 也能直接传进去以图搜图吗？",
+      "expected_output": "Uses search_images with imageUrl for the public URL and clearly explains that local files cannot be searched by image without a public http(s) URL.",
+      "files": [],
+      "expectations": [
+        "Uses search_images with imageUrl set to https://example.com/photo.jpg.",
+        "Notes that Google Lens does not prove earliest publication date without checking source pages.",
+        "States clearly that local files cannot be searched by image unless hosted at a public http(s) URL."
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "帮我读取 https://vercel.com/docs/ai-gateway/models-and-providers/web-search 的 Using DeepSeek Search 这一节，用常规均衡模式即可。",
+      "expected_output": "Uses fetch_auto in balanced mode with section filtering so zero-cost native Markdown or balanced readers answer first.",
+      "files": [],
+      "expectations": [
+        "Uses fetch_auto with url and section set to Using DeepSeek Search.",
+        "Keeps quality at balanced rather than escalating unnecessarily to max or Firecrawl.",
+        "Does not run a search query for the known URL."
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "帮我查一下 @vercel 最近在 X 上有没有发过关于 AI Gateway 的动态，快速确认一下就行。",
+      "expected_output": "Uses grok_x_search at depth fast for a quick X lookup without escalating to expensive multi-agent depth max.",
+      "files": [],
+      "expectations": [
+        "Uses grok_x_search with allowedXHandles targeting vercel.",
+        "Keeps depth at fast rather than burning multi-agent research credits on depth max.",
+        "Treats X search as the right tool only because X posts themselves were requested."
+      ]
     }
   ]
 }

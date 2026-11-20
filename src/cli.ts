@@ -1,31 +1,43 @@
 #!/usr/bin/env node
 import { copyFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { defaultConfigPath, migrateConfig, normalizeConfig, readConfigFile, sanitizedConfig } from "./config.js";
-import { QUOTA_ENDPOINTS, readQuota } from "./quota.js";
+import { redact } from "./provenance.js";
+import { quotaEndpointFor, readQuota, type QuotaRow } from "./quota.js";
 import { SearchToolkit } from "./toolkit.js";
 import type { ToolkitProfile } from "./types.js";
 import { PACKAGE_VERSION } from "./version.js";
 
-const BOOLEAN_FLAGS = new Set(["json", "verbose", "write", "cross", "no-cache"]);
-
-const argv = process.argv.slice(2);
-const flags = takeFlags(argv);
-const command = argv.shift() ?? "help";
+const BOOLEAN_FLAGS = new Set(["json", "verbose", "write", "cross", "no-cache", "help", "version"]);
+const KNOWN_COMMANDS = new Set([
+  "help", "version", "migrate-config", "config", "reset", "quota", "cache-clear",
+  "tools", "status", "search", "images", "fetch", "call", "probe",
+]);
 
 try {
-  if (command === "migrate-config") {
+  const argv = process.argv.slice(2);
+  const flags = takeFlags(argv);
+  const command = flags.has("version") ? "version" : flags.has("help") ? "help" : (argv.shift() ?? "help");
+  if (command === "version") {
+    console.log(PACKAGE_VERSION);
+  } else if (command === "migrate-config") {
     migrate(flags);
   } else {
     await run(command, argv, flags);
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(redact(error instanceof Error ? error.message : String(error)));
   process.exitCode = 1;
 }
 
 async function run(name: string, args: string[], options: Flags): Promise<void> {
   if (name === "help") {
     console.log(helpText());
+    return;
+  }
+  if (!KNOWN_COMMANDS.has(name)) {
+    console.error(`Unknown command: ${name}\n\n${helpText()}`);
+    process.exitCode = 1;
     return;
   }
   const profile = options.string("profile");
@@ -45,8 +57,16 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       const provider = args.shift();
       const config = provider ? toolkit.config.providers[provider] : undefined;
       if (!provider || !config) throw new Error("Usage: search-toolkit reset <provider> [slot]");
-      const slot = args.length ? Number(args[0]) : undefined;
-      if (slot !== undefined && !Number.isInteger(slot)) throw new Error("slot must be an integer");
+      let slot: number | undefined;
+      if (args.length) {
+        const rawSlot = (args[0] ?? "").trim();
+        slot = rawSlot === "" ? Number.NaN : Number(rawSlot);
+        if (!Number.isInteger(slot) || slot < 0 || slot >= config.keys.length) {
+          throw new Error(config.keys.length
+            ? `slot must be an integer from 0 to ${config.keys.length - 1}`
+            : `${provider} has no configured keys`);
+        }
+      }
       const cleared = toolkit.rotation.reset(provider, config.keys, slot);
       console.log(`${provider}: cleared ${cleared} key${cleared === 1 ? "" : "s"}`);
       return;
@@ -55,13 +75,16 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       const wanted = args.shift();
       const names = wanted
         ? [wanted]
-        : Object.keys(QUOTA_ENDPOINTS).filter((provider) => toolkit.config.providers[provider]?.enabled);
+        : Object.entries(toolkit.config.providers)
+            .filter(([provider, config]) => config.enabled && Boolean(quotaEndpointFor(provider, config)))
+            .map(([provider]) => provider);
+      const allRows: QuotaRow[] = [];
       for (const provider of names) {
         const config = toolkit.config.providers[provider];
         if (!config) throw new Error(`Unknown provider: ${provider}`);
         const rows = await readQuota(provider, config, toolkit.rotation);
         if (options.has("json")) {
-          console.log(JSON.stringify(rows, null, 2));
+          allRows.push(...rows);
           continue;
         }
         for (const row of rows) {
@@ -72,6 +95,9 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
             : `error: ${row.error}`;
           console.log(`${provider} slot ${row.slot} ${row.masked}${who ? ` [${who}]` : ""}  ${detail}`);
         }
+      }
+      if (options.has("json")) {
+        console.log(JSON.stringify(allRows, null, 2));
       }
       return;
     }
@@ -94,7 +120,7 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
       const query = args.join(" ").trim();
       if (!query) {
         throw new Error(
-          "Usage: search-toolkit search <query> [--mode general|exact|current|official|scholar|code|context] [--quality balanced|max] [--limit n] [--freshness day|week|month|year] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars n] [--cross]",
+          "Usage: search-toolkit search <query> [--mode general|exact|current|official|scholar|code|context] [--quality balanced|max] [--limit n] [--freshness day|week|month|year] [--domains a.com,b.com] [--exclude-domains x.com] [--max-chars n] [--max-tokens n] [--cross]",
         );
       }
       const includeDomains = csvFlag(options.string("domains"));
@@ -106,18 +132,21 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
         ...optional("limit", options.number("limit")),
         ...optional("freshness", options.string("freshness")),
         ...optional("maxCharsPerResult", options.number("max-chars")),
+        ...optional("maximumNumberOfTokens", options.number("max-tokens")),
         ...(includeDomains.length ? { includeDomains } : {}),
         ...(excludeDomains.length ? { excludeDomains } : {}),
         ...(options.has("cross") ? { crossCheck: true } : {}),
       }), options);
     } else if (name === "images") {
       const input = args.join(" ").trim();
-      if (!input) throw new Error("Usage: search-toolkit images <query | image-url> [--limit n]");
+      if (!input) throw new Error("Usage: search-toolkit images <query | image-url> [--limit n] [--language code] [--safesearch strict|off]");
       // A lone http(s) URL is an image to search by; anything else is a text query.
       const byImage = /^https?:\/\/\S+$/i.test(input);
       show(await toolkit.callTool("search_images", {
         ...(byImage ? { imageUrl: input } : { query: input }),
         ...optional("limit", options.number("limit")),
+        ...optional("language", options.string("language")),
+        ...optional("safesearch", options.string("safesearch")),
       }), options);
     } else if (name === "fetch") {
       if (!args.length) {
@@ -133,18 +162,32 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
     } else if (name === "call") {
       const tool = args.shift();
       if (!tool) throw new Error("Usage: search-toolkit call <tool> [json-arguments]");
-      const parsed = args.length ? JSON.parse(args.join(" ")) as Record<string, unknown> : {};
+      let parsed: Record<string, unknown> = {};
+      if (args.length) {
+        const rawJson = args.join(" ");
+        let decoded: unknown;
+        try {
+          decoded = JSON.parse(rawJson);
+        } catch (error) {
+          throw new Error(`Invalid JSON arguments for ${tool}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+          throw new Error(`Arguments for ${tool} must be a JSON object`);
+        }
+        parsed = decoded as Record<string, unknown>;
+      }
       show(await toolkit.callTool(tool, parsed), options);
     } else if (name === "probe") {
       const provider = args.shift();
       const query = args.join(" ");
-      if (!provider || !query) throw new Error("Usage: search-toolkit probe <provider> <query> [--slot n]");
+      if (!provider || !query) throw new Error("Usage: search-toolkit probe <provider> <query> [--slot n] [--calls n] [--tool name]");
       console.log(JSON.stringify(await toolkit.callTool("search_rotation_probe", {
-        provider, query, ...optional("slot", options.number("slot")),
+        provider,
+        query,
+        ...optional("slot", options.number("slot")),
+        ...optional("calls", options.number("calls")),
+        ...optional("tool", options.string("tool")),
       }), null, 2));
-    } else {
-      console.log(helpText());
-      process.exitCode = 1;
     }
   } finally {
     await toolkit.close();
@@ -153,11 +196,12 @@ async function run(name: string, args: string[], options: Flags): Promise<void> 
 
 /** Print what a model would read; --json prints the complete structured result instead. */
 function show(output: unknown, options: Flags): void {
+  const record = output as { content?: Array<{ type: string; text?: string }>; isError?: boolean };
   if (options.has("json")) {
     console.log(JSON.stringify(output, null, 2));
+    if (record?.isError) process.exitCode = 1;
     return;
   }
-  const record = output as { content?: Array<{ type: string; text?: string }>; isError?: boolean };
   const blocks = Array.isArray(record.content) ? record.content : [];
   console.log(blocks.map((block) => block.type === "text" ? block.text ?? "" : `[${block.type} content]`).join("\n\n"));
   if (record.isError) process.exitCode = 1;
@@ -165,9 +209,10 @@ function show(output: unknown, options: Flags): void {
 
 function migrate(options: Flags): void {
   const path = options.string("config") ?? defaultConfigPath();
+  const baseDir = dirname(resolve(path));
   const raw = readConfigFile(path);
-  const { document, changes } = migrateConfig(raw);
-  normalizeConfig(document); // the result must load cleanly before anything is written
+  const { document, changes } = migrateConfig(raw, baseDir);
+  normalizeConfig(document, baseDir); // the result must load cleanly before anything is written
   if (!changes.length) {
     console.log(`${path} is already a clean v2 config; nothing to change.`);
     return;
@@ -202,16 +247,38 @@ function takeFlags(args: string[]): Flags {
   const values = new Map<string, string | true>();
   for (let index = 0; index < args.length;) {
     const arg = args[index] as string;
+    if (arg === "--") {
+      args.splice(index, 1);
+      break;
+    }
+    if (index === 0 && arg === "-h") {
+      values.set("help", true);
+      args.splice(index, 1);
+      continue;
+    }
+    if (index === 0 && arg === "-v") {
+      values.set("version", true);
+      args.splice(index, 1);
+      continue;
+    }
     if (!arg.startsWith("--")) {
       index += 1;
       continue;
     }
-    const name = arg.slice(2);
-    if (BOOLEAN_FLAGS.has(name)) {
+    const eq = arg.indexOf("=");
+    const name = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
+    if (eq >= 0) {
+      values.set(name, arg.slice(eq + 1));
+      args.splice(index, 1);
+    } else if (BOOLEAN_FLAGS.has(name)) {
       values.set(name, true);
       args.splice(index, 1);
     } else {
-      values.set(name, args[index + 1] ?? "");
+      const next = args[index + 1];
+      if (next === undefined || next.startsWith("--")) {
+        throw new Error(`--${name} requires a value`);
+      }
+      values.set(name, next);
       args.splice(index, 2);
     }
   }
@@ -222,9 +289,13 @@ function takeFlags(args: string[]): Flags {
       return typeof value === "string" && value ? value : undefined;
     },
     number: (name) => {
+      if (!values.has(name)) return undefined;
       const value = values.get(name);
-      const parsed = typeof value === "string" ? Number(value) : Number.NaN;
-      return Number.isFinite(parsed) ? parsed : undefined;
+      const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+      if (!Number.isFinite(parsed)) {
+        throw new Error(`--${name} must be a finite number, got "${String(value)}"`);
+      }
+      return parsed;
     },
   };
 }
@@ -233,8 +304,8 @@ function helpText(): string {
   return `Search Toolkit ${PACKAGE_VERSION}
 
 Commands:
-  search-toolkit search <query> [--mode m] [--quality q] [--limit n] [--freshness f] [--domains a,b] [--exclude-domains x,y] [--max-chars n] [--cross]
-  search-toolkit images <query | image-url> [--limit n]   an image URL searches by image (Google Lens)
+  search-toolkit search <query> [--mode m] [--quality q] [--limit n] [--freshness f] [--domains a,b] [--exclude-domains x,y] [--max-chars n] [--max-tokens n] [--cross]
+  search-toolkit images <query | image-url> [--limit n] [--language code] [--safesearch strict|off]   an image URL searches by image (Google Lens)
   search-toolkit fetch <url...> [--quality max] [--max-chars n] [--offset n] [--section heading]
   search-toolkit tools [--profile full|curated|lean] [--json]
   search-toolkit call <tool> '{"query":"..."}' [--json]
@@ -246,7 +317,7 @@ Commands:
   search-toolkit config                        sanitized config summary
   search-toolkit cache-clear                   drop cached search and fetch results
   search-toolkit migrate-config [--write]      upgrade a v1 config (dry run by default)
-  search-toolkit probe <provider> <query> [--slot n]   one live call per key slot; consumes quota
+  search-toolkit probe <provider> <query> [--slot n] [--calls n] [--tool name]   one live call per key slot; consumes quota
 
 Options:
   --config <path>   Override SEARCH_TOOLKIT_CONFIG

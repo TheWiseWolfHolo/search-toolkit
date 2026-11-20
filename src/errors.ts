@@ -64,8 +64,9 @@ export class CapabilityGateError extends Error {
 
 // Octen answers 403 "Payment method required" on endpoints a credit-only (gift) account may not use: a plan limit.
 // Out of credit or quota, in the words providers use: Parallel and Firecrawl 402, Octen 403
-// "Insufficient balance in account", You.com 429 spend_cap_exceeded, Tavily "exceeds your plan's set usage limit".
-const QUOTA_PATTERN = /insufficient[\s_-]+(?:credits?|balance|funds|quota)|out[\s_-]+of[\s_-]+credits?|credits?[\s_-]+(?:exhausted|depleted)|no[\s_-]+more[\s_-]+credits|spend[\s_-]?cap|payment[\s_-]+required|(?:quota|usage[\s_-]+limit|plan[\s_-]+limit|monthly[\s_-]+limit|credit[\s_-]+limit)[\s_-]+(?:exceeded|reached|exhausted)|exceed(?:s|ed)?\s+(?:your\s+)?(?:plan(?:'s)?|quota|usage\s+limit|credits?|monthly)|balance\s+(?:is\s+)?(?:insufficient|too\s+low|exhausted)/i;
+// "Insufficient balance in account", You.com 429 spend_cap_exceeded, Tavily "exceeds your plan's set usage limit",
+// TinyFish 429 free_allowance_exhausted, Firecrawl index_daily_limit.
+const QUOTA_PATTERN = /insufficient[\s_-]+(?:credits?|balance|funds|quota)|out[\s_-]+of[\s_-]+credits?|credits?[\s_-]+(?:exhausted|depleted)|no[\s_-]+more[\s_-]+credits|spend[\s_-]?cap|free[\s_-]+allowance[\s_-]+exhausted|index[\s_-]+daily[\s_-]+limit|payment[\s_-]+required|(?:quota|usage[\s_-]+limit|plan[\s_-]+limit|monthly[\s_-]+limit|credit[\s_-]+limit)[\s_-]+(?:exceeded|reached|exhausted)|exceed(?:s|ed)?\s+(?:your\s+)?(?:plan(?:'s)?\s+(?:set\s+)?(?:usage|quota|credit|monthly|request)?\s*(?:limit|allowance|cap)|quota|usage\s+limit|credits?|monthly)|balance\s+(?:is\s+)?(?:insufficient|too\s+low|exhausted)/i;
 
 const PLAN_LIMIT_PATTERN = /not\s+(?:allowed|available|supported|included|permitted)\s+(?:for|on|in|with)\s+(?:the\s+)?(?:free|your|this|current)\s+(?:accounts?|plans?|tier|subscription)|(?:requires?|needs?|only\s+(?:available|supported)\s+(?:on|for|with))\s+(?:a\s+)?(?:paid|higher|upgraded|pro|premium|business|enterprise)\s+(?:plan|tier|subscription|account)|plan\s+does\s+not\s+(?:include|support|allow)|payment\s+method\s+(?:is\s+)?required|(?:add|bind|binding|attach)\s+(?:a\s+)?payment\s+method|feature\s+(?:is\s+)?not\s+(?:available|enabled)\s+(?:for|on)/i;
 
@@ -146,7 +147,7 @@ export function textOfContent(content: unknown): string {
 export function shouldRetryWithNextKey(status: number | undefined): boolean {
   if (status === undefined) return true;
   if (status === 400 || status === 404 || status === 422) return false;
-  return isKeyFaultStatus(status) || status === 432 || status === 433 || status >= 500;
+  return isKeyFaultStatus(status) || status === 432 || status === 433 || status === 434 || status >= 500;
 }
 
 /** Statuses that describe the key itself: another key can fix them. */
@@ -175,7 +176,7 @@ export function shouldFailoverProvider(error: unknown): boolean {
       if (/policy|safety|legal|robots|content block|blocked by|restricted content/i.test(text)) return false;
       return /api[\s_-]?key|credential|auth(?:entication|orization)?|subscription|plan|feature|permission|access denied/i.test(text);
     }
-    return status === 401 || status === 402 || status === 408 || status === 425 || status === 429 || status >= 500;
+    return status === 401 || status === 402 || status === 408 || status === 425 || status === 429 || status === 434 || status >= 500;
   }
   if (REQUEST_SHAPE_PATTERN.test(text)) return false;
   return /abort|timeout|timed out|fetch failed|econnreset|econnrefused|enotfound|connection reset|connection closed|rate limit|too many requests|temporar(?:y|ily) unavailable|service unavailable|overloaded|please retry|try again|no healthy key slots|crawl_not_found|crawl_failed|extract_failed|scrape_failed/i.test(text);
@@ -199,6 +200,7 @@ export function isPageFailure(error: unknown): boolean {
 
 /** Transport-level failures where the cached upstream client should be rebuilt. */
 export function isConnectionFailure(error: unknown): boolean {
+  if (error instanceof ToolResultError || error instanceof HttpError || error instanceof TargetPageError) return false;
   if (error && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
     if (code === -32_000) return true; // MCP ConnectionClosed

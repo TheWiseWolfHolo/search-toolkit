@@ -30,7 +30,7 @@ export class ParallelAdapter implements RestAdapter {
         },
         maxCharsTotal: { type: "integer", minimum: 1 },
         maxResults: { type: "integer", minimum: 1, maximum: 20 },
-        maxCharsPerResult: { type: "integer", minimum: 1 },
+        maxCharsPerResult: { type: "integer", minimum: 1, description: "Approximate per-result budget; mapped to max_chars_total when maxCharsTotal is unset" },
         includeDomains: { type: "array", items: { type: "string" } },
         excludeDomains: { type: "array", items: { type: "string" } },
         afterDate: { type: "string", format: "date", description: "Only include content published on or after this YYYY-MM-DD date" },
@@ -64,6 +64,7 @@ export class ParallelAdapter implements RestAdapter {
             description: "Optional keyword queries to focus extracted excerpts",
           },
           fullContent: { type: "boolean", default: true, description: "Return full Markdown page content alongside excerpts" },
+          links: { type: "boolean", description: "Return extracted links from each page" },
           maxCharsPerResult: { type: "integer", minimum: 100, description: "Max characters per URL" },
           maxCharsTotal: { type: "integer", minimum: 100 },
           maxAgeSeconds: { type: "integer", minimum: 600, description: "Max cached content age in seconds before live fetch (min 600)" },
@@ -82,9 +83,9 @@ export class ParallelAdapter implements RestAdapter {
         searchQueries: {
           type: "array",
           minItems: 1,
-          maxItems: 5,
+          maxItems: 3,
           items: { type: "string", maxLength: 200 },
-          description: "Concise keyword image queries; defaults to [query]",
+          description: "Up to 3 concise keyword image queries; defaults to [query]",
         },
         limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
         mode: {
@@ -112,7 +113,7 @@ export class ParallelAdapter implements RestAdapter {
     const searches = arrayArg(args, "searchQueries");
     const body: Record<string, unknown> = {
       objective: query,
-      search_queries: searches.length ? searches : [query],
+      search_queries: searches.length ? searches : [query.slice(0, 200)],
       mode: stringArg(args, "mode", "fast"),
     };
     for (const [source, target] of [
@@ -134,12 +135,15 @@ export class ParallelAdapter implements RestAdapter {
     if (afterDate) sourcePolicy.after_date = afterDate;
     if (Object.keys(sourcePolicy).length) advanced.source_policy = sourcePolicy;
     if (typeof args.maxAgeSeconds === "number") advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
-    if (typeof args.maxCharsPerResult === "number") advanced.excerpt_settings = { max_chars_per_result: args.maxCharsPerResult };
     const maxResults = typeof args.maxResults === "number"
       ? args.maxResults
       : typeof args.limit === "number"
         ? args.limit
         : undefined;
+    if (body.max_chars_total === undefined && typeof args.maxCharsPerResult === "number") {
+      // Parallel v1 Search uses top-level max_chars_total instead of advanced_settings.excerpt_settings.
+      body.max_chars_total = Math.max(1, Math.round(args.maxCharsPerResult * (maxResults ?? 6)));
+    }
     if (maxResults !== undefined) advanced.max_results = maxResults;
     if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
@@ -183,6 +187,7 @@ export class ParallelAdapter implements RestAdapter {
     if (typeof args.maxAgeSeconds === "number") {
       advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
     }
+    if (args.links === true) advanced.links = true;
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
     const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/extract"), {
       method: "POST",
@@ -204,10 +209,10 @@ export class ParallelAdapter implements RestAdapter {
       const title = stringValue(entry.title);
       const url = stringValue(entry.url) ?? "";
       const date = stringValue(entry.publish_date);
-      const full = stringValue(entry.full_content);
+      const full = stringValue(entry.full_content)?.trim();
       const excerpts = Array.isArray(entry.excerpts) ? entry.excerpts.map(String).filter(Boolean).join("\n\n") : "";
       const header = [title ? `# ${title}` : "", url ? `URL: ${url}${date ? ` (${date})` : ""}` : ""].filter(Boolean).join("\n");
-      return [header, full ?? excerpts].filter(Boolean).join("\n\n");
+      return [header, full || excerpts].filter(Boolean).join("\n\n");
     }).filter(Boolean).join("\n\n---\n\n");
     return {
       text,
@@ -225,7 +230,7 @@ export class ParallelAdapter implements RestAdapter {
     const searches = arrayArg(args, "searchQueries");
     const body: Record<string, unknown> = {
       objective: query,
-      search_queries: searches.length ? searches : [query],
+      search_queries: searches.length ? searches : [query.slice(0, 200)],
       mode: stringArg(args, "mode", "fast"),
     };
     for (const [source, target] of [

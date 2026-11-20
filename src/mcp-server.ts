@@ -15,12 +15,17 @@ await toolkit.initialize();
 
 const server = createProtocolServer(toolkit);
 
+let shuttingDown = false;
 const shutdown = async () => {
-  await toolkit.close();
-  await server.close();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await server.close().catch(() => undefined);
+  await toolkit.close().catch(() => undefined);
 };
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+process.stdin.once("end", () => void shutdown().finally(() => process.exit(0)));
+process.stdin.once("close", () => void shutdown().finally(() => process.exit(0)));
 
 await server.connect(new StdioServerTransport());
 

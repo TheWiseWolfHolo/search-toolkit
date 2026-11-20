@@ -39,8 +39,6 @@ const flag = (name: string) => {
 const limit = Number(flag("--limit") ?? 8);
 const only = flag("--only")?.split(",");
 const onlyVariants = flag("--variants")?.split(",");
-const WEEK_SECONDS = 604_800;
-
 const WEB: Kind[] = ["web", "code"];
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 
@@ -48,9 +46,10 @@ const VARIANTS: Variant[] = [
   // The unified route as shipped, in the query's own mode. Compare it with the single-provider rows.
   { name: "auto", tool: "search_auto", kinds: ["web", "news", "scholar", "code"], args: (query, n, spec) => ({ query, limit: n, mode: spec.mode }) },
   { name: "parallel", tool: "parallel_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, maxResults: n, mode: "fast" }) },
-  { name: "parallel-news", tool: "parallel_search", kinds: ["news"], args: (query, n) => ({ query, maxResults: n, mode: "fast", maxAgeSeconds: WEEK_SECONDS }) },
+  { name: "parallel-news", tool: "parallel_search", kinds: ["news"], args: (query, n) => ({ query, maxResults: n, mode: "fast", afterDate: daysAgo(7) }) },
   { name: "you", tool: "you_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, limit: n, contentLevel: "snippets" }) },
-  { name: "you-news", tool: "you_search", kinds: ["news"], args: (query, n) => ({ query, limit: n, contentLevel: "snippets", freshness: "week" }) },
+  { name: "you-news", tool: "you_search", kinds: ["news"], args: (query, n) => ({ query, limit: n, contentLevel: "snippets", freshness: "week", preferNews: true }) },
+  { name: "you-news-zh", tool: "you_search", kinds: ["news"], lang: "zh", args: (query, n) => ({ query, limit: n, contentLevel: "snippets", freshness: "week", preferNews: true, language: "zh-hans", country: "CN" }) },
   { name: "brave", tool: "brave_web_search", kinds: WEB, args: (query, n) => ({ query, limit: n }) },
   { name: "brave-zh", tool: "brave_web_search", kinds: WEB, lang: "zh", args: (query, n) => ({ query, limit: n, searchLang: "zh-hans", country: "CN" }) },
   { name: "brave-news", tool: "brave_news_search", kinds: ["news"], args: (query, n) => ({ query, limit: n, freshness: "pw" }) },
@@ -60,15 +59,18 @@ const VARIANTS: Variant[] = [
   { name: "serper-news", tool: "serper_news", kinds: ["news"], args: (query, n) => ({ query, limit: n, tbs: "qdr:w" }) },
   { name: "serper-news-zh", tool: "serper_news", kinds: ["news"], lang: "zh", args: (query, n) => ({ query, limit: n, tbs: "qdr:w", gl: "cn", hl: "zh-cn" }) },
   { name: "serper-scholar", tool: "serper_scholar", kinds: ["scholar"], args: (query, n) => ({ query, limit: n }) },
+  { name: "deepseek", tool: "deepseek_search", kinds: [...WEB, "news"], args: (query, n) => ({ query, limit: n }) },
+  { name: "vercel-deepseek", tool: "vercel_deepseek_search", kinds: [...WEB, "news"], args: (query, n) => ({ query, limit: n }) },
+  { name: "vercel-parallel-fast", tool: "vercel_parallel_fast", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, maxResults: n }) },
   { name: "exa", tool: "exa_web_search_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, objective: query }) },
   // maxAgeHours is how stale a cached page may be (older ones are re-crawled live), not a publish-date filter.
   { name: "exa-news", tool: "exa_web_search_advanced_exa", kinds: ["news"], args: (query, n) => ({ query, numResults: n, category: "news", startPublishedDate: daysAgo(7) }) },
   { name: "exa-news-lite", tool: "exa_web_search_advanced_exa", kinds: ["news"], args: (query, n) => ({ query, numResults: n, type: "lite", category: "news", startPublishedDate: daysAgo(7) }) },
-  { name: "exa-github-lite", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "lite", category: "github" }) },
+  { name: "exa-github-lite", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "lite", includeDomains: ["github.com"] }) },
   { name: "exa-lite", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "lite" }) },
   { name: "exa-hl", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "auto", enableHighlights: true }) },
-  { name: "exa-pdf", tool: "exa_web_search_advanced_exa", kinds: ["scholar"], args: (query, n) => ({ query, numResults: n, category: "pdf" }) },
-  { name: "exa-github", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, category: "github" }) },
+  { name: "exa-publication", tool: "exa_web_search_advanced_exa", kinds: ["scholar"], args: (query, n) => ({ query, numResults: n, category: "publication" }) },
+  { name: "exa-github", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "auto", includeDomains: ["github.com"] }) },
   { name: "tavily", tool: "tavily_tavily_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, max_results: n, search_depth: "basic" }) },
   { name: "tavily-news", tool: "tavily_tavily_search", kinds: ["news"], args: (query, n) => ({ query, max_results: n, search_depth: "basic", topic: "news", time_range: "week" }) },
   { name: "querit", tool: "querit_search", kinds: WEB, args: (query, n) => ({ query, limit: n }) },
@@ -77,6 +79,7 @@ const VARIANTS: Variant[] = [
   { name: "octen", tool: "octen_search", kinds: WEB, args: (query, n) => ({ query, limit: n }) },
   { name: "octen-zh", tool: "octen_search", kinds: WEB, lang: "zh", args: (query, n) => ({ query, limit: n, language: ["zh"] }) },
   { name: "octen-news", tool: "octen_search", kinds: ["news"], args: (query, n) => ({ query, limit: n, freshness: "week" }) },
+  { name: "octen-news-zh", tool: "octen_search", kinds: ["news"], lang: "zh", args: (query, n) => ({ query, limit: n, freshness: "week", language: ["zh"] }) },
   { name: "linkup", tool: "linkup_linkup_search", kinds: [...WEB, "news"], args: (query, n) => ({ query, maxResults: n, depth: "fast" }) },
   { name: "anysearch", tool: "anysearch_search", kinds: WEB, args: (query, n) => ({ query, max_results: n, domain: "general" }) },
   { name: "anysearch-academic", tool: "anysearch_search", kinds: ["scholar"], args: (query, n) => ({ query, max_results: n, domain: "academic" }) },

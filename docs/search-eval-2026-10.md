@@ -206,3 +206,12 @@ The shipped routes, run end to end afterwards, averaged 0.905 across the 42 quer
 | parallel-news | 0.53 | 0.67 | 0.29 | 1 | 0.17 | 1203 | 0/3 |
 | linkup | 0.51 | 0.67 | 0.42 | 1 | 0 | 1074 | 0/3 |
 
+## Post-2026-10 route and adapter notes
+
+The tables above remain untouched as the October 2026 baseline. Subsequent updates changed several provider parameters and added new adapters:
+
+- Exa deprecated `category: "github"` and `category: "pdf"`; `mode: code` now uses `includeDomains: ["github.com"]` (preserving path prefixes), and `mode: scholar` uses `category: "publication"`.
+- `parallel-news` in `scripts/eval-search.ts` was corrected from `maxAgeSeconds` (cache staleness) to `afterDate` (publish-date filter).
+- Jina Search now sends `X-Respond-With: no-content` by default to eliminate the 13-second full-page scraping latency seen in the October baseline.
+- DeepSeek (`deepseek_search`, `deepseek_fetch`), Vercel AI Gateway (`vercel_deepseek_search`, `vercel_deepseek_fetch`, `vercel_parallel_fast`), Direct Markdown (`direct_markdown_fetch`), Querit Contents, and Octen `/search-premier` were added after this benchmark.
+

@@ -19,7 +19,7 @@ export const STATUS_TOOL: Tool = {
 export const AUTO_TOOL: Tool = {
   name: "search_auto",
   title: "Search with the recommended provider",
-  description: "Quality-first web search that picks the provider by mode, quality, and query language (Parallel, Serper, Exa, You.com, Brave, Tavily); Chinese queries use Chinese-market settings. Repeats within a few minutes are served from cache and marked cached. balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
+  description: "Quality-first web search that picks the provider by mode, quality, and query language (Parallel, Serper, Exa, You.com, Octen, Brave, DeepSeek, Vercel AI Gateway, Tavily); Chinese queries use Chinese-market settings. Repeats within a few minutes are served from cache and marked cached. balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
   inputSchema: {
     type: "object",
     properties: {
@@ -34,7 +34,7 @@ export const AUTO_TOOL: Tool = {
         type: "string",
         enum: ["balanced", "max"],
         default: "balanced",
-        description: "max selects Parallel Advanced or Exa Advanced where the mode supports it",
+        description: "balanced uses fast low-cost settings; max selects deeper retrieval (Exa Auto/highlights, Parallel Advanced, DeepSeek needContent, Brave extra snippets, You.com highlights, Tavily Advanced)",
       },
       freshness: {
         type: "string",
@@ -92,8 +92,8 @@ export const IMAGES_TOOL: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      query: { type: "string", minLength: 1, description: "Text describing the images to find" },
-      imageUrl: { type: "string", minLength: 1, description: "Public http(s) URL of an image to search by, instead of query" },
+      query: { type: "string", minLength: 1, description: "Text describing the images to find (provide either query or imageUrl)" },
+      imageUrl: { type: "string", minLength: 1, description: "Public http(s) URL of an image to search by (provide either query or imageUrl)" },
       limit: { type: "integer", minimum: 1, maximum: 20, default: 10 },
       language: { type: "string", description: "Optional language preference for Brave/Serper" },
       safesearch: { type: "string", enum: ["strict", "off"], default: "strict", description: "Applied by Brave; the fallback uses its own safety behavior" },
@@ -106,20 +106,20 @@ export const IMAGES_TOOL: Tool = {
 export const FETCH_TOOL: Tool = {
   name: "fetch_auto",
   title: "Read one or more known URLs",
-  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Exa, Tavily, Parallel, TinyFish, You.com, Octen, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
+  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Direct Markdown (`Accept: text/markdown`), Exa, DeepSeek, Vercel AI Gateway, Tavily, Parallel, TinyFish, You.com, Octen, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
   inputSchema: {
     type: "object",
     properties: {
-      url: { type: "string", minLength: 1, description: "Single http(s) URL to read" },
+      url: { type: "string", minLength: 1, description: "Single http(s) URL to read (provide either url or urls)" },
       urls: {
         type: "array",
         minItems: 1,
         maxItems: 5,
         items: { type: "string", minLength: 1 },
-        description: "Batch of up to 5 http(s) URLs to read concurrently",
+        description: "Batch of up to 5 http(s) URLs to read concurrently (provide either url or urls)",
       },
       quality: { type: "string", enum: ["balanced", "max"], default: "balanced" },
-      maxChars: { type: "integer", minimum: 500, maximum: 100000, default: 12000, description: "Longest content returned; longer pages are truncated with an offset marker" },
+      maxChars: { type: "integer", minimum: 500, maximum: 100000, default: 12000, description: "Longest content returned; divided across urls in batch mode. Longer pages are truncated with an offset marker" },
       offset: { type: "integer", minimum: 0, default: 0, description: "Character offset to start reading from on long pages" },
       section: { type: "string", description: "Optional heading or keyword filter to extract matching sections before truncating" },
     },
@@ -135,7 +135,7 @@ export const PROBE_TOOL: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      provider: { type: "string" },
+      provider: { type: "string", minLength: 1, description: "Configured provider name (for example brave, serper, vercel_gateway)" },
       query: { type: "string", minLength: 1 },
       calls: { type: "integer", minimum: 1, maximum: 12, description: "Probe the first n slots; defaults to every slot" },
       slot: { type: "integer", minimum: 0, description: "Probe only this slot" },
@@ -169,8 +169,8 @@ export const GATEWAY_CALL_TOOL: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      name: { type: "string", minLength: 1 },
-      arguments: { type: "object", additionalProperties: true },
+      name: { type: "string", minLength: 1, description: "Exposed provider tool name (for example serper_scholar, grok_x_search)" },
+      arguments: { type: "object", additionalProperties: true, description: "Arguments matching the tool's input schema from provider_tools" },
     },
     required: ["name"],
     additionalProperties: false,
@@ -190,6 +190,11 @@ export const CURATED_SPECIALIST_TOOLS = new Set([
   "parallel_extract",
   "you_search",
   "you_contents",
+  "deepseek_search",
+  "deepseek_fetch",
+  "vercel_deepseek_search",
+  "vercel_deepseek_fetch",
+  "vercel_parallel_fast",
   "serper_scholar",
   "exa_web_search_advanced_exa",
   "exa_agent_run",
@@ -199,6 +204,7 @@ export const CURATED_SPECIALIST_TOOLS = new Set([
   "anysearch_batch_search",
   "firecrawl_firecrawl_map",
   "firecrawl_firecrawl_crawl",
+  "firecrawl_firecrawl_check_crawl_status",
   "linkup_linkup_research",
   "tavily_tavily_research",
 ]);

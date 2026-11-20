@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { IntegrationConfig } from "./types.js";
@@ -36,12 +36,17 @@ export class ToolCatalogCache {
     // Re-read so concurrent processes updating other providers are not clobbered.
     const file = this.read();
     file.providers[provider] = { fingerprint, fetchedAt: Date.now(), tools };
+    const temporary = `${this.path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
       mkdirSync(dirname(this.path), { recursive: true });
-      const temporary = `${this.path}.${process.pid}.tmp`;
       writeFileSync(temporary, JSON.stringify(file));
       renameSync(temporary, this.path);
     } catch {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // already removed or never created
+      }
       // The cache is an optimisation; a read-only state directory must not break startup.
     }
   }

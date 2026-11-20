@@ -21,7 +21,7 @@ export class BraveAdapter implements RestAdapter {
             { type: "string" },
             { type: "array", minItems: 1, maxItems: 3, items: { type: "string" } },
           ],
-          description: "Custom ranking Goggle URL(s)",
+          description: "Custom ranking Goggle URL(s) or inline Goggle DSL rules",
         },
       },
     ));
@@ -38,10 +38,10 @@ export class BraveAdapter implements RestAdapter {
           count: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "Search results considered before context extraction" },
           maximumNumberOfUrls: { type: "integer", minimum: 1, maximum: 50, default: 20 },
           maximumNumberOfTokens: { type: "integer", minimum: 1024, maximum: 32768, default: 8192 },
-          maximumNumberOfSnippets: { type: "integer", minimum: 1, maximum: 256, default: 50 },
+          maximumNumberOfSnippets: { type: "integer", minimum: 1, maximum: 256, default: 50, description: "Legacy snippet count cap; prefer maximumNumberOfTokens and maximumNumberOfUrls" },
           contextThresholdMode: { type: "string", enum: ["disabled", "strict", "balanced", "lenient"] },
           maximumNumberOfTokensPerUrl: { type: "integer", minimum: 512, maximum: 8192, default: 4096 },
-          maximumNumberOfSnippetsPerUrl: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+          maximumNumberOfSnippetsPerUrl: { type: "integer", minimum: 1, maximum: 100, default: 50, description: "Legacy per-URL snippet cap; prefer maximumNumberOfTokensPerUrl" },
           goggles: {
             oneOf: [
               { type: "string" },
@@ -100,8 +100,8 @@ export class BraveAdapter implements RestAdapter {
     if (tool === "brave_image_search") return this.callImageSearch(args, key, root);
     const kind = tool.includes("news") ? "news" : "web";
     const url = new URL(`${root}/${kind}/search`);
-    // Plain text: no <strong> highlight markup to strip from titles and snippets.
-    url.searchParams.set("text_decorations", "false");
+    // Plain text on Web Search (News Search does not accept text_decorations).
+    if (kind === "web") url.searchParams.set("text_decorations", "false");
     url.searchParams.set("q", stringArg(args, "query"));
     url.searchParams.set("count", String(numberArg(args, "limit", 6)));
     for (const [source, target] of [["country", "country"], ["searchLang", "search_lang"], ["freshness", "freshness"], ["safesearch", "safesearch"]] as const) {
@@ -180,7 +180,7 @@ export class BraveAdapter implements RestAdapter {
       ["locationPostalCode", "X-Loc-Postal-Code"],
     ] as const) {
       const value = args[source];
-      if (typeof value === "string" && value.trim()) headers[target] = value;
+      if (typeof value === "string" && value.trim()) headers[target] = sanitizeHeaderValue(value);
       if (typeof value === "number" && Number.isFinite(value)) headers[target] = String(value);
     }
     return requestJson(`${root}/llm/context`, {
@@ -189,4 +189,9 @@ export class BraveAdapter implements RestAdapter {
       body: JSON.stringify(body),
     }, 30_000);
   }
+}
+
+function sanitizeHeaderValue(raw: string): string {
+  const cleaned = raw.replace(/[\r\n]+/g, " ").trim();
+  return /[^\x20-\x7e]/.test(cleaned) ? encodeURIComponent(cleaned) : cleaned;
 }

@@ -64,7 +64,7 @@ test("fetch_auto uses the first reader that returns real content and skips the r
     assert.equal((route(output).searchToolkitRoute as Json).tool, "exa_web_fetch_exa");
     assert.match(text(output), /readable page content/);
     assert.deepEqual((autoMeta(output) as Json).attempts, [
-      { provider: "exa", tool: "exa_web_fetch_exa", candidateRank: 1, outcome: "success" },
+      { provider: "exa", tool: "exa_web_fetch_exa", candidateRank: 2, outcome: "success" },
     ]);
   });
 });
@@ -108,7 +108,9 @@ test("fetch_auto rejects non-http URLs and respects provider eligibility", async
 });
 
 test("max quality leads the fetch chain with Firecrawl", () => {
-  assert.equal(fetchCandidates("balanced", { url: "https://e.com" })[0]?.name, "exa_web_fetch_exa");
+  const balanced = fetchCandidates("balanced", { url: "https://e.com" });
+  assert.equal(balanced[0]?.name, "direct_markdown_fetch");
+  assert.equal(balanced[1]?.name, "exa_web_fetch_exa");
   const max = fetchCandidates("max", { url: "https://e.com" });
   assert.equal(max[0]?.name, "firecrawl_firecrawl_scrape");
   assert.equal(max.find((item) => item.name === "tavily_tavily_extract")?.nativeArguments?.extract_depth, "advanced");

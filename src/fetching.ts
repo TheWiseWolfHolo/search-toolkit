@@ -14,17 +14,32 @@ interface FetchPage {
 
 const MIN_FETCH_CHARS = 80;
 
-const INTERSTITIAL_PAGE_PATTERN = /just a moment[\s\S]{0,160}enable javascript and cookies|attention required!\s*\|\s*cloudflare|please enable js and disable any ad blocker|verify you are human|cf-browser-verification|checking your browser before accessing/i;
+const INTERSTITIAL_PAGE_PATTERN = new RegExp([
+  "just a moment[\\s\\S]{0,160}enable javascript and cookies",
+  "attention required!\\s*\\|\\s*cloudflare",
+  "please enable js and disable any ad blocker",
+  "verify you are human",
+  "cf-browser-verification",
+  "checking your browser before accessing",
+  "vercel security checkpoint",
+  "we(?:'|’)re verifying your browser",
+  "access denied[\\s\\S]{0,120}(?:reference #|errors\\.edgesuite\\.net|akamai)",
+  "px-captcha|datadome",
+  "you need to enable javascript to run this app",
+  "please enable javascript to view this (?:page|site)",
+  "环境异常[\\s\\S]{0,80}(?:完成验证|继续访问|去验证)",
+  "当前环境异常|百度安全验证|请完成安全验证",
+].join("|"), "i");
 
 export function bodyText(output: unknown): string {
   return textOfContent(bodyBlocks(output));
 }
 
 export function isUsableFetchText(text: string): boolean {
-  // Some adapters prepend a Markdown title and source URL. These are not page text.
-  const trimmed = text.trim().replace(/^(?:#[^\n]*\n+)?URL: [^\n]*(?:\n+|$)/, "");
+  // Some adapters prepend a Markdown title or `Title:` header and source URL. These are not page text.
+  const trimmed = text.trim().replace(/^(?:(?:#|Title:)\s*[^\n]*\n+)?URL:\s*[^\n]*(?:\n+|$)/i, "");
   if (trimmed.length < MIN_FETCH_CHARS) return false;
-  if (trimmed.length < 1_200 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
+  if (trimmed.length < 1_500 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
   return true;
 }
 
@@ -71,6 +86,18 @@ export function readableFetchOutput(output: unknown): unknown {
 function envelopeText(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
+  if (record.success === false && record.error) {
+    const err = record.error;
+    const message = typeof err === "string"
+      ? err
+      : typeof (err as { message?: unknown })?.message === "string"
+        ? (err as { message: string }).message
+        : JSON.stringify(err);
+    const status = typeof (err as { status?: unknown })?.status === "number"
+      ? (err as { status: number }).status
+      : Number(message.match(/\b([45]\d\d)\b/)?.[1]);
+    throw new TargetPageError(`reader could not get the page: ${message}`, Number.isFinite(status) ? status : undefined);
+  }
   const pages = Array.isArray(record.results) ? record.results : Array.isArray(value) ? value : undefined;
   if (pages) {
     const texts = pages.map((page) => pageText(page)).filter((text): text is string => Boolean(text));
@@ -119,6 +146,9 @@ export function parseFetchUrls(args: Record<string, unknown>): string[] {
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("fetch_auto requires an http(s) URL");
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error("fetch_auto rejects URLs with embedded credentials");
     }
     const href = parsed.toString();
     if (!normalized.includes(href)) normalized.push(href);
@@ -170,36 +200,77 @@ export function combineBatchFetch(
 }
 
 function filterTextBySection(text: string, sectionQuery: string): string {
+  const normalized = text.replace(/\r\n?/g, "\n");
   const needle = sectionQuery.toLowerCase();
-  const lines = text.split("\n");
-  let startLine = -1;
-  let startLevel = 0;
+  const lines = normalized.split("\n");
+  // Track fenced code blocks so `# comments` inside shell/python examples are never treated as headings.
+  const headings: Array<{ line: number; level: number; title: string }> = [];
+  let fenceChar: string | undefined;
+  let fenceLen = 0;
   for (let i = 0; i < lines.length; i += 1) {
-    const match = (lines[i] ?? "").match(/^(#{1,6})\s+(.+)$/);
-    if (match && (match[2] ?? "").toLowerCase().includes(needle)) {
-      startLine = i;
-      startLevel = (match[1] ?? "#").length;
-      break;
-    }
-  }
-  if (startLine >= 0) {
-    let endLine = lines.length;
-    for (let i = startLine + 1; i < lines.length; i += 1) {
-      const match = (lines[i] ?? "").match(/^(#{1,6})\s+/);
-      if (match && (match[1] ?? "#").length <= startLevel) {
-        endLine = i;
-        break;
+    const raw = lines[i] ?? "";
+    const fence = raw.match(/^\s*(`{3,}|~{3,})/);
+    if (fence?.[1]) {
+      const marker = fence[1];
+      if (!fenceChar) {
+        fenceChar = marker[0];
+        fenceLen = marker.length;
+      } else if (marker[0] === fenceChar && marker.length >= fenceLen && /^\s*(?:`{3,}|~{3,})\s*$/.test(raw)) {
+        fenceChar = undefined;
+        fenceLen = 0;
       }
+      continue;
     }
-    return lines.slice(startLine, endLine).join("\n").trim();
+    if (fenceChar) continue;
+    const match = raw.match(/^(#{1,6})\s+(.+)$/);
+    if (match?.[1] && match[2]) {
+      headings.push({ line: i, level: match[1].length, title: match[2] });
+    }
   }
-  const blocks = text.split(/\n{2,}/);
+
+  const matching = headings
+    .map((heading, idx) => ({ heading, idx }))
+    .filter(({ heading }) => heading.title.toLowerCase().includes(needle));
+
+  if (matching.length > 0) {
+    const sectionBounds = (idx: number, includeSiblingTabs: boolean): { start: number; end: number; bodyChars: number } => {
+      const start = headings[idx]!;
+      let endLine = lines.length;
+      let sawBody = false;
+      for (let j = idx + 1; j < headings.length; j += 1) {
+        const next = headings[j]!;
+        const between = lines.slice(headings[j - 1]!.line + 1, next.line).join("\n").trim();
+        if (between.length > 0) sawBody = true;
+        if (next.level <= start.level) {
+          if (includeSiblingTabs && !sawBody && next.level === start.level && start.level >= 3) {
+            continue;
+          }
+          endLine = next.line;
+          break;
+        }
+      }
+      const bodyChars = lines.slice(start.line + 1, endLine).join("\n").trim().length;
+      return { start: start.line, end: endLine, bodyChars };
+    };
+    const evaluated = matching.map(({ heading, idx }) => ({
+      heading,
+      idx,
+      strict: sectionBounds(idx, false),
+    }));
+    const chosen = evaluated.find((entry) => entry.strict.bodyChars > 0 && entry.heading.level >= 2)
+      ?? evaluated.find((entry) => entry.strict.bodyChars > 0)
+      ?? evaluated[0]!;
+    const bounds = chosen.strict.bodyChars > 0 ? chosen.strict : sectionBounds(chosen.idx, true);
+    return lines.slice(bounds.start, bounds.end).join("\n").trim();
+  }
+
+  const blocks = normalized.split(/\n{2,}/);
   const matchingIndices: number[] = [];
   blocks.forEach((block, index) => {
     if (block.toLowerCase().includes(needle)) matchingIndices.push(index);
   });
   if (matchingIndices.length === 0) {
-    return `[section "${sectionQuery}" not found; showing start of page]\n\n${text}`;
+    return `[section "${sectionQuery}" not found; showing start of page]\n\n${normalized}`;
   }
   const picked = new Set<number>();
   for (const hit of matchingIndices) {
@@ -222,7 +293,18 @@ export function truncateBody(output: unknown, maxChars: number, options: Truncat
   let remaining = maxChars;
   let dropped = 0;
   const sectionQuery = options.section?.trim();
-  const content = record.content.map((block, index) => {
+  let sourceContent = record.content;
+  if (sectionQuery) {
+    const hasRoute = isRouteContentBlock(sourceContent[0]);
+    const body = hasRoute ? sourceContent.slice(1) : sourceContent;
+    const textBlocks = body.filter((block) => block && typeof block === "object" && (block as { type?: string }).type === "text" && typeof (block as { text?: unknown }).text === "string");
+    if (textBlocks.length > 1) {
+      const merged = textBlocks.map((block) => (block as { text: string }).text).join("\n\n");
+      const nonText = body.filter((block) => !textBlocks.includes(block));
+      sourceContent = [...(hasRoute ? [sourceContent[0]] : []), { type: "text", text: merged }, ...nonText];
+    }
+  }
+  const content = sourceContent.map((block, index) => {
     if (index === 0 && isRouteContentBlock(block)) return block;
     const text = block && typeof block === "object" ? (block as { type?: string; text?: unknown }) : undefined;
     if (text?.type !== "text" || typeof text.text !== "string") return block;

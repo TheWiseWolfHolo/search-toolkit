@@ -32,6 +32,8 @@ const runtime = createSearchToolkitHttpApp(toolkit, {
   sessionTtlMs,
 });
 const httpServer = createServer(runtime.app);
+httpServer.keepAliveTimeout = 65_000;
+httpServer.headersTimeout = 66_000;
 httpServer.listen(port, host, () => {
   console.log(`Search Toolkit Streamable HTTP listening on http://${host}:${port}/mcp`);
 });
@@ -40,9 +42,17 @@ let shuttingDown = false;
 const shutdown = async () => {
   if (shuttingDown) return;
   shuttingDown = true;
-  await new Promise<void>((resolve) => httpServer.close(() => resolve()));
-  await runtime.close();
-  await toolkit.close();
+  const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  await runtime.close().catch(() => undefined);
+  httpServer.closeIdleConnections?.();
+  await Promise.race([
+    closed,
+    new Promise<void>((resolve) => setTimeout(() => {
+      httpServer.closeAllConnections?.();
+      resolve();
+    }, 3_000).unref()),
+  ]);
+  await toolkit.close().catch(() => undefined);
 };
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
 process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));

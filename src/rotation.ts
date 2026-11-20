@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { KeySelection, KeyStrategy } from "./types.js";
+import type { AutoCapability, KeySelection, KeyStrategy } from "./types.js";
 
 const SCHEMA_VERSION = 2;
 const MINUTE = 60_000;
@@ -47,9 +47,11 @@ export function penaltyFor(
   exhausted = false,
 ): KeyPenalty | undefined {
   const step = Math.min(strikes, 2);
-  if (exhausted || status === 402) return { status: "exhausted", cooldownMs: [30 * MINUTE, 6 * HOUR, 24 * HOUR][step] as number };
+  if (exhausted || status === 402 || status === 432 || status === 433) {
+    return { status: "exhausted", cooldownMs: [30 * MINUTE, 6 * HOUR, 24 * HOUR][step] as number };
+  }
   if (status === 401 || status === 403) return { status: "disabled", cooldownMs: [HOUR, 6 * HOUR, 24 * HOUR][step] as number };
-  if (status === 429) {
+  if (status === 429 || status === 434) {
     const fallback = [MINUTE, 5 * MINUTE, 15 * MINUTE][step] as number;
     const cooldownMs = retryAfterMs === undefined ? fallback : Math.min(Math.max(retryAfterMs, 5_000), 6 * HOUR);
     return { status: "cooldown", cooldownMs };
@@ -125,29 +127,77 @@ export class RotationStore {
     `);
   }
 
+  /** Shared SQLite connection for co-located state tables such as the result cache. */
+  database(): DatabaseSync {
+    return this.db;
+  }
+
   /**
    * Fold one automatic-route outcome into the provider's recent failure score.
    * Each failure moves the score 40% of the way to 1, each success 40% toward 0,
    * and the score halves every 15 minutes without news, so two failures in a
    * row mark a provider flaky and one success or a quiet half hour clears it.
+   * When a capability is supplied, scores stay isolated per capability so Fetch
+   * hiccups never demote Search on dual-capability providers.
    */
-  recordProviderOutcome(provider: string, failed: boolean): void {
+  recordProviderOutcome(provider: string, failed: boolean, capability?: AutoCapability): void {
+    const key = capability ? `${provider}:${capability}` : provider;
     const now = Date.now();
-    const current = this.decayedScore(this.statement("SELECT failure_score, updated_at FROM provider_health WHERE provider = ?")
-      .get(provider) as { failure_score: number; updated_at: number } | undefined, now);
-    const next = current * (1 - HEALTH_STEP) + (failed ? HEALTH_STEP : 0);
-    this.statement(`
-      INSERT INTO provider_health(provider, failure_score, updated_at) VALUES (?, ?, ?)
-      ON CONFLICT(provider) DO UPDATE SET failure_score = excluded.failure_score, updated_at = excluded.updated_at
-    `).run(provider, next, now);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.decayedScore(this.statement("SELECT failure_score, updated_at FROM provider_health WHERE provider = ?")
+        .get(key) as { failure_score: number; updated_at: number } | undefined, now);
+      const next = current * (1 - HEALTH_STEP) + (failed ? HEALTH_STEP : 0);
+      this.statement(`
+        INSERT INTO provider_health(provider, failure_score, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET failure_score = excluded.failure_score, updated_at = excluded.updated_at
+      `).run(key, next, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
   }
 
-  /** Recent failure score per provider, 0 (healthy) to 1 (failing every time), decayed to now. */
-  providerFailureScores(): Map<string, number> {
+  /**
+   * Recent failure score per provider, 0 (healthy) to 1 (failing every time), decayed to now.
+   * When `capability` is given, returns scores scoped to that capability (falling back to
+   * legacy unscoped rows); when omitted, returns each provider's worst active score.
+   */
+  providerFailureScores(capability?: AutoCapability): Map<string, number> {
     const now = Date.now();
     const rows = this.statement("SELECT provider, failure_score, updated_at FROM provider_health").all() as
       Array<{ provider: string; failure_score: number; updated_at: number }>;
-    return new Map(rows.map((row) => [row.provider, this.decayedScore(row, now)]));
+    const scores = new Map<string, number>();
+    if (capability) {
+      const suffix = `:${capability}`;
+      for (const row of rows) {
+        if (!row.provider.includes(":")) {
+          scores.set(row.provider, this.decayedScore(row, now));
+        }
+      }
+      for (const row of rows) {
+        if (row.provider.endsWith(suffix)) {
+          const base = row.provider.slice(0, -suffix.length);
+          scores.set(base, this.decayedScore(row, now));
+        }
+      }
+      return scores;
+    }
+    for (const row of rows) {
+      const base = row.provider.split(":")[0] ?? row.provider;
+      const decayed = this.decayedScore(row, now);
+      scores.set(base, Math.max(scores.get(base) ?? 0, decayed));
+    }
+    return scores;
+  }
+
+  private rollback(): void {
+    try {
+      this.db.exec("ROLLBACK");
+    } catch {
+      // Transaction was never started or already rolled back.
+    }
   }
 
   private decayedScore(row: { failure_score: number; updated_at: number } | undefined, now: number): number {
@@ -187,6 +237,8 @@ export class RotationStore {
    * running keep working until they restart.
    */
   adoptLegacyState(keysByProvider: Record<string, string[]>): void {
+    const alreadyDone = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+    if (Number(alreadyDone?.value ?? 0) >= SCHEMA_VERSION) return;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const done = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
@@ -225,7 +277,7 @@ export class RotationStore {
         .run(String(SCHEMA_VERSION));
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback();
       throw error;
     }
   }
@@ -271,9 +323,9 @@ export class RotationStore {
         slot = found;
       }
       // sticky keeps pointing at the key in use; round_robin moves past it; drain never moves.
-      // A call limited to some slots, or pinned to one, leaves a sticky pointer alone.
+      // A call limited to some slots, or pinned to one, leaves the shared cursor untouched.
       const restricted = opts.pin !== undefined || (opts.eligible !== undefined && opts.eligible.length < keys.length);
-      const next = strategy === "sticky" ? (restricted ? undefined : slot) : strategy === "drain" ? undefined : (slot + 1) % keys.length;
+      const next = strategy === "drain" || restricted ? undefined : strategy === "sticky" ? slot : (slot + 1) % keys.length;
       if (next !== undefined) {
         this.statement(`
           INSERT INTO provider_cursor(provider, next_slot) VALUES (?, ?)
@@ -285,7 +337,7 @@ export class RotationStore {
       if (!key) throw new Error(`${provider} key slot ${slot} is missing`);
       return { provider, slot, key, masked: maskKey(key), fingerprint: keyFingerprint(key) };
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback();
       throw error;
     }
   }
@@ -320,12 +372,14 @@ export class RotationStore {
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.statement("SELECT strikes FROM key_state WHERE provider = ? AND fp = ?")
-        .get(selection.provider, selection.fingerprint) as { strikes: number } | undefined;
+      const current = this.statement("SELECT status, cooldown_until, strikes FROM key_state WHERE provider = ? AND fp = ?")
+        .get(selection.provider, selection.fingerprint) as { status: string; cooldown_until: number | null; strikes: number } | undefined;
       const strikes = current?.strikes ?? 0;
       const penalty = result.ok || result.planLimit
         ? undefined
         : penaltyFor(result.httpStatus, strikes, result.retryAfterMs, result.exhausted === true);
+      const nextStatus = result.ok ? "healthy" : penalty ? penalty.status : (current?.status ?? "healthy");
+      const nextCooldown = result.ok ? null : penalty ? now + penalty.cooldownMs : (current?.cooldown_until ?? null);
       const nextStrikes = result.ok ? 0 : penalty ? strikes + 1 : strikes;
       this.statement(`
         INSERT INTO key_state(
@@ -348,8 +402,8 @@ export class RotationStore {
       `).run(
         selection.provider,
         selection.fingerprint,
-        penalty?.status ?? "healthy",
-        penalty ? now + penalty.cooldownMs : null,
+        nextStatus,
+        nextCooldown,
         nextStrikes,
         result.ok ? 1 : 0,
         result.ok ? 0 : 1,
@@ -362,7 +416,7 @@ export class RotationStore {
       );
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback();
       throw error;
     }
   }
@@ -385,7 +439,7 @@ export class RotationStore {
    * again (recharged, or a new billing period) is healthy again. Cool-downs
    * and auth failures are left alone: a balance says nothing about them.
    */
-  recordQuota(provider: string, key: string, remaining: number | undefined): void {
+  recordQuota(provider: string, key: string, remaining: number | undefined, exhaustOnZero = true): void {
     const now = Date.now();
     const fp = keyFingerprint(key);
     this.db.exec("BEGIN IMMEDIATE");
@@ -394,13 +448,13 @@ export class RotationStore {
         INSERT INTO key_state(provider, fp, quota_remaining, quota_checked_at) VALUES (?, ?, ?, ?)
         ON CONFLICT(provider, fp) DO UPDATE SET quota_remaining = excluded.quota_remaining, quota_checked_at = excluded.quota_checked_at
       `).run(provider, fp, remaining ?? null, now);
-      if (remaining !== undefined && remaining <= 0) {
+      if (remaining !== undefined && remaining <= 0 && exhaustOnZero) {
         // Confirmed empty: bench it for six hours, then it waits at the back like any exhausted key.
         this.statement(`
           UPDATE key_state SET status = 'exhausted', cooldown_until = MAX(COALESCE(cooldown_until, 0), ?)
-          WHERE provider = ? AND fp = ? AND status IN ('healthy', 'exhausted')
+          WHERE provider = ? AND fp = ? AND status IN ('healthy', 'exhausted', 'cooldown')
         `).run(now + 6 * HOUR, provider, fp);
-      } else if (remaining !== undefined) {
+      } else if (remaining !== undefined && remaining > 0) {
         this.statement(`
           UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
           WHERE provider = ? AND fp = ? AND status = 'exhausted'
@@ -408,7 +462,7 @@ export class RotationStore {
       }
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      this.rollback();
       throw error;
     }
   }
@@ -417,12 +471,19 @@ export class RotationStore {
   reset(provider: string, keys: string[], slot?: number): number {
     const targets = slot === undefined ? keys : [keys[slot]].filter((key): key is string => Boolean(key));
     let cleared = 0;
-    for (const key of targets) {
-      const result = this.statement(`
-        UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
-        WHERE provider = ? AND fp = ? AND (status != 'healthy' OR cooldown_until IS NOT NULL OR strikes > 0)
-      `).run(provider, keyFingerprint(key));
-      cleared += Number(result.changes);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const key of targets) {
+        const result = this.statement(`
+          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
+          WHERE provider = ? AND fp = ? AND (status != 'healthy' OR cooldown_until IS NOT NULL OR strikes > 0)
+        `).run(provider, keyFingerprint(key));
+        cleared += Number(result.changes);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.rollback();
+      throw error;
     }
     return cleared;
   }

@@ -12,7 +12,12 @@ import { UpstreamMcpProvider } from "../src/upstream.js";
 
 const fakeServer = fileURLToPath(new URL("./fixtures/fake-mcp.js", import.meta.url));
 
-function fakeProvider(keys: string[], marker: string, extraEnv: Record<string, string> = {}): ProviderConfig {
+function fakeProvider(
+  keys: string[],
+  marker: string,
+  extraEnv: Record<string, string> = {},
+  idleTimeoutMs?: number,
+): ProviderConfig {
   return {
     enabled: true,
     auto: [],
@@ -23,6 +28,7 @@ function fakeProvider(keys: string[], marker: string, extraEnv: Record<string, s
       args: [fakeServer],
       envKey: "FAKE_KEY",
       env: { FAKE_MARKER: marker, ...extraEnv },
+      ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
     },
   };
 }
@@ -211,6 +217,32 @@ test("exposed descriptions are shaped but input schemas stay intact", async () =
     assert.ok(properties.query.description.length <= 225);
     await toolkit.close();
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an idle stdio_mcp child closes after idleTimeoutMs and respawns transparently on the next call", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-idle-"));
+  const marker = join(directory, "marker.log");
+  const rotation = new RotationStore(join(directory, "state.db"));
+  const provider = new UpstreamMcpProvider("fake", fakeProvider(["good-1"], marker, {}, 120), rotation);
+  try {
+    const tools = await provider.discover();
+    const echo = provider.bindingsFor(tools).find((item) => item.upstreamName === "echo");
+    assert.ok(echo);
+    const first = await echo.call({});
+    assert.match(bodyText(first), /echo:good-1/);
+    const startsBeforeIdle = lines(marker).filter((line) => line.startsWith("start")).length;
+    assert.equal(startsBeforeIdle, 1);
+
+    await sleep(280);
+    const second = await echo.call({});
+    assert.match(bodyText(second), /echo:good-1/);
+    const startsAfterIdle = lines(marker).filter((line) => line.startsWith("start")).length;
+    assert.ok(startsAfterIdle >= 2, `expected idle child to close and respawn, starts=${startsAfterIdle}`);
+  } finally {
+    await provider.close();
+    rotation.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

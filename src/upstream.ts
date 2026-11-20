@@ -45,9 +45,33 @@ const ANYSEARCH_CLIENT_HEADER = "X-Anysearch-Client";
 const DISCOVERY_TIMEOUT_MS = 25_000;
 // Past this many keys, or after a timeout, another key will not help: the upstream itself is unreachable.
 const DISCOVERY_MAX_KEYS = 3;
+// Close idle local stdio_mcp child processes (such as firecrawl-mcp) after 10 minutes of inactivity;
+// invoke() transparently respawns them on the next call.
+const DEFAULT_STDIO_IDLE_MS = 10 * 60_000;
+const STDIO_ENV_ALLOWLIST = new Set([
+  "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+  "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+  "TEMP", "TMP", "TMPDIR", "NODE_ENV", "NODE_OPTIONS", "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "UV_CACHE_DIR", "NPM_CONFIG_CACHE", "LANG", "LC_ALL", "TZ",
+]);
+
+function safeStdioEnv(extra: Record<string, string> | undefined, envKey: string, keyValue: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && STDIO_ENV_ALLOWLIST.has(name.toUpperCase())) {
+      env[name] = value;
+    }
+  }
+  if (extra) Object.assign(env, extra);
+  env[envKey] = keyValue;
+  return env;
+}
 
 interface ClientEntry {
   client: Client;
+  inFlight: number;
+  idleTimer?: NodeJS.Timeout;
   close(): Promise<void>;
 }
 
@@ -88,6 +112,12 @@ export class UpstreamMcpProvider {
   /** List the live upstream catalog, falling back across keys so one bad key cannot hide a provider. */
   async discover(): Promise<Tool[]> {
     const keys = this.config.keys;
+    const keylessRemote = this.config.integration.kind === "remote_mcp" && this.config.integration.auth.kind === "none" && keys.length === 0;
+    if (keylessRemote) {
+      const selection: KeySelection = { provider: this.name, slot: 0, key: "", masked: "none", fingerprint: "keyless" };
+      const entry = await withTimeout(this.clientFor(selection), DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
+      return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+    }
     if (!keys.length) throw new Error(`${this.name} has no API key for MCP discovery`);
     const usable = this.rotation.usableSlots(this.name, keys);
     const order = usable.length ? usable : keys.map((_, slot) => slot);
@@ -95,15 +125,27 @@ export class UpstreamMcpProvider {
     for (const slot of order.slice(0, DISCOVERY_MAX_KEYS)) {
       const key = keys[slot] as string;
       const selection = selectionFor(this.name, slot, key);
+      const pending = this.clientFor(selection);
       try {
-        const entry = await withTimeout(this.clientFor(selection), DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
-        return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+        const entry = await withTimeout(pending, DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
+        this.beginUse(entry);
+        try {
+          return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+        } finally {
+          this.endUse(selection, pending, entry);
+        }
       } catch (error) {
         lastError = error;
-        await this.dropClient(selection);
+        await this.dropClient(selection, pending);
         const status = statusFromError(error);
-        if (status === 401 || status === 402 || status === 403 || status === 429) {
-          this.rotation.record(selection, { ok: false, latencyMs: 0, httpStatus: status, error: cleanError(error) });
+        if (status === 401 || status === 402 || status === 403 || status === 429 || status === 432 || status === 433 || status === 434) {
+          this.safeRecord(selection, {
+            ok: false,
+            latencyMs: 0,
+            httpStatus: status,
+            ...failureFlags(error),
+            error: cleanError(error),
+          });
         }
         if (error instanceof Error && /timed out after/.test(error.message)) break;
       }
@@ -112,6 +154,9 @@ export class UpstreamMcpProvider {
   }
 
   private call(upstreamName: string, arguments_: Record<string, unknown>, options: CallOptions = {}): Promise<unknown> {
+    if (this.config.keys.length === 0 && this.config.integration.kind === "remote_mcp" && this.config.integration.auth.kind === "none") {
+      return this.callWith({ provider: this.name, slot: 0, key: "", masked: "none", fingerprint: "keyless" }, upstreamName, arguments_, false);
+    }
     return callWithRotation(
       this.rotation,
       this.name,
@@ -120,14 +165,23 @@ export class UpstreamMcpProvider {
         tools: [upstreamName, `${this.name}_${sanitizeName(upstreamName)}`],
         ...(options.slot !== undefined ? { pin: options.slot } : {}),
       },
-      (selection) => this.callWith(selection, upstreamName, arguments_),
+      (selection) => this.callWith(selection, upstreamName, arguments_, true),
     );
+  }
+
+  private safeRecord(selection: KeySelection, outcome: Parameters<RotationStore["record"]>[1]): void {
+    try {
+      this.rotation.record(selection, outcome);
+    } catch {
+      // Rotation state is advisory; a busy state file must not discard a completed upstream tool call.
+    }
   }
 
   private async callWith(
     selection: KeySelection,
     upstreamName: string,
     arguments_: Record<string, unknown>,
+    trackRotation: boolean,
   ): Promise<unknown> {
     const started = performance.now();
     try {
@@ -140,21 +194,23 @@ export class UpstreamMcpProvider {
           throw new ToolResultError(`${this.name} upstream tool error: ${text.slice(0, 500)}`, result.content as unknown[], keyFault);
         }
         // The key and transport worked; the tool rejected this particular request.
-        this.rotation.record(selection, { ok: true, latencyMs, toolError: true, error: `tool error: ${cleanError(text)}` });
+        if (trackRotation) this.safeRecord(selection, { ok: true, latencyMs, toolError: true, error: `tool error: ${cleanError(text)}` });
         return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
       }
-      this.rotation.record(selection, { ok: true, latencyMs });
+      if (trackRotation) this.safeRecord(selection, { ok: true, latencyMs });
       return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const httpStatus = statusFromError(error);
-      this.rotation.record(selection, {
-        ok: false,
-        latencyMs,
-        ...(httpStatus ? { httpStatus } : {}),
-        ...failureFlags(error),
-        error: cleanError(error),
-      });
+      if (trackRotation) {
+        this.safeRecord(selection, {
+          ok: false,
+          latencyMs,
+          ...(httpStatus ? { httpStatus } : {}),
+          ...failureFlags(error),
+          error: cleanError(error),
+        });
+      }
       throw error;
     }
   }
@@ -162,23 +218,64 @@ export class UpstreamMcpProvider {
   /** One tool call; a dead transport (closed stdio child, expired session) is rebuilt once on the same key. */
   private async invoke(selection: KeySelection, upstreamName: string, arguments_: Record<string, unknown>) {
     for (let attempt = 0; ; attempt += 1) {
-      const entry = await this.clientFor(selection);
+      const pending = this.clientFor(selection);
+      const entry = await pending;
+      this.beginUse(entry);
       try {
         return await entry.client.callTool({ name: upstreamName, arguments: arguments_ });
       } catch (error) {
         if (attempt > 0 || !isConnectionFailure(error)) throw error;
-        await this.dropClient(selection);
+        await this.dropClient(selection, pending);
+      } finally {
+        this.endUse(selection, pending, entry);
       }
     }
+  }
+
+  private stdioIdleMs(): number {
+    if (this.config.integration.kind !== "stdio_mcp") return 0;
+    const configured = this.config.integration.idleTimeoutMs;
+    return typeof configured === "number" && Number.isInteger(configured) && configured >= 0
+      ? configured
+      : DEFAULT_STDIO_IDLE_MS;
+  }
+
+  private beginUse(entry: ClientEntry): void {
+    entry.inFlight += 1;
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer);
+      delete entry.idleTimer;
+    }
+  }
+
+  private endUse(selection: KeySelection, pending: Promise<ClientEntry>, entry: ClientEntry): void {
+    entry.inFlight = Math.max(0, entry.inFlight - 1);
+    const idleMs = this.stdioIdleMs();
+    if (entry.inFlight > 0 || this.closed || idleMs <= 0) return;
+    if (this.clients.get(selection.fingerprint) !== pending) return;
+    if (entry.idleTimer) clearTimeout(entry.idleTimer);
+    entry.idleTimer = setTimeout(() => {
+      delete entry.idleTimer;
+      if (entry.inFlight === 0) void this.dropClient(selection, pending);
+    }, idleMs);
+    entry.idleTimer.unref();
   }
 
   private clientFor(selection: KeySelection): Promise<ClientEntry> {
     if (this.closed) return Promise.reject(new Error(`${this.name} upstream is closed`));
     let pending = this.clients.get(selection.fingerprint);
     if (!pending) {
-      const created = this.createClient(selection).then((entry) => {
+      const created = this.createClient(selection).then(async (entry) => {
+        if (this.closed) {
+          await entry.close().catch(() => undefined);
+          throw new Error(`${this.name} upstream is closed`);
+        }
         // A crashed child process or closed session must not stay cached.
         entry.client.onclose = () => {
+          if (entry.idleTimer) {
+            clearTimeout(entry.idleTimer);
+            delete entry.idleTimer;
+          }
           if (this.clients.get(selection.fingerprint) === created) this.clients.delete(selection.fingerprint);
         };
         return entry;
@@ -193,12 +290,13 @@ export class UpstreamMcpProvider {
     return pending;
   }
 
-  private async dropClient(selection: KeySelection): Promise<void> {
+  private async dropClient(selection: KeySelection, expected?: Promise<ClientEntry>): Promise<void> {
     const pending = this.clients.get(selection.fingerprint);
+    if (expected && pending !== expected) return;
     this.clients.delete(selection.fingerprint);
     if (!pending) return;
-    const entry = await pending.catch(() => undefined);
-    await entry?.close().catch(() => undefined);
+    // Close asynchronously so a hung connect() promise cannot defeat discovery timeouts.
+    void pending.then((entry) => entry.close()).catch(() => undefined);
   }
 
   private async createClient(selection: KeySelection): Promise<ClientEntry> {
@@ -217,43 +315,59 @@ export class UpstreamMcpProvider {
       if (integration.auth.kind === "header") headers.set(integration.auth.name, selection.key);
       if (integration.auth.kind === "bearer") headers.set("Authorization", `Bearer ${selection.key}`);
       const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
-      // The SDK's optional sessionId property conflicts with projects that
-      // enable exactOptionalPropertyTypes, though the runtime transport is valid.
-      await client.connect(transport);
-      return { client, close: async () => transport.close() };
+      await client.connect(transport, { timeout: DISCOVERY_TIMEOUT_MS });
+      const entry: ClientEntry = {
+        client,
+        inFlight: 0,
+        close: async () => {
+          if (entry.idleTimer) {
+            clearTimeout(entry.idleTimer);
+            delete entry.idleTimer;
+          }
+          await transport.close();
+        },
+      };
+      return entry;
     }
     if (integration.kind === "stdio_mcp") {
       const command = process.platform === "win32" && integration.command === "npx" ? "npx.cmd" : integration.command;
       const transport = new StdioClientTransport({
         command,
         args: integration.args,
-        env: {
-          ...process.env,
-          ...integration.env,
-          [integration.envKey]: selection.key,
-        } as Record<string, string>,
+        env: safeStdioEnv(integration.env, integration.envKey, selection.key),
         stderr: "pipe",
       });
-      await client.connect(transport);
-      // Nothing reads the child's stderr; drain it so a chatty server cannot fill the pipe and stall.
+      // Drain stderr before connecting so a chatty startup cannot fill the OS pipe buffer and stall handshake.
       transport.stderr?.on("data", () => undefined);
-      return { client, close: async () => transport.close() };
+      await client.connect(transport, { timeout: DISCOVERY_TIMEOUT_MS });
+      const entry: ClientEntry = {
+        client,
+        inFlight: 0,
+        close: async () => {
+          if (entry.idleTimer) {
+            clearTimeout(entry.idleTimer);
+            delete entry.idleTimer;
+          }
+          await transport.close();
+        },
+      };
+      return entry;
     }
     throw new Error(`${this.name} is not an MCP integration`);
   }
 }
 
 /**
- * Firecrawl 3.3x reports API failures as `{ success: false, error: { code, status } }`.
+ * Firecrawl 3.3x+ reports API failures as `{ success: false, error: { code, status } }`.
  * Only codes that describe the key count; a 403 there can be the target site refusing.
  */
 export function structuredKeyFault(structured: unknown): number | undefined {
   const error = (structured as { error?: { code?: unknown; status?: unknown } } | undefined)?.error;
   if (!error || typeof error !== "object") return undefined;
-  const code = typeof error.code === "string" ? error.code : "";
+  const code = typeof error.code === "string" ? error.code.toLowerCase() : "";
   if (code === "insufficient_credits" || error.status === 402) return 402;
   if (code === "unauthorized" || error.status === 401) return 401;
-  if (code === "rate_limited" || error.status === 429) return 429;
+  if (code === "rate_limited" || code === "index_daily_limit" || error.status === 429) return 429;
   return undefined;
 }
 

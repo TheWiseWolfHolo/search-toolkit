@@ -51,7 +51,7 @@ export function focusExcerpt(text: string, query: string | undefined, max: numbe
   if (!terms.length) return trimText(text, max);
   const segments: Segment[] = [];
   text.split("\n").forEach((line, lineNumber) => {
-    for (const piece of line.split(/(?<=[.!?。！？；;])\s*/)) {
+    for (const piece of line.split(/(?<=[.!?])(?:\s+|$)|(?<=[。！？；;])/)) {
       if (piece.trim()) segments.push({ text: piece.trim(), line: lineNumber, index: segments.length });
     }
   });
@@ -61,16 +61,21 @@ export function focusExcerpt(text: string, query: string | undefined, max: numbe
     return { segment, score: hits + (segment.index === 0 ? 0.5 : 0) };
   });
   if (!scored.some((entry) => entry.score >= 1)) return trimText(text, max);
+  const ranked = [...scored].sort((a, b) => b.score - a.score || a.segment.index - b.segment.index);
   const picked: Segment[] = [];
   let used = 0;
-  for (const { segment, score } of [...scored].sort((a, b) => b.score - a.score || a.segment.index - b.segment.index)) {
+  for (const { segment, score } of ranked) {
     if (score <= 0) break;
     const cost = segment.text.length + 3;
     if (used + cost > max) continue;
     picked.push(segment);
     used += cost;
   }
-  if (!picked.length) return trimText(text, max);
+  if (!picked.length) {
+    const best = ranked[0];
+    if (best && best.score >= 1) return windowAroundMatch(best.segment.text, terms, max);
+    return trimText(text, max);
+  }
   picked.sort((a, b) => a.index - b.index);
   let output = "";
   picked.forEach((segment, position) => {
@@ -81,4 +86,28 @@ export function focusExcerpt(text: string, query: string | undefined, max: numbe
   });
   const last = picked[picked.length - 1] as Segment;
   return last.index < segments.length - 1 ? `${output} …` : output;
+}
+
+function windowAroundMatch(segment: string, terms: string[], max: number): string {
+  const lower = segment.toLowerCase();
+  let matchPos = -1;
+  for (const term of terms) {
+    const idx = lower.indexOf(term);
+    if (idx >= 0 && (matchPos < 0 || idx < matchPos)) matchPos = idx;
+  }
+  if (matchPos < 0) return trimText(segment, max);
+  const budget = Math.max(40, max - 4);
+  let start = Math.max(0, matchPos - Math.floor(budget / 3));
+  if (start + budget > segment.length) start = Math.max(0, segment.length - budget);
+  if (start > 0) {
+    const boundary = segment.indexOf(" ", start);
+    if (boundary > start && boundary - start < 20) start = boundary + 1;
+  }
+  let end = Math.min(segment.length, start + budget);
+  if (end < segment.length) {
+    const boundary = segment.lastIndexOf(" ", end);
+    if (boundary > start + budget * 0.6) end = boundary;
+  }
+  const core = segment.slice(start, end).trim();
+  return `${start > 0 ? "… " : ""}${core}${end < segment.length ? " …" : ""}`;
 }

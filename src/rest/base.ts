@@ -8,7 +8,7 @@ import type { RotationStore } from "../rotation.js";
 import type { CallOptions, KeySelection, ProviderConfig, SearchItem, ToolBinding } from "../types.js";
 
 export interface RestAdapter {
-  tools(provider: string): Tool[];
+  tools(provider: string, config?: ProviderConfig): Tool[];
   call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown>;
 }
 
@@ -21,7 +21,7 @@ export class RestProvider {
   ) {}
 
   bindings(): ToolBinding[] {
-    return this.adapter.tools(this.name).map((tool) => ({
+    return this.adapter.tools(this.name, this.config).map((tool) => ({
       provider: this.name,
       upstreamName: tool.name,
       exposed: tool,
@@ -30,19 +30,31 @@ export class RestProvider {
   }
 
   private call(tool: string, args: Record<string, unknown>, options: CallOptions = {}): Promise<unknown> {
+    if (this.config.keys.length === 0 && this.config.integration.kind === "rest" && this.config.integration.adapter === "direct_markdown") {
+      return this.callWith({ provider: this.name, slot: 0, key: "", masked: "none", fingerprint: "keyless" }, tool, args, false);
+    }
     return callWithRotation(
       this.rotation,
       this.name,
       this.config,
       { tools: [tool], ...(options.slot !== undefined ? { pin: options.slot } : {}) },
-      (selection) => this.callWith(selection, tool, args),
+      (selection) => this.callWith(selection, tool, args, true),
     );
+  }
+
+  private safeRecord(selection: KeySelection, outcome: Parameters<RotationStore["record"]>[1]): void {
+    try {
+      this.rotation.record(selection, outcome);
+    } catch {
+      // Rotation metrics are advisory; a busy or read-only SQLite file must never discard an upstream answer.
+    }
   }
 
   private async callWith(
     selection: KeySelection,
     tool: string,
     args: Record<string, unknown>,
+    trackRotation: boolean,
   ): Promise<unknown> {
     const started = performance.now();
     try {
@@ -51,7 +63,7 @@ export class RestProvider {
         ? { ...(rawPayload as Record<string, unknown>), items: dedupeItems((rawPayload as { items: SearchItem[] }).items) }
         : rawPayload;
       const latencyMs = Math.round(performance.now() - started);
-      this.rotation.record(selection, { ok: true, latencyMs, httpStatus: 200 });
+      if (trackRotation) this.safeRecord(selection, { ok: true, latencyMs, httpStatus: 200 });
       const route = { provider: this.name, tool, upstreamTool: tool };
       return {
         // Model-visible content: one compact route block, then readable text.
@@ -74,14 +86,16 @@ export class RestProvider {
     } catch (error) {
       const latencyMs = Math.round(performance.now() - started);
       const status = statusFromError(error);
-      this.rotation.record(selection, {
-        ok: false,
-        latencyMs,
-        ...(status ? { httpStatus: status } : {}),
-        ...(error instanceof HttpError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
-        ...failureFlags(error),
-        error: cleanError(error),
-      });
+      if (trackRotation) {
+        this.safeRecord(selection, {
+          ok: false,
+          latencyMs,
+          ...(status ? { httpStatus: status } : {}),
+          ...(error instanceof HttpError && error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+          ...failureFlags(error),
+          error: cleanError(error),
+        });
+      }
       throw error;
     }
   }
@@ -91,13 +105,16 @@ export function baseUrlOf(config: ProviderConfig | undefined, fallback: string):
   return config?.integration.kind === "rest" && config.integration.baseUrl ? config.integration.baseUrl : fallback;
 }
 
+const KNOWN_ENDPOINT_SUFFIX = /\/(?:v1\/(?:search|extract|contents|images\/search|tools\/search|tools\/fetch|responses)|v4\/ai\/language-model|v1)$/i;
+
 /**
  * Full URL of one endpoint under a provider's API root. A configured baseUrl may be the
  * root ("https://proxy.example/parallel") or, as older configs have it, a full
- * /v1/... endpoint; either way the endpoint path is appended to the root.
+ * /v1/... endpoint; either way the endpoint path is appended to the root while keeping
+ * any reverse-proxy path prefix intact.
  */
 export function endpointOf(config: ProviderConfig, root: string, path: string): string {
-  const base = baseUrlOf(config, root).replace(/\/+$/, "").replace(/\/v1(?:\/[a-z_/-]*)?$/i, "");
+  const base = baseUrlOf(config, root).replace(/\/+$/, "").replace(KNOWN_ENDPOINT_SUFFIX, "");
   return `${base}${path}`;
 }
 
@@ -116,7 +133,7 @@ export async function requestJson(
     return JSON.parse(text) as Record<string, unknown>;
   } catch {
     // A 200 with a non-JSON body is a gateway or captive-page problem, not a request error.
-    throw new HttpError(`HTTP 502: non-JSON response (${text.slice(0, 80).replace(/\s+/g, " ")})`, 502);
+    throw new HttpError(`HTTP 502: non-JSON response (${redact(text.slice(0, 120).replace(/\s+/g, " "))})`, 502);
   }
 }
 

@@ -41,18 +41,21 @@ export class OctenAdapter implements RestAdapter {
       "Octen Search",
       "Search Octen's live web index; each result carries a query-relevant highlight. Fast per call.",
       {
-        includeDomains: { type: "array", items: { type: "string" }, maxItems: 50 },
-        excludeDomains: { type: "array", items: { type: "string" }, maxItems: 50 },
+        includeDomains: { type: "array", items: { type: "string" }, maxItems: 1200 },
+        excludeDomains: { type: "array", items: { type: "string" }, maxItems: 1200 },
         freshness: { type: "string", enum: FRESHNESS },
         language: { type: "array", items: { type: "string", minLength: 2, maxLength: 2 }, description: "ISO 639-1 codes, such as [\"zh\"]" },
-        fullContent: { type: "boolean", default: false, description: "Return each page's content instead of a highlight (costs more)" },
+        fullContent: { type: "boolean", default: false, description: "Return each page's full content instead of a highlight" },
         fullContentMaxTokens: { type: "integer", minimum: 100, description: "Token cap per page when fullContent is on" },
+        premier: { type: "boolean", default: false, description: "Use Octen's /search-premier endpoint for higher-precision ranking" },
       },
     ), EXTRACT_TOOL];
   }
 
   async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    const root = baseUrlOf(config, "https://api.octen.ai").replace(/\/+$/, "");
+    const root = baseUrlOf(config, "https://api.octen.ai")
+      .replace(/\/+$/, "")
+      .replace(/\/(?:search-premier|search|extract)$/, "");
     if (tool === "octen_extract") return this.extract(args, key, root);
     const limit = numberArg(args, "limit", 6);
     const body: Record<string, unknown> = { query: stringArg(args, "query"), count: limit };
@@ -66,7 +69,8 @@ export class OctenAdapter implements RestAdapter {
     if (fullContent) {
       body.full_content = { enable: true, ...(typeof args.fullContentMaxTokens === "number" ? { max_tokens: args.fullContentMaxTokens } : {}) };
     }
-    const data = checked(await requestJson(`${root}/search`, {
+    const path = args.premier === true ? "/search-premier" : "/search";
+    const data = checked(await requestJson(`${root}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Api-Key": key },
       body: JSON.stringify(body),
@@ -105,7 +109,9 @@ export class OctenAdapter implements RestAdapter {
     if (!succeeded.length) {
       // A batch answers 200 while every URL failed; the failure belongs to the page.
       const reason = stringValue(pages.find((page) => page.status === "failed")?.error_message) ?? "no content";
-      throw new TargetPageError(`Octen extract failed: ${reason}`, /not\s*found|404/i.test(reason) ? 404 : undefined);
+      const statusMatch = reason.match(/\b(404|410|451)\b/);
+      const pageStatus = statusMatch ? Number(statusMatch[1]) : /page[\s_]+not[\s_]+found|404[\s_]+not[\s_]+found/i.test(reason) ? 404 : undefined;
+      throw new TargetPageError(`Octen extract failed: ${reason}`, pageStatus);
     }
     const text = succeeded.map((page) => {
       const title = stringValue(page.title);
@@ -122,7 +128,15 @@ export class OctenAdapter implements RestAdapter {
 /** Octen reports some failures (balance, rate limit) as a business code inside a 200 body. */
 function checked(data: Record<string, unknown>): Record<string, unknown> {
   if (data.code === 0) return data;
-  const code = typeof data.code === "number" && data.code >= 400 && data.code < 600 ? data.code : 502;
+  const raw = typeof data.code === "number" ? data.code : Number(data.code);
+  let code = 502;
+  if (Number.isInteger(raw)) {
+    if (raw >= 400 && raw < 600) code = raw;
+    else if (raw >= 40_000) {
+      const prefix = Number(String(raw).slice(0, 3));
+      if (prefix >= 400 && prefix < 600) code = prefix;
+    }
+  }
   throw new HttpError(`HTTP ${code}: ${String(data.msg ?? "Octen error")}`, code);
 }
 

@@ -18,16 +18,27 @@ export interface CacheHit {
  */
 export class ResultCache {
   private readonly db: DatabaseSync;
+  private readonly ownsDb: boolean;
   private readonly getStatement: StatementSync;
   private readonly setStatement: StatementSync;
   private readonly pruneStatement: StatementSync;
+  private lastPrunedAt = 0;
+  private writesSincePrune = 0;
 
-  constructor(path: string) {
-    mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
+  constructor(pathOrDb: string | DatabaseSync) {
+    if (typeof pathOrDb === "string") {
+      mkdirSync(dirname(pathOrDb), { recursive: true });
+      this.db = new DatabaseSync(pathOrDb);
+      this.ownsDb = true;
+      this.db.exec(`
+        PRAGMA busy_timeout = 5000;
+        PRAGMA journal_mode = WAL;
+      `);
+    } else {
+      this.db = pathOrDb;
+      this.ownsDb = false;
+    }
     this.db.exec(`
-      PRAGMA busy_timeout = 5000;
-      PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS result_cache (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -46,9 +57,9 @@ export class ResultCache {
 
   get(key: string): CacheHit | undefined {
     const now = Date.now();
-    const row = this.getStatement.get(key, now) as { value: string; created_at: number } | undefined;
-    if (!row) return undefined;
     try {
+      const row = this.getStatement.get(key, now) as { value: string; created_at: number } | undefined;
+      if (!row) return undefined;
       return { value: JSON.parse(row.value) as unknown, ageMs: now - row.created_at };
     } catch {
       return undefined;
@@ -61,7 +72,12 @@ export class ResultCache {
     if (text.length > MAX_ENTRY_CHARS) return;
     const now = Date.now();
     try {
-      this.pruneStatement.run(now);
+      this.writesSincePrune += 1;
+      if (now - this.lastPrunedAt >= 60_000 || this.writesSincePrune >= 50) {
+        this.pruneStatement.run(now);
+        this.lastPrunedAt = now;
+        this.writesSincePrune = 0;
+      }
       this.setStatement.run(key, text, now, now + ttlMs);
     } catch {
       // A busy or read-only state file only costs the cache, never the answer.
@@ -78,7 +94,7 @@ export class ResultCache {
   }
 
   close(): void {
-    this.db.close();
+    if (this.ownsDb) this.db.close();
   }
 }
 

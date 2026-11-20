@@ -21,13 +21,18 @@ export class YouAdapter implements RestAdapter {
         language: { type: "string", description: "BCP 47 language code" },
         safesearch: { type: "string", enum: ["off", "moderate", "strict"], default: "moderate" },
         includeDomains: { type: "array", maxItems: 500, items: { type: "string" } },
-        excludeDomains: { type: "array", maxItems: 500, items: { type: "string" } },
+        excludeDomains: { type: "array", maxItems: 5000, items: { type: "string" } },
         boostDomains: { type: "array", maxItems: 500, items: { type: "string" } },
         contentLevel: {
           type: "string",
           enum: ["snippets", "highlights", "full_page"],
           default: "snippets",
           description: "snippets (low-cost default), highlights (query-aware passage extraction), or full_page (full Markdown crawl)",
+        },
+        extractionSource: {
+          type: "string",
+          enum: ["blend", "cache", "fetch"],
+          description: "Source for extracted text when contentLevel is highlights or full_page: blend (default), cache (faster), or fetch (live)",
         },
         highlightsMaxTokens: {
           type: "integer",
@@ -43,7 +48,12 @@ export class YouAdapter implements RestAdapter {
         strictOperators: {
           type: "boolean",
           default: false,
-          description: "Enforce quoted phrases and site: operators strictly without relaxation",
+          description: "Request strict operator matching; combine with includeDomains when hard domain pinning is required",
+        },
+        preferNews: {
+          type: "boolean",
+          default: false,
+          description: "Interleave News items ahead of Web items (useful for breaking news)",
         },
         crawlTimeout: {
           type: "integer",
@@ -55,8 +65,8 @@ export class YouAdapter implements RestAdapter {
     );
     const contents: Tool = {
       name: "you_contents",
-      title: "You.com Contents",
-      description: "Extract clean Markdown, HTML, or metadata from 1-10 known URLs via the You.com Contents API.",
+      title: "You.com Extract",
+      description: "Extract clean Markdown, HTML, or metadata from 1-10 known URLs via the You.com /v1/extract API.",
       inputSchema: {
         type: "object",
         properties: {
@@ -75,8 +85,18 @@ export class YouAdapter implements RestAdapter {
             default: ["markdown"],
             description: "Content formats to return",
           },
+          extractionSource: {
+            type: "string",
+            enum: ["blend", "cache", "fetch"],
+            description: "blend (default), cache (faster), or fetch (live page fetch)",
+          },
+          parseEffort: {
+            type: "string",
+            enum: ["fast", "balanced", "thorough"],
+            description: "Extraction depth for complex pages",
+          },
           crawlTimeout: { type: "integer", minimum: 1, maximum: 60, default: 10 },
-          maxAgeSeconds: { type: "integer", minimum: 0, description: "Max cached content age in seconds (0 forces live refetch)" },
+          maxAgeSeconds: { type: "integer", minimum: 0, description: "0 forces extraction_source=fetch for a live refetch" },
         },
         additionalProperties: false,
       },
@@ -118,14 +138,23 @@ export class YouAdapter implements RestAdapter {
     if (args.knowledge === true) body.knowledge = "core";
     if (typeof args.strictOperators === "boolean") body.strict_operators = args.strictOperators;
     const contentLevel = stringArg(args, "contentLevel");
+    const extractionSource = stringArg(args, "extractionSource");
     // crawl_timeout only applies to full-page crawls; sent with snippets or highlights it is a 422.
     if (typeof args.crawlTimeout === "number" && contentLevel === "full_page") body.crawl_timeout = args.crawlTimeout;
     if (contentLevel === "highlights") {
       const highlights: Record<string, unknown> = {};
       if (typeof args.highlightsMaxTokens === "number") highlights.total_max_tokens = args.highlightsMaxTokens;
-      body.extraction = { extraction_mode: "highlights", highlights };
+      body.extraction = {
+        extraction_mode: "highlights",
+        highlights,
+        ...(extractionSource ? { extraction_source: extractionSource } : {}),
+      };
     } else if (contentLevel === "full_page") {
-      body.extraction = { extraction_mode: "full_page", full_page: { extraction_formats: ["markdown"] } };
+      body.extraction = {
+        extraction_mode: "full_page",
+        full_page: { extraction_formats: ["markdown"] },
+        ...(extractionSource ? { extraction_source: extractionSource } : {}),
+      };
     }
     const data = await requestJson(endpointOf(config, "https://ydc-index.io", "/v1/search"), {
       method: "POST",
@@ -140,11 +169,14 @@ export class YouAdapter implements RestAdapter {
     const news = normalizeYouSection(results.news, "news");
     const limit = numberArg(args, "limit", 6);
     const items: SearchItem[] = [...knowledge.slice(0, Math.min(2, limit))];
-    for (let index = 0; items.length < limit && (index < web.length || index < news.length); index += 1) {
-      const webItem = web[index];
-      const newsItem = news[index];
-      if (webItem) items.push(webItem);
-      if (newsItem && items.length < limit) items.push(newsItem);
+    const preferNews = args.preferNews === true;
+    const primary = preferNews ? news : web;
+    const secondary = preferNews ? web : news;
+    for (let index = 0; items.length < limit && (index < primary.length || index < secondary.length); index += 1) {
+      const first = primary[index];
+      const second = secondary[index];
+      if (first) items.push(first);
+      if (second && items.length < limit) items.push(second);
     }
     return { items, metadata: data.metadata };
   }
@@ -156,37 +188,93 @@ export class YouAdapter implements RestAdapter {
       if (!urls.includes(item)) urls.push(item);
     }
     if (!urls.length) throw new Error("you_contents requires url or urls");
-    const formats = arrayArg(args, "formats");
-    const body: Record<string, unknown> = {
-      urls: urls.slice(0, 10),
-      formats: formats.length ? formats : ["markdown"],
-    };
-    if (typeof args.crawlTimeout === "number") body.crawl_timeout = args.crawlTimeout;
-    if (typeof args.maxAgeSeconds === "number") body.max_age = args.maxAgeSeconds;
-    let raw: unknown;
-    try {
-      raw = await requestJson(endpointOf(config, "https://ydc-index.io", "/v1/contents"), {
-        method: "POST",
-        headers: { "X-API-Key": key, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }, 30_000);
-    } catch (error) {
-      // The request shape is fixed, so a 422 here is about the page (pdf_too_large, an unreadable URL).
-      if (error instanceof HttpError && error.status === 422) throw new TargetPageError(`You.com could not read the page: ${error.message}`);
-      throw error;
+    const requestedFormats = arrayArg(args, "formats");
+    const formats = requestedFormats.length ? requestedFormats : ["markdown"];
+    const fullPageFormats = formats.filter((format) => format === "markdown" || format === "html");
+    const extractionSource = args.maxAgeSeconds === 0
+      ? "fetch"
+      : stringArg(args, "extractionSource") || undefined;
+    const parseEffort = stringArg(args, "parseEffort") || undefined;
+    const timeout = typeof args.crawlTimeout === "number" ? args.crawlTimeout : undefined;
+    const endpoint = endpointOf(config, "https://ydc-index.io", "/v1/extract");
+    const timeoutMs = Math.max(30_000, (timeout ?? 10) * 1000 + 15_000);
+
+    const settled = await Promise.allSettled(urls.slice(0, 10).map(async (url) => {
+      const body: Record<string, unknown> = {
+        url,
+        ...(fullPageFormats.length ? { full_page: { extraction_formats: fullPageFormats } } : {}),
+        ...(formats.includes("metadata") ? { metadata: true } : {}),
+        ...(extractionSource ? { extraction_source: extractionSource } : {}),
+        ...(parseEffort ? { parse_effort: parseEffort } : {}),
+        ...(timeout !== undefined ? { timeout } : {}),
+      };
+      try {
+        const raw = await requestJson(endpoint, {
+          method: "POST",
+          headers: { "X-API-Key": key, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }, timeoutMs);
+        return objectRecord(Array.isArray(raw) ? raw[0] : raw);
+      } catch (error) {
+        if (error instanceof HttpError) {
+          const lower = error.message.toLowerCase();
+          if (error.status === 422 || /site_blocked|site_unreachable|unsupported_content|pdf_too_large|invalid_url/.test(lower)) {
+            const pageStatus = /\b404\b|page[\s_]+not[\s_]+found|404[\s_]+not[\s_]+found/.test(lower) ? 404 : /\b403\b|site_blocked/.test(lower) ? 403 : undefined;
+            throw new TargetPageError(`You.com could not read the page: ${error.message}`, pageStatus);
+          }
+        }
+        throw error;
+      }
+    }));
+
+    const pages: Array<Record<string, unknown>> = [];
+    const errors: Array<{ url: string; error: string }> = [];
+    let firstFatalError: unknown;
+    let firstPageError: TargetPageError | undefined;
+    settled.forEach((outcome, index) => {
+      const url = urls[index] as string;
+      if (outcome.status === "fulfilled") {
+        pages.push(outcome.value);
+      } else {
+        const reason = outcome.reason;
+        if (reason instanceof TargetPageError) {
+          firstPageError ??= reason;
+          errors.push({ url, error: reason.message });
+        } else {
+          firstFatalError ??= reason;
+          errors.push({ url, error: reason instanceof Error ? reason.message : String(reason) });
+        }
+      }
+    });
+
+    if (!pages.length) {
+      if (firstFatalError) throw firstFatalError;
+      throw firstPageError ?? new TargetPageError("You.com returned no content for the page");
     }
-    const pages = Array.isArray(raw) ? raw.map(objectRecord) : [];
-    const text = pages.map((page) => {
-      const title = stringValue(page.title);
+
+    const wantsText = fullPageFormats.length > 0;
+    const formatted = pages.map((page) => {
+      const contents = objectRecord(page.contents);
+      const title = stringValue(page.title) ?? stringValue(objectRecord(page.metadata).title);
       const url = stringValue(page.url) ?? "";
-      const content = stringValue(page.markdown) ?? stringValue(page.html) ?? "";
+      const markdown = stringValue(contents.markdown) ?? stringValue(page.markdown);
+      const html = stringValue(contents.html) ?? stringValue(page.html);
+      const content = markdown ?? html ?? "";
+      const metaBlock = !content.trim() && formats.includes("metadata") && page.metadata && typeof page.metadata === "object"
+        ? JSON.stringify(page.metadata, null, 2)
+        : "";
       const header = [title ? `# ${title}` : "", url ? `URL: ${url}` : ""].filter(Boolean).join("\n");
-      return [header, content.trim()].filter(Boolean).join("\n\n");
-    }).filter(Boolean).join("\n\n---\n\n");
-    const wantsText = (body.formats as string[]).some((format) => format === "markdown" || format === "html");
-    if (wantsText && !pages.some((page) => stringValue(page.markdown)?.trim() || stringValue(page.html)?.trim())) {
+      return [header, (content.trim() || metaBlock)].filter(Boolean).join("\n\n");
+    }).filter(Boolean);
+
+    const hasText = pages.some((page) => {
+      const contents = objectRecord(page.contents);
+      return Boolean((stringValue(contents.markdown) ?? stringValue(page.markdown))?.trim()
+        || (stringValue(contents.html) ?? stringValue(page.html))?.trim());
+    });
+    if (wantsText && !hasText) {
       throw new TargetPageError("You.com returned no content for the page");
     }
-    return { text, pages };
+    return { text: formatted.join("\n\n---\n\n"), pages, ...(errors.length ? { errors } : {}) };
   }
 }

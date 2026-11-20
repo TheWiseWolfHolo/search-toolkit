@@ -12,21 +12,21 @@
 | --- | --- | --- |
 | `search_auto` | 网页搜索 | 七种模式，每种都有按真实查询实测出的 Provider 顺序（见下表）。中文查询自动切换到中文市场参数。 |
 | `search_images` | 按文字或按图片找图 | 文字：Brave Images → Serper Images → Parallel Images。图片 URL：走 Google Lens 以图搜图，用来认出图里是什么，或者查这张图出现在哪些网页。 |
-| `fetch_auto` | 读取 1 到 5 个已知 URL | Exa → Tavily → Parallel Extract → You.com Contents → Firecrawl → LinkUp → AnySearch。遇到验证壳页面、几乎没有内容或被网站拒绝时，换下一个阅读器。 |
+| `fetch_auto` | 读取 1 到 5 个已知 URL | balanced：Direct Markdown（可选）→ Exa → DeepSeek → Vercel DeepSeek → Tavily → Parallel Extract → TinyFish → You.com Extract → Octen → Firecrawl → LinkUp → AnySearch；`quality: max` 由 Firecrawl → TinyFish → Tavily → Parallel 打头。遇到验证壳页面、片段或站点拦截时自动换下一个阅读器。 |
 
 `search_auto` 各模式在 balanced 档的顺序：
 
 | 模式 | 适用 | 英文查询 | 中文查询 |
 | --- | --- | --- | --- |
-| `general` | 日常查询 | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily | Brave → Serper → You.com → Parallel → Tavily |
-| `exact` | 带引号的原文、报错信息 | Parallel → Brave → Serper → You.com → Tavily | Brave → Serper → You.com → Parallel |
-| `official` | 厂商、产品、政府官网 | Exa Lite → Brave → Serper → You.com | Exa Lite → Serper → Parallel → Brave |
-| `current` | 新闻 | You.com → Exa 新闻 → Octen → Serper News → Brave News → Tavily 新闻 | Exa 新闻 → You.com → Octen → Serper News → Brave News → Tavily 新闻 |
-| `scholar` | 论文、预印本、综述 | Exa Lite → Parallel → You.com → Serper Scholar | 同左 |
-| `code` | 代码仓库、示例、API 用法 | Exa Lite（GitHub 分类）→ Parallel → Serper → Exa Lite | 同左 |
-| `context` | 限定 token 预算的 grounding 片段 | Brave LLM Context → Parallel → You.com → Tavily | 同左 |
+| `general` | 日常查询 | Parallel → Serper → Exa Lite → You.com → Octen → Brave → Tavily → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | Brave → Serper → DeepSeek → Vercel DeepSeek → You.com → Parallel → Vercel Parallel Fast → Tavily |
+| `exact` | 带引号的原文、报错信息 | Parallel → Brave → Serper → You.com → Tavily → DeepSeek → Vercel DeepSeek | Brave → Serper → DeepSeek → Vercel DeepSeek → You.com → Parallel |
+| `official` | 厂商、产品、政府官网 | Exa Lite → Brave → Serper → You.com → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | Exa Lite → Serper → DeepSeek → Vercel DeepSeek → Parallel → Brave |
+| `current` | 新闻 | You.com（`preferNews`）→ Exa 新闻 → Octen → Serper News → Brave News → Tavily 新闻 → DeepSeek → Vercel DeepSeek | Exa 新闻 → You.com（`preferNews`）→ Octen → Serper News → Brave News → Tavily 新闻 → DeepSeek → Vercel DeepSeek |
+| `scholar` | 论文、预印本、综述 | Exa Lite（`category: publication`）→ Parallel → You.com → Serper Scholar → Vercel Parallel Fast | 同左 |
+| `code` | 代码仓库、示例、API 用法 | Exa Lite（`includeDomains: github.com`）→ Parallel → Serper → DeepSeek → Vercel DeepSeek → Vercel Parallel Fast | 同左 |
+| `context` | 限定 token 预算的 grounding 片段 | Brave LLM Context → Parallel → You.com → Tavily → DeepSeek → Vercel DeepSeek | 同左 |
 
-`quality: max` 用于范围大或需要多跳的问题：英文 general 改由带 highlights 的 Exa Auto 打头，其他模式里的 Exa Lite 换成 Exa Auto，Parallel、You.com、Brave、Tavily 也切到更深的档位。所有模式都支持 `includeDomains`、`excludeDomains`、`freshness`、`maxCharsPerResult`，会换算成各家自己的参数。`crossCheck: true` 同时查两个独立索引，并标出每条结果是哪家找到的。
+`quality: max` 用于范围大或需要多跳的问题：英文 general 改由带 highlights 的 Exa Auto 打头，`context` 模式把 Parallel Advanced 排在 Brave LLM Context 之前，其他模式里的 Exa Lite 换成 Exa Auto，DeepSeek 启用 `needContent: true`，Parallel、You.com、Brave、Tavily 也切到更深的档位。所有模式都支持 `includeDomains`、`excludeDomains`、`freshness`、`maxCharsPerResult`，会换算成各家自己的参数（Exa、Parallel 和 `site:` 路线都会保留 `github.com/org` 这类路径前缀，超长的 `site:` 列表会自动跳过超出查询长度上限的 Provider：DeepSeek 128 字符、Serper 32 词、Brave 600/400 字符）。`crossCheck: true` 同时查两个独立索引，并标出每条结果是哪家找到的。
 
 ### 顺序是怎么定的
 
@@ -39,19 +39,22 @@
 | 语义检索、官网、论文、代码仓库、网页正文 | Exa 官方 MCP |
 | Google 精简结果、新闻、图片、Scholar 论文和 Google Lens | Serper（`serper_search`、`serper_news`、`serper_images`、`serper_scholar`、`serper_lens`） |
 | 独立的网页和新闻索引（`extraSnippets`、`goggles`），以及给模型用的 grounding 片段 | Brave Web、News、Images、LLM Context |
-| 一次返回网页和新闻、实时 `knowledge` 卡片、`full_page` 正文、URL 提取 | You.com Search 与 Contents |
-| 自然语言目标检索、批量 URL 提取、语义搜图 | Parallel Search、Extract、Images |
-| 速度快、每条结果附较长相关摘录的搜索，URL 提取 | Octen Search 与 Extract |
-| 托管的提取、站点地图、爬取和研究任务 | Tavily 官方 MCP |
-| 搜索、抓取、爬取、站点地图、结构化提取 | Firecrawl 官方 MCP |
+| 一次返回网页和新闻（`preferNews`）、实时 `knowledge` 卡片、`full_page` 正文、`/v1/extract` URL 提取 | You.com Search 与 Extract（`you_contents`） |
+| 自然语言目标检索（`max_chars_total`）、批量 URL 提取（`links`）、语义搜图 | Parallel Search、Extract、Images |
+| 速度快、每条结果附较长相关摘录（`/search-premier`、1,200 域名过滤）、URL 提取 | Octen Search 与 Extract |
+| 中英双语搜索（摘要、rerank 分数、原生运算符，上限 128 字符）与 Markdown 抓取 | DeepSeek（`deepseek_search`、`deepseek_fetch`） |
+| 托管 DeepSeek Search/Fetch（网关赠送/付费额度 $0.75/千次）与 Parallel Fast（2027-01-31 前 $0 免费），默认 $0 宿主模型 | Vercel AI Gateway（`vercel_deepseek_search`、`vercel_deepseek_fetch`、`vercel_parallel_fast`） |
+| 零费用本机 `Accept: text/markdown` 协商（Cloudflare、Vercel Docs、Mintlify），内置 SSRF 校验；可选、免 Key | Direct Markdown（`direct_markdown_fetch`） |
+| 托管的提取、站点地图、爬取和研究任务 | Tavily 官方 MCP（Bearer 鉴权） |
+| 搜索、抓取、爬取、站点地图、结构化提取（本地 `firecrawl-mcp@3.41.0` STDIO 或托管远程 MCP `https://mcp.firecrawl.dev/v2/mcp`；窄单实体查询可能触发 Ultrasearch 额外扣费） | Firecrawl 官方 MCP |
 | 带来源的答案和研究任务 | LinkUp 官方 MCP |
 | 手动通用或垂直搜索、并行批量查询、URL 提取 | AnySearch 官方 MCP |
-| 网页加 X 原生搜索、模型综合、图片和视频理解 | Grok / xAI Responses |
-| 用 Chromium 渲染后读取网页，每天前 1,000 个 URL 免费 | TinyFish Fetch |
-| 紧凑搜索，只能手动调用 | Querit、TinyFish Search、Jina Search |
-| 中文本地搜索，需要明确同意消耗次数，只能手动调用 | 豆包 |
+| 网页加 X 原生搜索、模型综合、图片和视频理解；`depth` 最高支持 16 个研究 Agent | Grok / xAI Responses |
+| 用 Chromium 渲染后读取网页（每天前 1,000 个 URL 免费）及网页/新闻/论文搜索 | TinyFish Fetch 与 Search |
+| 垂直筛选搜索（`code`/`finance`）、URL 提取（`querit_contents`）、低延迟摘要搜索（`X-Respond-With: no-content`） | Querit、Jina Search |
+| 中文本地搜索（默认带摘要、支持域名与时间过滤），只能手动调用 | 豆包 |
 
-远程 MCP（Exa、Tavily、LinkUp、AnySearch）和 STDIO 的 Firecrawl 按官方工具名和 schema 透明代理，其余都是对官方 REST API 的薄适配。
+远程 MCP（Exa、Tavily、LinkUp、AnySearch，以及可选的托管 Firecrawl `https://mcp.firecrawl.dev/v2/mcp`）和 STDIO 的 Firecrawl 按官方工具名和 schema 透明代理；无鉴权 `remote_mcp`（`auth.kind: "none"`）和 `direct_markdown` 无需填写 Key。其余都是对官方 REST 或 Gateway 接口的薄适配。
 
 ## 安装
 
@@ -86,7 +89,8 @@ npm run build
 - `profile`：`full`（默认）、`curated` 或 `lean`，见[上下文成本](#上下文成本)。`--profile` 和 `SEARCH_TOOLKIT_PROFILE` 优先于配置文件。
 - `cache`：`enabled`（默认 `true`）、`searchTtlSeconds`（900）、`newsTtlSeconds`（300，用于 `mode: current`）、`fetchTtlSeconds`（1800），见[缓存](#缓存)。
 - `shaping`：`maxDescriptionChars`（默认 700）和 `maxParamDescriptionChars`（默认 220），`0` 表示保持上游原文。
-- 每个 Provider 可设 `strategy`、`defaultTier`、`paidTools` 和带备注的 Key，见 [Key 轮询](#key-轮询)。
+- 每个 Provider 可设 `strategy`、`defaultTier`、`paidTools` 和带备注的 Key；Key 既可写明文，也可写 `"env:VAR_NAME"` 或 `"file:/path/to/secret"`（支持 `~/` 展开），执行 `migrate-config` 时会保留引用而不落盘明文，见 [Key 轮询](#key-轮询)。
+- 支持读取 `options` 的适配器：`grok`（`model`、`multiAgentModel`、`reasoningEffort`、`systemPrompt`、`customUrl`）、`deepseek`（`localization`）、`vercel_gateway`（`model`、`reasoning`、`enableParallelFast`、`localization`、`fallbackModels`、`authMethod`）、`direct_markdown`（`timeoutMs`）。
 - 每个 Provider 可设 `toolPolicy.allow`、`toolPolicy.deny` 和 `toolPolicy.descriptions`（按上游工具名替换描述）。Firecrawl 默认只暴露 9 个检索工具（scrape、map、search、crawl、爬取状态、开发者搜索、论文搜索、政府文件搜索、额度查询），AnySearch 默认隐藏 `score`，这个工具只用来提交反馈，描述里却要求每次搜索后都调用。设 `toolPolicy.allow: ["*"]` 才会暴露完整目录。
 
 v1 配置（`automatic` / `manualOnly`）仍能加载。升级方法：
@@ -162,23 +166,23 @@ default_tools_approval_mode = "writes"
 
 ### 结果去重与 Provider 健康度
 
-同一份结果里，重复的 URL（包括文档的 `.md` / `.html` 镜像）和同一页面的其他版本（同一站点，标题去掉 `x.y.z` 版本号后相同）只留排名最靠前的一条。为了去重后条数不缩水，会向 Provider 多要两条。自动路由里连续失败两次的 Provider 会排到健康的 Provider 后面，成功一次或安静半小时后恢复；`search_pool_status` 里的 `recentFailure` 就是这个分数。
+同一份结果里，重复的 URL（包括文档的 `.md` / `.html` 镜像）和同一页面的其他版本（同一站点，标题去掉 `x.y.z` 版本号后相同）只留排名最靠前的一条。为了去重后条数不缩水，会向 Provider 多要两条（Serper 在 `limit <= 10` 时上限压在 10 条，避免超过 10 条触发 2 倍额度扣费）。自动路由里连续失败两次的 Provider 会排到健康的 Provider 后面，成功一次或安静半小时后恢复；健康度按能力（`search`、`images`、`fetch`）独立统计，抓取异常不会拖累搜索排序，`search_pool_status` 里的 `recentFailure` 展示当前最高失败分。
 
 ### 上下文成本
 
-客户端每加载一个工具 schema 都要占上下文。描述会在句子边界裁剪，参数描述有长度上限，类型、枚举、默认值和 required 保持上游原样。示例配置里的 Provider 全部启用时：
+客户端每加载一个工具 schema 都要占上下文。描述会在句子边界裁剪，参数描述有长度上限，类型、枚举、默认值和 required 保持上游原样。三种 Profile 对应范围：
 
-| Profile | 暴露内容 | 工具数 | schema token |
-| --- | --- | --- | --- |
-| `full`（默认） | 统一工具和所有 Provider 工具 | 49 | 约 20,000 |
-| `curated` | 统一工具、网关和专长工具（`exa_web_search_advanced_exa`、`brave_llm_context`、`parallel_extract`、`you_contents`、`serper_scholar`、`firecrawl_*`、`tavily_tavily_research`、`linkup_linkup_research`、`grok_*`、`doubao_search`、`anysearch_batch_search`） | 22 | 约 9,400 |
-| `lean` | 统一工具、状态、探针和网关 | 7 | 约 2,100 |
+| Profile | 暴露内容 |
+| --- | --- |
+| `full`（默认） | 统一工具和所有已启用 Provider 工具 |
+| `curated` | 统一工具、网关和专长工具（`exa_web_search_advanced_exa`、`exa_agent_run`、`brave_llm_context`、`parallel_search`、`parallel_extract`、`you_search`、`you_contents`、`deepseek_search`、`deepseek_fetch`、`vercel_deepseek_search`、`vercel_deepseek_fetch`、`vercel_parallel_fast`、`serper_scholar`、`firecrawl_firecrawl_map`、`firecrawl_firecrawl_crawl`、`firecrawl_firecrawl_check_crawl_status`、`tavily_tavily_research`、`linkup_linkup_research`、`grok_x_search`、`grok_web_x_search`、`doubao_search`、`anysearch_batch_search`） |
+| `lean` | 统一工具、状态、探针和网关（共 `7` 个工具，约 2,100 schema token） |
 
-`npm run measure -- --profile lean` 可测量启动耗时和工具清单体积。
+`npm run measure -- --profile lean` 可按当前启用配置测量启动耗时、工具数和 schema 体积。
 
 ### 启动
 
-各 Provider 并发发现，上游工具目录缓存在状态库旁边，所以之后的启动半秒内就绪，只有第一次调用某个上游工具时才连接它（包括启动 Firecrawl 子进程）。目录超过 12 小时会在后台刷新，有变化时发送 `notifications/tools/list_changed`。
+各 Provider 并发发现，上游工具目录缓存在状态库旁边，所以之后的启动半秒内就绪，只有第一次调用某个上游工具时才连接它（包括按 STDIO 配置拉起本地 Firecrawl 子进程）。空闲的本地 `stdio_mcp` 子进程会在 10 分钟无调用后自动关闭释放内存（可通过 `integration.idleTimeoutMs` 调整，设 `0` 关闭），下次调用时透明重连。目录超过 12 小时会在后台刷新，有变化时发送 `notifications/tools/list_changed`。
 
 ## Streamable HTTP
 
@@ -190,7 +194,7 @@ $env:SEARCH_TOOLKIT_HTTP_ALLOWED_HOSTS = 'search-mcp.example.com'
 node dist/src/http-server.js --config C:/Users/you/.config/search-toolkit/providers.json
 ```
 
-客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions`。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
+客户端连接 `/mcp`，带上 `Authorization: Bearer <client-token>`。没有 `tools` 的是 owner token。分享出去的 token 应该设工具白名单和 `requestsPerMinute` 限流，需要时再加 `maxSessions`。`allowedArgumentValues` 可按参数名限制所有工具的取值，例如 `{"depth":["fast","deep"]}` 可防止共享 token 触发 16-Agent Grok 研究（未传该参数时放行）。`tools` 白名单和 `allowedArgumentValues` 同样会在 `provider_call` 内部生效，`provider_tools` 也会按白名单过滤。公网部署要放在 HTTPS 后面，Provider Key 始终留在服务器上。
 
 HTTP 入口使用 MCP SDK 1.32.2，JSON 请求上限为 100 KiB，工具参数中的数组元素与对象键总数上限为 10,000，计数发生在参数 Schema 验证之前。每个会话使用独立的 server 与 transport。这两项 HTTP 限制不影响 STDIO。
 
@@ -212,7 +216,7 @@ HTTP 入口使用 MCP SDK 1.32.2，JSON 请求上限为 100 KiB，工具参数�
 | 额度或余额用完（`402`、Tavily 的 `432`/`433`，或任何状态码下出现 "Insufficient balance"、`spend_cap_exceeded` 这类说法） | 记为耗尽，停用 30 分钟、6 小时、24 小时，之后排在所有健康 Key 后面 | 换下一把；整池用完时自动路由去下一家 |
 | 套餐不支持（"not allowed for free accounts"、"Payment method required"） | 不停用 | 换没标成 `free` 的 Key（`paid` 或没标套餐），最多 3 把，没有就去下一家 |
 | `401` / `403` | 停用 1 小时，再犯依次 6 小时、24 小时 | 最多换 3 把 |
-| `429` | 停用 1、5、15 分钟，或按 `Retry-After` | 最多换 3 把 |
+| `429` / Tavily `434` | 停用 1、5、15 分钟，或按 `Retry-After` | 最多换 3 把 |
 | `5xx` 或连接断开 | 不停用 | 再换 1 把 |
 | 超时 | 不停用 | 不换 Key，自动路由直接去下一家 |
 | `400` / `404` / `422`、上游工具自己的错误、被读取网页自己的状态码 | 不停用 | 不重试 |
@@ -241,7 +245,7 @@ Key 可以写成字符串，也可以写成对象，同一个池里能混用：
 
 ### 余额
 
-`search-toolkit quota [provider]` 通过各家自己的账单接口读取每把 Key 的剩余额度，不消耗额度。目前支持 Serper `/account`、Tavily `/usage`、Firecrawl `/v2/team/credit-usage`、LinkUp `/v1/credits/balance`、You.com `/v1/billing/account_balance`、TinyFish `/v1/wallet`。读数会写进状态库，余额为零的 Key 记为耗尽，耗尽后又有余额的 Key（充值或进入新账期）回到轮询，`search_pool_status` 显示最近一次读数和距今多久。它只在手动运行时才读。`search_rotation_probe` 对每个槽位（或指定的 `slot`）各发一次真实请求，sticky 和 drain 池也能逐把检查。
+`search-toolkit quota [provider]` 通过各家自己的账单接口读取每把 Key 的剩余额度，不消耗额度。目前支持 Serper `/account`、Tavily `/usage`、Firecrawl `/v2/team/credit-usage`、LinkUp `/v1/credits/balance`、You.com `/v1/billing/account_balance`、TinyFish `/v1/wallet`、DeepSeek `/user/balance` 以及 Vercel AI Gateway `/v1/credits`。读数会写进状态库，余额为零的 Key 记为耗尽（TinyFish 和 Vercel AI Gateway 除外：TinyFish `$0` 付费钱包不影响每天 1,000 URL 免费的 Fetch 额度，Vercel AI Gateway `$0` 余额也不停用免计费的 `vercel_parallel_fast`），耗尽后又有余额的 Key（充值或进入新账期）回到轮询，`search_pool_status` 显示最近一次读数和距今多久。加 `--json` 时会把所有查询到的 Provider 合并成单个 JSON 数组输出。它只在手动运行时才读。`search_rotation_probe` 对每个槽位（或指定的 `slot`）各发一次真实请求，sticky 和 drain 池也能逐把检查。
 
 `providers.json`、真实 Key 和状态库都被 Git 忽略，输出里只显示 Key 掩码。
 

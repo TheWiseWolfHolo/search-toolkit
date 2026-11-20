@@ -27,4 +27,4 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run smoke:mcp
-      - run: npm pack --dry-run
+      - run: npm pack --dry-run --ignore-scripts

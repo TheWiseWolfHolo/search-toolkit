@@ -19,11 +19,27 @@ export type IntegrationConfig =
       args: string[];
       envKey: string;
       env?: Record<string, string>;
+      /** Close idle stdio child processes after this many ms (default 600000; 0 disables). */
+      idleTimeoutMs?: number;
     }
   | {
       kind: "rest";
-      adapter: "querit" | "serper" | "doubao" | "jina" | "tinyfish" | "brave" | "you" | "parallel" | "grok" | "octen";
+      adapter:
+        | "querit"
+        | "serper"
+        | "doubao"
+        | "jina"
+        | "tinyfish"
+        | "brave"
+        | "you"
+        | "parallel"
+        | "grok"
+        | "octen"
+        | "deepseek"
+        | "vercel_gateway"
+        | "direct_markdown";
       baseUrl?: string;
+      timeoutMs?: number;
     };
 
 /** What a provider may be chosen for without being named explicitly. An empty list means manual use only. */
@@ -49,6 +65,8 @@ export interface ProviderConfig {
   enabled: boolean;
   auto: AutoCapability[];
   keys: string[];
+  /** Original secret reference (`env:VAR` / `file:PATH`) per slot, kept so migrations never inline resolved secrets. */
+  keyRefs?: Array<string | undefined>;
   /** Same length as `keys` when any slot is annotated. */
   keyMeta?: KeyMeta[];
   /** round_robin (default) spreads load; sticky stays on one key until it fails; drain uses keys in order. */
