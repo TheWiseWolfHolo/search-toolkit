@@ -44,6 +44,14 @@ try {
 
 $httpEntry = Join-Path $InstallDir "dist\src\http-server.js"
 $cliEntry = Join-Path $InstallDir "dist\src\cli.js"
+function Get-Sha256Hex([string]$Path) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant() }
+    finally { $stream.Dispose() }
+  } finally { $sha.Dispose() }
+}
 $receipt = [ordered]@{
   app = "search-toolkit"
   version = $pkg.version
@@ -53,8 +61,8 @@ $receipt = [ordered]@{
   installDir = $InstallDir
   dataDir = $DataDir
   files = [ordered]@{
-    "dist/src/http-server.js" = (Get-FileHash $httpEntry -Algorithm SHA256).Hash
-    "dist/src/cli.js" = (Get-FileHash $cliEntry -Algorithm SHA256).Hash
+    "dist/src/http-server.js" = Get-Sha256Hex $httpEntry
+    "dist/src/cli.js" = Get-Sha256Hex $cliEntry
   }
 }
 $receiptPath = Join-Path $InstallDir "installation.json"
