@@ -36,67 +36,67 @@ jobs:
       - name: Offline CLI and HTTP server smoke checks
         shell: bash
         run: |
-          node -e "
-            import { execFileSync, spawn } from 'node:child_process';
-            import { createHash } from 'node:crypto';
-            import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-            import { tmpdir } from 'node:os';
-            import { join } from 'node:path';
-            for (const bin of ['dist/src/cli.js', 'dist/src/mcp-server.js', 'dist/src/http-server.js']) {
-              const ver = execFileSync(process.execPath, [bin, '--version'], { encoding: 'utf8' }).trim();
-              if (!/^\d+\.\d+\.\d+/.test(ver)) throw new Error(bin + ' invalid version: ' + ver);
-              const help = execFileSync(process.execPath, [bin, '--help'], { encoding: 'utf8' });
-              if (!help.includes('Usage:') && !help.includes('Commands:')) throw new Error(bin + ' missing help output');
-            }
-            const dir = mkdtempSync(join(tmpdir(), 'st-ci-smoke-'));
-            const cfg = join(dir, 'providers.json');
-            writeFileSync(cfg, JSON.stringify({
-              version: 2,
-              statePath: join(dir, 'state.db'),
-              providers: { brave: { enabled: true, auto: ['search'], keys: ['ci-dummy-key'], integration: { kind: 'rest', adapter: 'brave' } } }
-            }));
+          node --input-type=module <<'EOF'
+          import { execFileSync, spawn } from 'node:child_process';
+          import { createHash } from 'node:crypto';
+          import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          for (const bin of ['dist/src/cli.js', 'dist/src/mcp-server.js', 'dist/src/http-server.js']) {
+            const ver = execFileSync(process.execPath, [bin, '--version'], { encoding: 'utf8' }).trim();
+            if (!/^\d+\.\d+\.\d+/.test(ver)) throw new Error(bin + ' invalid version: ' + ver);
+            const help = execFileSync(process.execPath, [bin, '--help'], { encoding: 'utf8' });
+            if (!help.includes('Usage:') && !help.includes('Commands:')) throw new Error(bin + ' missing help output');
+          }
+          const dir = mkdtempSync(join(tmpdir(), 'st-ci-smoke-'));
+          const cfg = join(dir, 'providers.json');
+          writeFileSync(cfg, JSON.stringify({
+            version: 2,
+            statePath: join(dir, 'state.db'),
+            providers: { brave: { enabled: true, auto: ['search'], keys: ['ci-dummy-key'], integration: { kind: 'rest', adapter: 'brave' } } }
+          }));
+          try {
+            const tools = JSON.parse(execFileSync(process.execPath, ['dist/src/cli.js', 'tools', '--config', cfg, '--profile', 'lean', '--json'], { encoding: 'utf8' }));
+            if (!Array.isArray(tools.tools) || tools.tools.length !== 7) throw new Error('Expected 7 lean tools');
+            let failedUnknown = false;
+            try { execFileSync(process.execPath, ['dist/src/cli.js', 'search', 'hi', '--unknown-flag', '1', '--config', cfg], { stdio: 'pipe' }); } catch { failedUnknown = true; }
+            if (!failedUnknown) throw new Error('Expected unknown flag to fail');
+            const port = 19000 + Math.floor(Math.random() * 10000);
+            const token = 'ci-smoke-token';
+            const hash = createHash('sha256').update(token).digest('hex');
+            const child = spawn(process.execPath, ['dist/src/http-server.js', '--config', cfg], {
+              env: {
+                ...process.env,
+                SEARCH_TOOLKIT_HTTP_HOST: '127.0.0.1',
+                SEARCH_TOOLKIT_HTTP_PORT: String(port),
+                SEARCH_TOOLKIT_HTTP_STATELESS: '1',
+                SEARCH_TOOLKIT_HTTP_TOKENS: JSON.stringify([{ hash, role: 'owner' }]),
+              },
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
             try {
-              const tools = JSON.parse(execFileSync(process.execPath, ['dist/src/cli.js', 'tools', '--config', cfg, '--profile', 'lean', '--json'], { encoding: 'utf8' }));
-              if (!Array.isArray(tools.tools) || tools.tools.length !== 7) throw new Error('Expected 7 lean tools');
-              let failedUnknown = false;
-              try { execFileSync(process.execPath, ['dist/src/cli.js', 'search', 'hi', '--unknown-flag', '1', '--config', cfg], { stdio: 'pipe' }); } catch { failedUnknown = true; }
-              if (!failedUnknown) throw new Error('Expected unknown flag to fail');
-              const port = 19000 + Math.floor(Math.random() * 10000);
-              const token = 'ci-smoke-token';
-              const hash = createHash('sha256').update(token).digest('hex');
-              const child = spawn(process.execPath, ['dist/src/http-server.js', '--config', cfg], {
-                env: {
-                  ...process.env,
-                  SEARCH_TOOLKIT_HTTP_HOST: '127.0.0.1',
-                  SEARCH_TOOLKIT_HTTP_PORT: String(port),
-                  SEARCH_TOOLKIT_HTTP_STATELESS: '1',
-                  SEARCH_TOOLKIT_HTTP_TOKENS: JSON.stringify([{ hash, role: 'owner' }]),
-                },
-                stdio: ['ignore', 'pipe', 'pipe'],
-              });
-              try {
-                let ok = false;
-                for (let i = 0; i < 40; i++) {
-                  try {
-                    const r = await fetch('http://127.0.0.1:' + port + '/healthz');
-                    if (r.ok) { ok = true; break; }
-                  } catch {}
-                  await new Promise((r) => setTimeout(r, 150));
-                }
-                if (!ok) throw new Error('http-server healthz did not become ready');
-                const shut = await fetch('http://127.0.0.1:' + port + '/admin/shutdown', {
-                  method: 'POST',
-                  headers: { Authorization: 'Bearer ' + token },
-                });
-                if (!shut.ok) throw new Error('admin shutdown failed: ' + shut.status);
-                const code = await new Promise((resolve) => child.once('exit', (c) => resolve(c)));
-                if (code !== 0) throw new Error('http-server exited with ' + code);
-              } finally {
-                if (child.exitCode === null) child.kill();
+              let ok = false;
+              for (let i = 0; i < 40; i++) {
+                try {
+                  const r = await fetch('http://127.0.0.1:' + port + '/healthz');
+                  if (r.ok) { ok = true; break; }
+                } catch {}
+                await new Promise((r) => setTimeout(r, 150));
               }
+              if (!ok) throw new Error('http-server healthz did not become ready');
+              const shut = await fetch('http://127.0.0.1:' + port + '/admin/shutdown', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + token },
+              });
+              if (!shut.ok) throw new Error('admin shutdown failed: ' + shut.status);
+              const code = await new Promise((resolve) => child.once('exit', (c) => resolve(c)));
+              if (code !== 0) throw new Error('http-server exited with ' + code);
             } finally {
-              rmSync(dir, { recursive: true, force: true });
+              if (child.exitCode === null) child.kill();
             }
-          "
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+          EOF
       - run: npm run clean && npm run build
       - run: npm pack --dry-run --ignore-scripts

@@ -398,6 +398,10 @@ export function pinnedHttpGet(
   signal: AbortSignal,
 ): Promise<DirectHttpResponse> {
   return new Promise<DirectHttpResponse>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason instanceof Error ? signal.reason : new Error("direct_markdown_fetch aborted"));
+      return;
+    }
     const bareHost = target.url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
     const first = target.addresses[0];
     if (!first) {
@@ -407,14 +411,22 @@ export function pinnedHttpGet(
     const pinnedLookup = (
       _hostname: string,
       options: unknown,
-      callback: (err: NodeJS.ErrnoException | null, address: string | Array<{ address: string; family: number }>, family?: number) => void,
+      callback?: (err: NodeJS.ErrnoException | null, address: string | Array<{ address: string; family: number }>, family?: number) => void,
     ) => {
+      const cb = typeof options === "function"
+        ? (options as (err: NodeJS.ErrnoException | null, address: string | Array<{ address: string; family: number }>, family?: number) => void)
+        : callback;
+      if (!cb) return;
       const all = typeof options === "object" && options !== null && (options as { all?: boolean }).all === true;
-      if (all) {
-        callback(null, target.addresses.map((entry) => ({ address: entry.address, family: entry.family })));
-      } else {
-        callback(null, first.address, first.family);
-      }
+      // Preserve dns.lookup's async callback contract so http.Agent/ClientRequest finishes attaching
+      // socket error listeners before internalConnect runs (Node 22 can emit uncaught ENETUNREACH/EHOSTUNREACH otherwise).
+      setImmediate(() => {
+        if (all) {
+          cb(null, target.addresses.map((entry) => ({ address: entry.address, family: entry.family })));
+        } else {
+          cb(null, first.address, first.family);
+        }
+      });
     };
 
     const requestHeaders: Record<string, string> = {
@@ -438,8 +450,10 @@ export function pinnedHttpGet(
         });
 
     let settled = false;
+    const noop = () => undefined;
     req.once("response", (res) => {
       if (settled) {
+        res.on("error", noop);
         res.destroy();
         return;
       }
@@ -450,11 +464,12 @@ export function pinnedHttpGet(
         headers: respHeaders,
         bodyText: () => readStreamLimited(res, respHeaders.get("content-encoding") ?? "", MAX_BODY_BYTES, signal),
         discard: async () => {
+          res.on("error", noop);
           res.destroy();
         },
       });
     });
-    req.once("error", (err) => {
+    req.on("error", (err) => {
       if (settled) return;
       settled = true;
       reject(err);

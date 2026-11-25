@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer, globalAgent, type IncomingMessage, type ServerResponse } from "node:http";
+import { createConnection, type AddressInfo } from "node:net";
 import test from "node:test";
 import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
 import { InvalidRequestError, TargetPageError } from "../src/errors.js";
@@ -434,28 +434,61 @@ test("pinnedHttpGet connects to the pinned IP while preserving Host, decompresse
 
 test("DirectMarkdownAdapter strictly uses pinnedHttpGet despite monkey-patched globalThis.fetch unless explicit transport is injected", async () => {
   const originalFetch = globalThis.fetch;
+  const originalCreateConnection = globalAgent.createConnection;
   let globalFetchCalls = 0;
   globalThis.fetch = async () => {
     globalFetchCalls += 1;
-    return new Response(VALID_MARKDOWN, {
+    return new Response("# Unexpected global fetch fallback\n\nThis body must never be returned by default DirectMarkdownAdapter.", {
       status: 200,
       headers: { "content-type": "text/markdown; charset=utf-8" },
     });
   };
-  const lookup: DnsLookupFn = async () => [{ address: "2606:2800:220:1:248:1893:25c8:1946" }];
+  let seenHostHeader = "";
+  const localServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    seenHostHeader = req.headers.host ?? "";
+    res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+    res.end(VALID_MARKDOWN);
+  });
+  await new Promise<void>((resolve) => localServer.listen(0, "127.0.0.1", () => resolve()));
+  const { port: localPort } = localServer.address() as AddressInfo;
+
+  const lookup: DnsLookupFn = async () => [{ address: "93.184.216.34" }];
+  let pinnedAgentCalls = 0;
+  let lookupWasAsync = false;
+  let resolvedPinned: unknown = undefined;
+
+  (globalAgent as unknown as { createConnection: (options: Record<string, unknown>, callback?: unknown) => unknown }).createConnection = (options, callback) => {
+    pinnedAgentCalls += 1;
+    const pinnedLookup = options.lookup as ((host: string, opts: { all: boolean }, cb: (err: Error | null, addrs: unknown) => void) => void) | undefined;
+    assert.equal(typeof pinnedLookup, "function", "pinnedHttpGet must supply a custom lookup function");
+    let syncReturned = false;
+    let cbInvoked = false;
+    pinnedLookup!("docs.example.com", { all: true }, (err, addrs) => {
+      cbInvoked = true;
+      lookupWasAsync = syncReturned;
+      assert.equal(err, null);
+      resolvedPinned = addrs;
+    });
+    syncReturned = true;
+    if (cbInvoked) lookupWasAsync = false;
+    return createConnection({ host: "127.0.0.1", port: localPort }, callback as (() => void) | undefined);
+  };
+
   try {
-    // 1. Default adapter (no explicit transport) ignores monkey-patched globalThis.fetch and attempts pinnedHttpGet.
+    // 1. Default adapter (no explicit transport) ignores monkey-patched globalThis.fetch and routes through pinnedHttpGet.
     const defaultAdapter = new DirectMarkdownAdapter(lookup);
-    await assert.rejects(
-      defaultAdapter.call(
-        "direct_markdown_fetch",
-        { url: "http://docs.example.com:65535/guide" },
-        "direct",
-        directConfig({ allowedPorts: [65535] }),
-        { signal: AbortSignal.timeout(40) },
-      ),
-      (err: unknown) => err instanceof TargetPageError,
-    );
+    const defaultRes = await defaultAdapter.call(
+      "direct_markdown_fetch",
+      { url: "http://docs.example.com/guide" },
+      "direct",
+      directConfig(),
+    ) as { url: string; text: string };
+    assert.equal(defaultRes.url, "http://docs.example.com/guide");
+    assert.match(defaultRes.text, /# Documentation Guide/);
+    assert.equal(seenHostHeader, "docs.example.com");
+    assert.equal(pinnedAgentCalls, 1);
+    assert.equal(lookupWasAsync, true, "pinnedLookup must invoke its callback asynchronously to avoid Node 22 uncaught connect errors");
+    assert.deepEqual(resolvedPinned, [{ address: "93.184.216.34", family: 4 }]);
     assert.equal(globalFetchCalls, 0, "default DirectMarkdownAdapter must never silently fall back to globalThis.fetch");
 
     // 2. Explicit createFetchTransport(...) opt-in works cleanly for offline tests.
@@ -481,6 +514,32 @@ test("DirectMarkdownAdapter strictly uses pinnedHttpGet despite monkey-patched g
     assert.equal(res.url, "https://docs.example.com/guide");
     assert.match(res.text, /# Documentation Guide/);
   } finally {
+    globalAgent.createConnection = originalCreateConnection;
     globalThis.fetch = originalFetch;
+    await new Promise<void>((resolve) => localServer.close(() => resolve()));
   }
+});
+
+test("pinnedHttpGet rejects cleanly on immediate connection refusal and pre-aborted signals without uncaught exceptions", async () => {
+  const closedServer = createServer();
+  await new Promise<void>((resolve) => closedServer.listen(0, "127.0.0.1", () => resolve()));
+  const { port: closedPort } = closedServer.address() as AddressInfo;
+  await new Promise<void>((resolve) => closedServer.close(() => resolve()));
+
+  const closedTarget: ResolvedPublicTarget = {
+    url: new URL(`http://closed.example.test:${closedPort}/guide`),
+    addresses: [{ address: "127.0.0.1", family: 4 }],
+  };
+
+  await assert.rejects(
+    pinnedHttpGet(closedTarget, { Accept: "text/markdown" }, AbortSignal.timeout(2_000)),
+    (err: unknown) => err instanceof Error,
+  );
+
+  const aborted = new AbortController();
+  aborted.abort(new Error("already aborted"));
+  await assert.rejects(
+    pinnedHttpGet(closedTarget, { Accept: "text/markdown" }, aborted.signal),
+    (err: unknown) => err instanceof Error && /already aborted/.test(err.message),
+  );
 });
