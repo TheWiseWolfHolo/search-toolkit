@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ParallelAdapter, YouAdapter } from "../src/rest/adapters.js";
+import { RestProvider } from "../src/rest/base.js";
+import { TargetPageError } from "../src/errors.js";
+import { RotationStore } from "../src/rotation.js";
 import { SearchToolkit } from "../src/toolkit.js";
 
 test("You.com exposes unified Web/News/Knowledge search and Contents extraction", () => {
@@ -557,6 +560,168 @@ test("You.com supports knowledge cards and Contents API extraction", async () =>
     });
     assert.match(contentsOut.text, /# You Docs/);
     assert.match(contentsOut.text, /## Overview\nClean markdown from You\.com\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("parallel_extract renders links when requested and throws TargetPageError when both results and errors are empty", async () => {
+  const originalFetch = globalThis.fetch;
+  let payload: Record<string, unknown> = {
+    extract_id: "ext-links",
+    results: [{
+      url: "https://example.com/guide",
+      title: "Guide",
+      full_content: "Main body text.",
+      links: ["https://example.com/a", { text: "Docs", url: "https://example.com/b" }],
+    }],
+    errors: [],
+  };
+  globalThis.fetch = async () => Response.json(payload);
+  const config = {
+    enabled: true,
+    auto: ["fetch"] as Array<"fetch">,
+    keys: ["test-key"],
+    integration: { kind: "rest" as const, adapter: "parallel" as const },
+  };
+  try {
+    const adapter = new ParallelAdapter();
+    const withLinks = await adapter.call("parallel_extract", {
+      url: "https://example.com/guide",
+      links: true,
+    }, "test-key", config) as { text: string };
+    assert.match(withLinks.text, /Links:\n- https:\/\/example\.com\/a\n- Docs: https:\/\/example\.com\/b/);
+
+    payload = { extract_id: "ext-empty", results: [], errors: [] };
+    await assert.rejects(
+      adapter.call("parallel_extract", { url: "https://example.com/empty" }, "test-key", config),
+      (err: unknown) => err instanceof TargetPageError && /no content/.test(err.message),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("parallel_search warns when excludeDomains is dropped alongside includeDomains", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: Record<string, unknown> = {};
+  globalThis.fetch = async (_input, init) => {
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ search_id: "s1", results: [{ url: "https://a.example/", title: "A", excerpts: ["x"] }] });
+  };
+  try {
+    const out = await new ParallelAdapter().call("parallel_search", {
+      query: "q",
+      includeDomains: ["a.example"],
+      excludeDomains: ["b.example"],
+    }, "test-key", {
+      enabled: true,
+      auto: ["search"],
+      keys: ["test-key"],
+      integration: { kind: "rest", adapter: "parallel" },
+    }) as { warnings?: string[] };
+    const sourcePolicy = (capturedBody.advanced_settings as { source_policy?: Record<string, unknown> }).source_policy;
+    assert.deepEqual(sourcePolicy?.include_domains, ["a.example"]);
+    assert.equal(sourcePolicy?.exclude_domains, undefined);
+    assert.ok(out.warnings?.some((w) => /excludeDomains was ignored/.test(w)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("you_search keeps web results ahead of news when neither preferNews nor freshness is set", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    results: {
+      web: [
+        { title: "Web 1", url: "https://w.example/1", snippets: ["w1"] },
+        { title: "Web 2", url: "https://w.example/2", snippets: ["w2"] },
+        { title: "Web 3", url: "https://w.example/3", snippets: ["w3"] },
+      ],
+      news: [
+        { title: "News 1", url: "https://n.example/1", snippets: ["n1"] },
+        { title: "News 2", url: "https://n.example/2", snippets: ["n2"] },
+      ],
+    },
+  });
+  const config = {
+    enabled: true,
+    auto: ["search"] as Array<"search">,
+    keys: ["test-key"],
+    integration: { kind: "rest" as const, adapter: "you" as const },
+  };
+  try {
+    const general = await new YouAdapter().call("you_search", { query: "general topic", limit: 4 }, "test-key", config) as {
+      items: Array<{ section: string }>;
+    };
+    assert.deepEqual(general.items.map((item) => item.section), ["web", "web", "web", "news"]);
+
+    const preferNews = await new YouAdapter().call("you_search", { query: "breaking", limit: 4, preferNews: true }, "test-key", config) as {
+      items: Array<{ section: string }>;
+    };
+    assert.deepEqual(preferNews.items.map((item) => item.section), ["news", "web", "news", "web"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("you_contents caps concurrency at 3, maps positive maxAgeSeconds to blend/cache, and records partial-batch fatal errors", async () => {
+  const originalFetch = globalThis.fetch;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const sentSources: Array<string | undefined> = [];
+  globalThis.fetch = async (_input, init) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    const body = JSON.parse(String(init?.body)) as { url: string; extraction_source?: string };
+    sentSources.push(body.extraction_source);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    inFlight -= 1;
+    if (body.url.endsWith("/rate-limited")) {
+      return new Response("Too Many Requests", { status: 429 });
+    }
+    return Response.json({
+      url: body.url,
+      title: `Title ${body.url}`,
+      contents: { markdown: `Body for ${body.url}` },
+    });
+  };
+  const config = {
+    enabled: true,
+    auto: ["fetch"] as Array<"fetch">,
+    keys: ["you-key-123456"],
+    integration: { kind: "rest" as const, adapter: "you" as const },
+  };
+  try {
+    const adapter = new YouAdapter();
+    const sixUrls = Array.from({ length: 6 }, (_, i) => `https://example.com/page-${i + 1}`);
+    await adapter.call("you_contents", { urls: sixUrls }, "you-key-123456", config);
+    assert.ok(maxInFlight <= 3, `expected concurrency <= 3, saw ${maxInFlight}`);
+
+    // maxAgeSeconds mapping: 0 -> fetch, 1..3600 -> blend, >3600 -> cache.
+    sentSources.length = 0;
+    await adapter.call("you_contents", { url: "https://example.com/a", maxAgeSeconds: 0 }, "you-key-123456", config);
+    await adapter.call("you_contents", { url: "https://example.com/b", maxAgeSeconds: 1800 }, "you-key-123456", config);
+    await adapter.call("you_contents", { url: "https://example.com/c", maxAgeSeconds: 7200 }, "you-key-123456", config);
+    assert.deepEqual(sentSources, ["fetch", "blend", "cache"]);
+
+    // Partial-batch fatal 429 invokes context.recordFailure via RestProvider (benches key) and surfaces warning.
+    const dir = mkdtempSync(join(tmpdir(), "search-toolkit-you-partial-"));
+    const rotation = new RotationStore(join(dir, "state.db"));
+    try {
+      const provider = new RestProvider("you", config, rotation, adapter);
+      const binding = provider.bindings().find((b) => b.upstreamName === "you_contents");
+      assert.ok(binding);
+      const out = await binding.call({
+        urls: ["https://example.com/ok", "https://example.com/rate-limited"],
+      }) as { content: Array<{ text: string }>; structuredContent: { data: { warnings?: string[] } } };
+      assert.match(out.content[1]?.text ?? "", /Body for https:\/\/example\.com\/ok/);
+      assert.ok(out.structuredContent.data.warnings?.some((w) => /provider error/i.test(w)));
+      assert.equal(rotation.status("you", config.keys).keys[0]?.status.status, "cooldown");
+    } finally {
+      rotation.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

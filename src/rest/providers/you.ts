@@ -1,12 +1,42 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError, TargetPageError } from "../../errors.js";
+import { cleanError } from "../../provenance.js";
 import type { ProviderConfig, SearchItem } from "../../types.js";
-import { endpointOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import {
-  arrayArg, normalizeYouKnowledge, normalizeYouSection, numberArg, objectRecord, stringArg, stringValue,
+  cleanHosts, collectValidatedUrls, endpointOf, formatExtractedPage, READ_ONLY_OPEN, requestJson, searchTool, timeoutOf,
+  type RestAdapter, type RestAdapterContext,
+} from "../base.js";
+import {
+  arrayArg, DEFAULT_ITEM_TEXT_CHARS, normalizeYouKnowledge, normalizeYouSection, numberArg, objectRecord,
+  stringArg, stringValue,
 } from "../normalize.js";
 
-const READ_ONLY_OPEN = { readOnlyHint: true, destructiveHint: false, openWorldHint: true } as const;
+const FULL_PAGE_MAX_CHARS = 32_000;
+const CONTENTS_CONCURRENCY = 3;
+const YOU_PAGE_ERROR_TEXT = /site_blocked|site_unreachable|unsupported_content|pdf_too_large|invalid_url|cannot_extract|extract_failed|crawl_failed|page_not_found|blocked|unreachable|fetch_error/;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results = new Array<PromiseSettledResult<R>>(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await worker(items[index] as T, index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
 
 export class YouAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -96,7 +126,7 @@ export class YouAdapter implements RestAdapter {
             description: "Extraction depth for complex pages",
           },
           crawlTimeout: { type: "integer", minimum: 1, maximum: 60, default: 10 },
-          maxAgeSeconds: { type: "integer", minimum: 0, description: "0 forces extraction_source=fetch for a live refetch" },
+          maxAgeSeconds: { type: "integer", minimum: 0, description: "0 forces extraction_source=fetch; 1-3600 selects blend; >3600 selects cache when extractionSource is omitted" },
         },
         additionalProperties: false,
       },
@@ -105,15 +135,27 @@ export class YouAdapter implements RestAdapter {
     return [search, contents];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    if (tool === "you_contents") return this.callContents(args, key, config);
-    return this.callSearch(args, key, config);
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    if (tool === "you_contents") return this.callContents(args, key, config, context);
+    return this.callSearch(args, key, config, context);
   }
 
-  private async callSearch(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
+  private async callSearch(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
     const body: Record<string, unknown> = {
       query: stringArg(args, "query"),
-      count: numberArg(args, "limit", 6),
+      count: limit,
     };
     for (const [source, target] of [
       ["freshness", "freshness"],
@@ -123,14 +165,23 @@ export class YouAdapter implements RestAdapter {
       ["safesearch", "safesearch"],
     ] as const) {
       const value = args[source];
-      if (value !== undefined && value !== null && value !== "") body[target] = value;
+      if (value !== undefined && value !== null && value !== "") {
+        body[target] = source === "country" && typeof value === "string" ? value.trim().toUpperCase() : value;
+      }
     }
-    const includeDomains = arrayArg(args, "includeDomains");
-    const excludeDomains = arrayArg(args, "excludeDomains");
-    const boostDomains = arrayArg(args, "boostDomains");
+    const includeDomains = cleanHosts(arrayArg(args, "includeDomains"));
+    const excludeDomains = cleanHosts(arrayArg(args, "excludeDomains"));
+    const boostDomains = cleanHosts(arrayArg(args, "boostDomains"));
+    const warnings: string[] = [];
     // You.com returns 422 if include_domains is combined with exclude_domains or boost_domains.
     if (includeDomains.length) {
       body.include_domains = includeDomains;
+      const dropped: string[] = [];
+      if (excludeDomains.length) dropped.push("excludeDomains");
+      if (boostDomains.length) dropped.push("boostDomains");
+      if (dropped.length) {
+        warnings.push(`${dropped.join(" and ")} ignored because You.com does not combine them with includeDomains`);
+      }
     } else {
       if (excludeDomains.length) body.exclude_domains = excludeDomains;
       if (boostDomains.length) body.boost_domains = boostDomains;
@@ -140,10 +191,14 @@ export class YouAdapter implements RestAdapter {
     const contentLevel = stringArg(args, "contentLevel");
     const extractionSource = stringArg(args, "extractionSource");
     // crawl_timeout only applies to full-page crawls; sent with snippets or highlights it is a 422.
-    if (typeof args.crawlTimeout === "number" && contentLevel === "full_page") body.crawl_timeout = args.crawlTimeout;
+    if (typeof args.crawlTimeout === "number" && Number.isFinite(args.crawlTimeout) && contentLevel === "full_page") {
+      body.crawl_timeout = args.crawlTimeout;
+    }
     if (contentLevel === "highlights") {
       const highlights: Record<string, unknown> = {};
-      if (typeof args.highlightsMaxTokens === "number") highlights.total_max_tokens = args.highlightsMaxTokens;
+      if (typeof args.highlightsMaxTokens === "number" && Number.isFinite(args.highlightsMaxTokens)) {
+        highlights.total_max_tokens = Math.round(args.highlightsMaxTokens);
+      }
       body.extraction = {
         extraction_mode: "highlights",
         highlights,
@@ -160,46 +215,73 @@ export class YouAdapter implements RestAdapter {
       method: "POST",
       headers: { "X-API-Key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 30_000);
+    }, {
+      timeoutMs: timeoutOf(config, 30_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     const results = data.results && typeof data.results === "object"
       ? data.results as Record<string, unknown>
       : {};
-    const knowledge = normalizeYouKnowledge(results.knowledge);
-    const web = normalizeYouSection(results.web, "web");
-    const news = normalizeYouSection(results.news, "news");
-    const limit = numberArg(args, "limit", 6);
+    const maxChars = contentLevel === "full_page" ? FULL_PAGE_MAX_CHARS : DEFAULT_ITEM_TEXT_CHARS;
+    const knowledge = normalizeYouKnowledge(results.knowledge, maxChars);
+    const web = normalizeYouSection(results.web, "web", maxChars);
+    const news = normalizeYouSection(results.news, "news", maxChars);
     const items: SearchItem[] = [...knowledge.slice(0, Math.min(2, limit))];
     const preferNews = args.preferNews === true;
-    const primary = preferNews ? news : web;
-    const secondary = preferNews ? web : news;
-    for (let index = 0; items.length < limit && (index < primary.length || index < secondary.length); index += 1) {
-      const first = primary[index];
-      const second = secondary[index];
-      if (first) items.push(first);
-      if (second && items.length < limit) items.push(second);
+    const hasFreshness = Boolean(stringArg(args, "freshness").trim());
+    if (preferNews || hasFreshness) {
+      const primary = preferNews ? news : web;
+      const secondary = preferNews ? web : news;
+      for (let index = 0; items.length < limit && (index < primary.length || index < secondary.length); index += 1) {
+        const first = primary[index];
+        const second = secondary[index];
+        if (first) items.push(first);
+        if (second && items.length < limit) items.push(second);
+      }
+    } else {
+      // General queries without freshness keep web results ahead of news instead of displacing half the list.
+      for (const entry of web) {
+        if (items.length >= limit) break;
+        items.push(entry);
+      }
+      for (const entry of news) {
+        if (items.length >= limit) break;
+        items.push(entry);
+      }
     }
-    return { items, metadata: data.metadata };
+    return {
+      items,
+      metadata: data.metadata,
+      ...(warnings.length ? { warnings } : {}),
+    };
   }
 
-  private async callContents(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    const urls: string[] = [];
-    if (typeof args.url === "string" && args.url.trim()) urls.push(args.url.trim());
-    for (const item of arrayArg(args, "urls")) {
-      if (!urls.includes(item)) urls.push(item);
-    }
-    if (!urls.length) throw new Error("you_contents requires url or urls");
+  private async callContents(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const urls = collectValidatedUrls(args, "you_contents", 10);
     const requestedFormats = arrayArg(args, "formats");
     const formats = requestedFormats.length ? requestedFormats : ["markdown"];
     const fullPageFormats = formats.filter((format) => format === "markdown" || format === "html");
-    const extractionSource = args.maxAgeSeconds === 0
+    const explicitSource = stringArg(args, "extractionSource").trim() || undefined;
+    const maxAgeSeconds = typeof args.maxAgeSeconds === "number" && Number.isFinite(args.maxAgeSeconds)
+      ? args.maxAgeSeconds
+      : undefined;
+    const extractionSource = maxAgeSeconds === 0
       ? "fetch"
-      : stringArg(args, "extractionSource") || undefined;
+      : explicitSource
+        ?? (maxAgeSeconds !== undefined && maxAgeSeconds > 0
+          ? (maxAgeSeconds <= 3_600 ? "blend" : "cache")
+          : undefined);
     const parseEffort = stringArg(args, "parseEffort") || undefined;
-    const timeout = typeof args.crawlTimeout === "number" ? args.crawlTimeout : undefined;
+    const timeout = typeof args.crawlTimeout === "number" && Number.isFinite(args.crawlTimeout) ? args.crawlTimeout : undefined;
     const endpoint = endpointOf(config, "https://ydc-index.io", "/v1/extract");
-    const timeoutMs = Math.max(30_000, (timeout ?? 10) * 1000 + 15_000);
+    const timeoutMs = timeoutOf(config, Math.max(30_000, (timeout ?? 10) * 1000 + 15_000));
 
-    const settled = await Promise.allSettled(urls.slice(0, 10).map(async (url) => {
+    const settled = await mapWithConcurrency(urls, CONTENTS_CONCURRENCY, async (url) => {
       const body: Record<string, unknown> = {
         url,
         ...(fullPageFormats.length ? { full_page: { extraction_formats: fullPageFormats } } : {}),
@@ -213,19 +295,23 @@ export class YouAdapter implements RestAdapter {
           method: "POST",
           headers: { "X-API-Key": key, "Content-Type": "application/json" },
           body: JSON.stringify(body),
-        }, timeoutMs);
+        }, {
+          timeoutMs,
+          allowArray: true,
+          ...(context?.signal ? { signal: context.signal } : {}),
+        });
         return objectRecord(Array.isArray(raw) ? raw[0] : raw);
       } catch (error) {
         if (error instanceof HttpError) {
           const lower = error.message.toLowerCase();
-          if (error.status === 422 || /site_blocked|site_unreachable|unsupported_content|pdf_too_large|invalid_url/.test(lower)) {
+          if (YOU_PAGE_ERROR_TEXT.test(lower)) {
             const pageStatus = /\b404\b|page[\s_]+not[\s_]+found|404[\s_]+not[\s_]+found/.test(lower) ? 404 : /\b403\b|site_blocked/.test(lower) ? 403 : undefined;
             throw new TargetPageError(`You.com could not read the page: ${error.message}`, pageStatus);
           }
         }
         throw error;
       }
-    }));
+    });
 
     const pages: Array<Record<string, unknown>> = [];
     const errors: Array<{ url: string; error: string }> = [];
@@ -242,7 +328,7 @@ export class YouAdapter implements RestAdapter {
           errors.push({ url, error: reason.message });
         } else {
           firstFatalError ??= reason;
-          errors.push({ url, error: reason instanceof Error ? reason.message : String(reason) });
+          errors.push({ url, error: cleanError(reason) });
         }
       }
     });
@@ -256,15 +342,20 @@ export class YouAdapter implements RestAdapter {
     const formatted = pages.map((page) => {
       const contents = objectRecord(page.contents);
       const title = stringValue(page.title) ?? stringValue(objectRecord(page.metadata).title);
-      const url = stringValue(page.url) ?? "";
+      const url = stringValue(page.url);
       const markdown = stringValue(contents.markdown) ?? stringValue(page.markdown);
       const html = stringValue(contents.html) ?? stringValue(page.html);
       const content = markdown ?? html ?? "";
       const metaBlock = !content.trim() && formats.includes("metadata") && page.metadata && typeof page.metadata === "object"
         ? JSON.stringify(page.metadata, null, 2)
         : "";
-      const header = [title ? `# ${title}` : "", url ? `URL: ${url}` : ""].filter(Boolean).join("\n");
-      return [header, (content.trim() || metaBlock)].filter(Boolean).join("\n\n");
+      const body = content.trim() || metaBlock;
+      if (!body) return "";
+      return formatExtractedPage({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        body,
+      });
     }).filter(Boolean);
 
     const hasText = pages.some((page) => {
@@ -273,8 +364,20 @@ export class YouAdapter implements RestAdapter {
         || (stringValue(contents.html) ?? stringValue(page.html))?.trim());
     });
     if (wantsText && !hasText) {
+      if (firstFatalError) throw firstFatalError;
       throw new TargetPageError("You.com returned no content for the page");
     }
-    return { text: formatted.join("\n\n---\n\n"), pages, ...(errors.length ? { errors } : {}) };
+    const warnings: string[] = [];
+    if (firstFatalError !== undefined) {
+      // Record key-level / provider-level fatal failures even when earlier URLs in the batch succeeded.
+      context?.recordFailure?.(firstFatalError);
+      warnings.push(`Some URLs failed with provider error: ${cleanError(firstFatalError)}`);
+    }
+    return {
+      text: formatted.join("\n\n---\n\n"),
+      pages,
+      ...(errors.length ? { errors } : {}),
+      ...(warnings.length ? { warnings } : {}),
+    };
   }
 }

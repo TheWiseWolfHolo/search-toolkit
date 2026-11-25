@@ -1,5 +1,5 @@
 import {
-  CapabilityGateError, isKeyFaultStatus, isPlanLimit, isQuotaExhausted, isTimeout, PlanLimitError,
+  CapabilityGateError, InvalidRequestError, isKeyFaultStatus, isPlanLimit, isQuotaExhausted, isTimeout, PlanLimitError,
   shouldRetryWithNextKey, statusFromError, TargetPageError,
 } from "./errors.js";
 import type { RotationStore } from "./rotation.js";
@@ -12,6 +12,8 @@ export interface RotationCall {
   tools: readonly string[];
   /** Run on exactly this slot, healthy or not, with no fallback (probes). */
   pin?: number;
+  /** Permit selecting 402-exhausted slots while still blocking 401/403/429 benched slots ($0 promo tools). */
+  allowExhausted?: boolean;
 }
 
 /** A slot's tier: its own, else the provider default, else unknown. */
@@ -76,6 +78,7 @@ export async function callWithRotation<T>(
       selection = rotation.select(provider, keys, {
         strategy: config.strategy ?? "round_robin",
         ...(allowed ? { eligible: allowed } : {}),
+        ...(call.allowExhausted ? { allowExhausted: true } : {}),
         exclude: tried,
       });
     } catch (selectError) {
@@ -86,7 +89,7 @@ export async function callWithRotation<T>(
       return await attempt(selection);
     } catch (error) {
       lastError = error;
-      if (error instanceof TargetPageError || isTimeout(error)) throw error;
+      if (error instanceof TargetPageError || error instanceof InvalidRequestError || isTimeout(error)) throw error;
       if (isPlanLimit(error)) {
         const planError = new PlanLimitError(error);
         // Only a key not known to be on the free plan can do better; with none left, let the route move on.
@@ -111,7 +114,8 @@ export async function callWithRotation<T>(
 }
 
 /** What `record` needs to know about a failed call beyond its status code. */
-export function failureFlags(error: unknown): { exhausted?: true; planLimit?: true } {
+export function failureFlags(error: unknown): { exhausted?: true; planLimit?: true; nonKeyError?: true } {
+  if (error instanceof TargetPageError || error instanceof InvalidRequestError) return { nonKeyError: true };
   if (isQuotaExhausted(error)) return { exhausted: true };
   if (isPlanLimit(error)) return { planLimit: true };
   return {};

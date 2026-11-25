@@ -4,10 +4,10 @@
     {
       "id": 1,
       "prompt": "查一下精确字符串 `search_auto_test_on_launch_v1` 最早出自哪个项目，给出 commit-pinned 代码链接并核验 fork/rename 关系。",
-      "expected_output": "Uses Exa exact/code discovery, cites commit-pinned code, and resolves or explicitly reports repository-origin ambiguity.",
+      "expected_output": "Uses search_auto in exact mode (avoiding semantic-only Exa), cites commit-pinned code, and resolves or explicitly reports repository-origin ambiguity.",
       "files": [],
       "expectations": [
-        "Uses search_auto with mode exact, or an Exa tool directly.",
+        "Uses search_auto with mode exact (or Parallel/Brave/Serper directly), and does not route exact-string lookup directly to Exa.",
         "Provides a commit-pinned source URL containing the exact string.",
         "Checks repository identity or fork/rename ambiguity before naming the original project.",
         "Does not add a routing footer, because the user did not ask for one."
@@ -19,7 +19,7 @@
       "expected_output": "Uses compact current-mode retrieval, returns at most five sources with their dates, and avoids Doubao and deep research.",
       "files": [],
       "expectations": [
-        "Uses search_auto with mode current, or a Brave/Serper news tool.",
+        "Uses search_auto with mode current (which leads with You.com, Exa news, and Octen).",
         "Returns no more than five source URLs.",
         "Does not use or cite Doubao and does not start deep research."
       ]
@@ -38,10 +38,10 @@
     {
       "id": 4,
       "prompt": "帮我研究一下为什么 AI Agent 的网页回答需要 grounding chunks，而不只是搜索摘要。我想让模型直接基于多来源正文回答，控制在约 4096 token；不要启动深度研究，也不要逐页抓取。",
-      "expected_output": "Uses Brave LLM Context for token-bounded multi-source grounding and avoids separate page fetches and deep research.",
+      "expected_output": "Uses search_auto in context mode or brave_llm_context with an explicit 4096 token cap and avoids separate page fetches and deep research.",
       "files": [],
       "expectations": [
-        "Uses brave_llm_context directly or search_auto in context mode.",
+        "Uses search_auto in context mode, or brave_llm_context directly with maximumNumberOfTokens set to 4096 (not its 8192 direct default).",
         "Keeps the grounding budget at approximately 4096 tokens.",
         "Does not start deep research or separately fetch each result page.",
         "Uses the returned per-source grounding as evidence rather than treating snippets as a finished answer."
@@ -159,7 +159,91 @@
         "Keeps depth at fast rather than burning multi-agent research credits on depth max.",
         "Treats X search as the right tool only because X posts themselves were requested."
       ]
+    },
+    {
+      "id": 15,
+      "prompt": "Find the most-cited survey papers on retrieval-augmented generation and report their citation counts.",
+      "expected_output": "Uses scholar retrieval and calls serper_scholar directly when citation counts are explicitly required, without using deprecated Exa pdf category.",
+      "files": [],
+      "expectations": [
+        "Uses serper_scholar directly (or search_auto mode scholar followed by serper_scholar) because citation counts were explicitly requested.",
+        "Does not pass deprecated Exa category pdf or a tbs filter to serper_scholar.",
+        "Keeps result count compact and avoids deep research."
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "You are connected to a lean-profile Search Toolkit server and need to map all documentation pages under https://docs.example.com. Show the exact sequence of tool calls.",
+      "expected_output": "Inspects the exposed provider tool name and input schema via provider_tools before calling provider_call with firecrawl_firecrawl_map (never guessing phantom names like firecrawl_map).",
+      "files": [],
+      "expectations": [
+        "Calls provider_tools first to discover the exact exposed tool name and input schema.",
+        "Calls provider_call using the real exposed tool name (firecrawl_firecrawl_map) rather than an unprefixed or invented name.",
+        "Does not call firecrawl_crawl or other phantom tool names."
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "Where is `isUsableFetchText` defined in my local repository, and what changed in the commit I just pushed 30 seconds ago? Also, if a tool permission prompt is denied by the user, should you silently switch to another web tool?",
+      "expected_output": "Uses local rg or gh search code for local/freshly-pushed code instead of web search, and confirms a permission denial is not tool unavailability.",
+      "files": [],
+      "expectations": [
+        "Uses local rg (or file search) and gh rather than web search for local or freshly pushed code.",
+        "Explicitly states that a user permission denial is not tool unavailability and must not be bypassed by switching to another route."
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "Read the full contents of a very long specification at https://example.com/long-spec. The first fetch_auto call returned readable text truncated with nextOffset=12000; another URL returned page.status='partial'. How should you proceed for each?",
+      "expected_output": "Continues reading the truncated readable page using offset=12000, and escalates the partial page to quality='max' rather than trusting a fragment.",
+      "files": [],
+      "expectations": [
+        "Calls fetch_auto with offset set to 12000 for the truncated readable URL rather than re-fetching from offset 0.",
+        "Treats page.status='partial' as an incomplete fragment and retries with quality='max' (or a specialist reader) if the page matters."
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "刚刚 1 分钟前美联储公布的利率决议结果是什么？如果 search_auto 返回的路由块里带着 `\"cached\":\"4m\"`，应该怎么处理？",
+      "expected_output": "Uses search_auto in current mode, recognizes that cached:4m predates a 1-minute-old announcement, and notes the cache staleness or rephrases (or uses CLI --no-cache).",
+      "files": [],
+      "expectations": [
+        "Uses search_auto with mode current.",
+        "Recognizes that cached:4m means the result was reused from 4 minutes ago and may miss a 1-minute-old event.",
+        "States the freshness limitation clearly, rephrases the query, or notes --no-cache in CLI."
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "MCP tools are not available in this terminal session on Windows PowerShell. Show how to run a domain-scoped web search, reverse-search an image URL, and invoke `serper_scholar` with JSON arguments via the search-toolkit CLI.",
+      "expected_output": "Uses search-toolkit search, search-toolkit images, and search-toolkit call with PowerShell-safe --input - or @file.json arguments.",
+      "files": [],
+      "expectations": [
+        "Uses search-toolkit search with --domains.",
+        "Uses search-toolkit images with an image URL (or --image-url).",
+        "Uses search-toolkit call serper_scholar with --input - or @args.json (or valid JSON) and avoids operator commands like reset or migrate-config."
+      ]
+    },
+    {
+      "id": 21,
+      "prompt": "快速查一下 DeepSeek 官网最新的 API 定价页面地址。注意别花大钱，也别在主搜失败时自作主张用豆包。",
+      "expected_output": "Uses search_auto in official balanced mode, stays away from expensive jobs like exa_agent_run and grok depth=max, and never falls back to Doubao.",
+      "files": [],
+      "expectations": [
+        "Uses search_auto with mode official and balanced quality.",
+        "Does not call exa_agent_run, grok depth=max, or deep research.",
+        "Does not call doubao_search as a primary or fallback tool."
+      ]
+    },
+    {
+      "id": 22,
+      "prompt": "Use AnySearch to run a vertical vulnerability lookup for a CVE ID.",
+      "expected_output": "Calls anysearch_get_sub_domains first to obtain valid sub_domain and parameter fields before calling anysearch_search.",
+      "files": [],
+      "expectations": [
+        "Calls anysearch_get_sub_domains before calling anysearch_search with vertical parameters.",
+        "Uses only the sub_domain and parameter schema returned by anysearch_get_sub_domains rather than guessing values."
+      ]
     }
   ]
 }
-

@@ -12,6 +12,10 @@ export type IntegrationConfig =
       url: string;
       auth: AuthConfig;
       headers?: Record<string, string>;
+      /** Per-call RPC timeout in ms (defaults to 30000 for search/fetch, 120000 for long jobs). */
+      timeoutMs?: number;
+      /** Close idle remote MCP transports after this many ms (default 600000; 0 disables). */
+      idleTimeoutMs?: number;
     }
   | {
       kind: "stdio_mcp";
@@ -19,6 +23,8 @@ export type IntegrationConfig =
       args: string[];
       envKey: string;
       env?: Record<string, string>;
+      /** Per-call RPC timeout in ms (defaults to 30000 for search/fetch, 120000 for long jobs). */
+      timeoutMs?: number;
       /** Close idle stdio child processes after this many ms (default 600000; 0 disables). */
       idleTimeoutMs?: number;
     }
@@ -100,7 +106,11 @@ export interface CacheConfig {
   searchTtlSeconds?: number;
   newsTtlSeconds?: number;
   fetchTtlSeconds?: number;
+  maxEntries?: number;
+  maxTotalBytes?: number;
 }
+
+export type QuotaUnit = "credits" | "USD" | "cents" | "CNY";
 
 export interface ToolkitConfig {
   version: 2;
@@ -122,6 +132,15 @@ export interface KeySelection {
 export interface CallOptions {
   /** Run on this key slot only, healthy or not (rotation probes). */
   slot?: number;
+  /** Permit selecting 402-exhausted slots while still blocking 401/403/429 benched slots ($0 promo tools). */
+  allowExhausted?: boolean;
+}
+
+export interface CallToolOptions {
+  profile?: ToolkitProfile;
+  allowTool?: (tool: Tool) => boolean;
+  /** Whether the caller has owner-level access (e.g. live quota refresh). Defaults to true for local stdio/CLI. */
+  isOwner?: boolean;
 }
 
 export interface ToolBinding {
@@ -149,12 +168,4 @@ export interface ImageSearchItem extends SearchItem {
   source?: string;
   domain?: string;
   position?: number;
-}
-
-export interface NormalizedResult {
-  provider: string;
-  keySlot: string;
-  latencyMs: number;
-  items: SearchItem[];
-  answer?: string;
 }

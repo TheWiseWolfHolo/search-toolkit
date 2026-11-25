@@ -1,11 +1,18 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { HttpError, TargetPageError } from "../../errors.js";
+import { HttpError, keyFaultStatusFromToolText, TargetPageError } from "../../errors.js";
+import { redact } from "../../provenance.js";
 import type { ProviderConfig } from "../../types.js";
-import { endpointOf, requestJson, searchTool, type RestAdapter } from "../base.js";
-import { arrayArg, normalizeItem, numberArg, objectRecord, stringArg, stringValue } from "../normalize.js";
+import {
+  cleanHosts, collectValidatedUrls, endpointOf, formatExtractedPage, READ_ONLY_OPEN, requestJson, searchTool, timeoutOf,
+  type RestAdapter, type RestAdapterContext,
+} from "../base.js";
+import {
+  arrayArg, DEFAULT_ITEM_TEXT_CHARS, normalizeItem, numberArg, objectRecord, stringArg, stringValue,
+} from "../normalize.js";
 
 // Querit's filters.timeRange.date takes d1/w1/m1/y1; the toolkit's freshness words map onto them.
 const QUERIT_TIME: Record<string, string> = { day: "d1", week: "w1", month: "m1", year: "y1" };
+const NEED_CONTENT_MAX_CHARS = 32_000;
 
 const CONTENTS_TOOL: Tool = {
   name: "querit_contents",
@@ -19,7 +26,7 @@ const CONTENTS_TOOL: Tool = {
     },
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  annotations: READ_ONLY_OPEN,
 };
 
 export class QueritAdapter implements RestAdapter {
@@ -41,69 +48,91 @@ export class QueritAdapter implements RestAdapter {
     ), CONTENTS_TOOL];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    if (tool === "querit_contents") return this.callContents(args, key, config);
-    const body: Record<string, unknown> = { query: stringArg(args, "query"), count: numberArg(args, "limit", 6) };
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    if (tool === "querit_contents") return this.callContents(args, key, config, context);
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
+    const body: Record<string, unknown> = { query: stringArg(args, "query"), count: limit };
     const filters: Record<string, unknown> = {};
-    const include = arrayArg(args, "sitesInclude");
-    const exclude = arrayArg(args, "sitesExclude");
+    const include = cleanHosts(arrayArg(args, "sitesInclude"));
+    const exclude = cleanHosts(arrayArg(args, "sitesExclude"));
     if (include.length || exclude.length) filters.sites = { ...(include.length ? { include } : {}), ...(exclude.length ? { exclude } : {}) };
     const countries = arrayArg(args, "countries");
     const languages = arrayArg(args, "languages");
     if (countries.length) filters.geo = { countries: { include: countries } };
     if (languages.length) filters.languages = { include: languages };
     const timeRange = stringArg(args, "timeRange").trim();
-    if (timeRange) filters.timeRange = { date: QUERIT_TIME[timeRange] ?? timeRange };
+    if (timeRange) filters.timeRange = { date: QUERIT_TIME[timeRange.toLowerCase()] ?? timeRange };
     if (Object.keys(filters).length) body.filters = filters;
     const vertical = stringArg(args, "vertical");
     if (vertical) body.vertical = vertical;
-    if (args.needContent === true) body.need_content = true;
-    if (typeof args.chunksPerDoc === "number") body.chunks_per_doc = args.chunksPerDoc;
+    const needContent = args.needContent === true;
+    if (needContent) body.need_content = true;
+    if (typeof args.chunksPerDoc === "number" && Number.isFinite(args.chunksPerDoc)) body.chunks_per_doc = Math.round(args.chunksPerDoc);
     const data = checkedQuerit(await requestJson(endpointOf(config, "https://api.querit.ai", "/v1/search"), {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }, {
+      timeoutMs: timeoutOf(config, needContent ? 30_000 : 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
     }));
     const results = (data.results as Record<string, unknown> | undefined)?.result;
+    const maxChars = needContent ? NEED_CONTENT_MAX_CHARS : DEFAULT_ITEM_TEXT_CHARS;
     return {
       items: Array.isArray(results)
-        ? results.map((row) => {
-          const rec = objectRecord(row);
-          if (Array.isArray(rec.chunks) && rec.chunks.length) {
-            const chunkText = rec.chunks
-              .map((chunk) => typeof chunk === "string"
-                ? chunk
-                : stringValue(objectRecord(chunk).text) ?? stringValue(objectRecord(chunk).content) ?? "")
-              .map((part) => part.trim())
-              .filter(Boolean)
-              .join("\n\n");
-            if (chunkText) {
-              return normalizeItem({ ...rec, text: chunkText }, { dateKeys: ["page_time", "page_age", "published", "date"] });
+        ? results.slice(0, limit).map((row) => {
+            const rec = objectRecord(row);
+            if (Array.isArray(rec.chunks) && rec.chunks.length) {
+              const chunkText = rec.chunks
+                .map((chunk) => typeof chunk === "string"
+                  ? chunk
+                  : stringValue(objectRecord(chunk).text) ?? stringValue(objectRecord(chunk).content) ?? "")
+                .map((part) => part.trim())
+                .filter(Boolean)
+                .join("\n\n");
+              if (chunkText) {
+                return normalizeItem({ ...rec, text: chunkText }, { dateKeys: ["page_time", "page_age", "published", "date"], maxChars });
+              }
             }
-          }
-          return normalizeItem(row, { dateKeys: ["page_time", "page_age", "published", "date"] });
-        })
+            return normalizeItem(row, { dateKeys: ["page_time", "page_age", "published", "date"], maxChars });
+          })
         : [],
     };
   }
 
-  private async callContents(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    const urls = [...new Set([stringArg(args, "url").trim(), ...arrayArg(args, "urls")].filter(Boolean))].slice(0, 10);
-    if (!urls.length) throw new Error("querit_contents requires url or urls");
+  private async callContents(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const urls = collectValidatedUrls(args, "querit_contents", 10);
     const data = checkedQuerit(await requestJson(endpointOf(config, "https://api.querit.ai", "/v1/contents"), {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ urls }),
-    }, 30_000));
+    }, {
+      timeoutMs: timeoutOf(config, 30_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    }));
     const rawResults = (data.results as Record<string, unknown> | undefined)?.result ?? data.results ?? data.data;
     const pages = Array.isArray(rawResults) ? rawResults.map(objectRecord) : [];
     const formatted = pages.map((page) => {
       const title = stringValue(page.title);
-      const url = stringValue(page.url) ?? "";
+      const url = stringValue(page.url);
       const body = stringValue(page.markdown) ?? stringValue(page.content) ?? stringValue(page.text) ?? "";
       if (!body.trim()) return "";
-      const header = [title ? `# ${title}` : "", url ? `URL: ${url}` : ""].filter(Boolean).join("\n");
-      return [header, body.trim()].filter(Boolean).join("\n\n");
+      return formatExtractedPage({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        body,
+      });
     }).filter(Boolean);
     if (!formatted.length) throw new TargetPageError("Querit returned no content for the page");
     return { text: formatted.join("\n\n---\n\n"), pages };
@@ -112,10 +141,34 @@ export class QueritAdapter implements RestAdapter {
 
 function checkedQuerit(data: Record<string, unknown>): Record<string, unknown> {
   // Querit reports some failures in a 200 body: 0 and 2xx indicate success.
-  const errorCode = data.error_code;
-  if (typeof errorCode === "number" && errorCode !== 0 && (errorCode < 200 || errorCode >= 300)) {
-    const status = errorCode >= 400 && errorCode < 600 ? errorCode : 502;
-    throw new HttpError(`HTTP ${status}: ${String(data.error_msg ?? "Querit error")} (error_code ${errorCode})`, status);
+  const rawCode = data.error_code;
+  const errorCode = typeof rawCode === "number"
+    ? rawCode
+    : typeof rawCode === "string" && /^\d+$/.test(rawCode.trim())
+      ? Number(rawCode.trim())
+      : undefined;
+  if (errorCode !== undefined && errorCode !== 0 && (errorCode < 200 || errorCode >= 300)) {
+    const safeMsg = redact(String(data.error_msg ?? "Querit error")).slice(0, 500);
+    let status: number | undefined;
+    if (errorCode >= 400 && errorCode < 600) {
+      status = errorCode;
+    } else if (errorCode >= 4_000) {
+      const prefix = Number(String(errorCode).slice(0, 3));
+      if (prefix >= 400 && prefix < 600) status = prefix;
+    }
+    if (status === undefined) {
+      status = keyFaultStatusFromToolText(safeMsg, "search")
+        ?? (/balance|quota|insufficient|credit/i.test(safeMsg)
+          ? 402
+          : /rate[\s_-]?limit|too[\s_-]?many|qps|throttl/i.test(safeMsg)
+            ? 429
+            : /auth|api[\s_-]?key|unauthorized|forbidden|invalid[\s_-]?token/i.test(safeMsg)
+              ? 401
+              : /invalid[\s_-]?param|missing[\s_-]?param|bad[\s_-]?request/i.test(safeMsg)
+                ? 422
+                : 502);
+    }
+    throw new HttpError(`HTTP ${status}: ${safeMsg} (error_code ${errorCode})`, status);
   }
   return data;
 }

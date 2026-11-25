@@ -39,8 +39,11 @@ test("validates provider tool policies", () => {
   assert.throws(() => validateConfig(value), /toolPolicy\.allow contains duplicates/);
 });
 
-test("uses a non-virtualized shared config path on Windows", () => {
-  if (process.platform !== "win32" || process.env.SEARCH_TOOLKIT_CONFIG) return;
+test("uses a non-virtualized shared config path on Windows", (t) => {
+  if (process.platform !== "win32" || process.env.SEARCH_TOOLKIT_CONFIG) {
+    t.skip("Windows default path check applies only on win32 without SEARCH_TOOLKIT_CONFIG");
+    return;
+  }
   assert.equal(defaultConfigPath(), resolve(homedir(), ".config/search-toolkit/providers.json"));
 });
 
@@ -105,4 +108,263 @@ test("the shipped example config is a clean v2 document", () => {
   assert.deepEqual(config.providers.doubao?.auto, []);
   assert.ok(config.providers.firecrawl?.auto.includes("fetch"));
   assert.equal(typeof config.providers.anysearch?.toolPolicy?.descriptions?.search, "string");
+});
+
+test("statePath expands ~/ and resolves relative paths against baseDir", () => {
+  const base = {
+    version: 2,
+    providers: {
+      brave: { enabled: true, auto: ["search"], keys: ["k1"], integration: { kind: "rest", adapter: "brave" } },
+    },
+  };
+  const tildeLoaded = normalizeConfig({ ...base, statePath: "~/search-toolkit-test/state.db" });
+  assert.equal(tildeLoaded.config.statePath, resolve(homedir(), "search-toolkit-test/state.db"));
+
+  const baseDir = resolve(homedir(), "st-base-dir");
+  const relLoaded = normalizeConfig({ ...base, statePath: "data/state.db" }, baseDir);
+  assert.equal(relLoaded.config.statePath, resolve(baseDir, "data/state.db"));
+});
+
+test("rejects unknown toolPolicy keys and warns on unknown top-level config fields", () => {
+  const withBadPolicy = {
+    version: 2,
+    statePath: "state.db",
+    providers: {
+      querit: {
+        enabled: true,
+        auto: ["search"],
+        keys: ["k1"],
+        integration: { kind: "rest", adapter: "querit" },
+        toolPolicy: { allows: ["querit_search"] },
+      },
+    },
+  };
+  assert.throws(
+    () => normalizeConfig(withBadPolicy),
+    /toolPolicy\.allows is not a recognised field \(expected allow, deny, or descriptions\)/,
+  );
+
+  const withUnknownTop = {
+    version: 2,
+    statePath: "state.db",
+    extraSetting: true,
+    providers: {
+      querit: { enabled: true, auto: ["search"], keys: ["k1"], integration: { kind: "rest", adapter: "querit" } },
+    },
+  };
+  const { notes } = normalizeConfig(withUnknownTop);
+  assert.ok(notes.some((note) => note.includes("config.extraSetting is not a recognised field")));
+});
+
+test("disabled providers allow blank placeholder keys while still rejecting duplicate non-blank keys", () => {
+  const withBlanks = {
+    version: 2,
+    statePath: "state.db",
+    providers: {
+      brave: { enabled: false, auto: ["search"], keys: ["", "   "], integration: { kind: "rest", adapter: "brave" } },
+    },
+  };
+  assert.doesNotThrow(() => normalizeConfig(withBlanks));
+
+  const withDups = {
+    version: 2,
+    statePath: "state.db",
+    providers: {
+      brave: { enabled: false, auto: ["search"], keys: ["", "dup-key", "dup-key"], integration: { kind: "rest", adapter: "brave" } },
+    },
+  };
+  assert.throws(() => normalizeConfig(withDups), /brave\.keys contains duplicates/);
+});
+
+test("migrateConfig preserves unresolvable env:/file: refs on enabled providers and keeps raw statePath", () => {
+  const raw = {
+    version: 1,
+    statePath: "~/portable/state.db",
+    providers: {
+      brave: {
+        enabled: true,
+        automatic: true,
+        keys: [
+          "env:SEARCH_TOOLKIT_UNSET_PORTABLE_KEY_999",
+          { key: "file:/nonexistent/portable-secret.txt", tier: "paid", label: "vault" },
+        ],
+        integration: { kind: "rest", adapter: "brave" },
+      },
+    },
+  };
+  const { document, changes } = migrateConfig(raw, resolve(homedir(), "some-dir"));
+  assert.equal(document.version, 2);
+  assert.equal(document.statePath, "~/portable/state.db");
+  const providers = document.providers as Record<string, { keys: unknown[] }>;
+  assert.deepEqual(providers.brave?.keys, [
+    "env:SEARCH_TOOLKIT_UNSET_PORTABLE_KEY_999",
+    { key: "file:/nonexistent/portable-secret.txt", tier: "paid", label: "vault" },
+  ]);
+  assert.ok(changes.length >= 1);
+});
+
+test("validates grok customUrl, cache bounds, and MCP integration settings", () => {
+  const make = (overrides: Record<string, unknown>) => ({
+    version: 2,
+    statePath: "state.db",
+    providers: {
+      grok: { enabled: true, auto: [], keys: ["k1"], integration: { kind: "rest", adapter: "grok" } },
+    },
+    ...overrides,
+  });
+
+  assert.throws(
+    () => normalizeConfig(make({
+      providers: {
+        grok: {
+          enabled: true,
+          auto: [],
+          keys: ["k1"],
+          integration: { kind: "rest", adapter: "grok" },
+          options: { customUrl: "ftp://bad.example/v1" },
+        },
+      },
+    })),
+    /grok\.options\.customUrl must be a valid http\(s\) URL/,
+  );
+  assert.doesNotThrow(() => normalizeConfig(make({
+    providers: {
+      grok: {
+        enabled: true,
+        auto: [],
+        keys: ["k1"],
+        integration: { kind: "rest", adapter: "grok" },
+        options: { customUrl: "https://api.x.ai/v1/responses" },
+      },
+    },
+  })));
+
+  assert.throws(() => normalizeConfig(make({ cache: { maxEntries: -1 } })), /cache\.maxEntries/);
+  assert.throws(() => normalizeConfig(make({ cache: { maxTotalBytes: 2_000_000_000 } })), /cache\.maxTotalBytes/);
+
+  assert.throws(
+    () => normalizeConfig(make({
+      providers: {
+        exa: {
+          enabled: true,
+          auto: ["search"],
+          keys: ["k1"],
+          integration: { kind: "remote_mcp", url: "https://mcp.exa.ai/mcp", auth: { kind: "bearer" }, headers: { "X-Bad": "a\nb" } },
+        },
+      },
+    })),
+    /must not contain newline/,
+  );
+  assert.throws(
+    () => normalizeConfig(make({
+      providers: {
+        exa: {
+          enabled: true,
+          auto: ["search"],
+          keys: ["k1"],
+          integration: { kind: "remote_mcp", url: "https://mcp.exa.ai/mcp", auth: { kind: "bearer" }, timeoutMs: 500 },
+        },
+      },
+    })),
+    /timeoutMs must be an integer from 1000 to 300000/,
+  );
+  assert.throws(
+    () => normalizeConfig(make({
+      providers: {
+        fc: {
+          enabled: true,
+          auto: ["fetch"],
+          keys: ["k1"],
+          integration: { kind: "stdio_mcp", command: "node", args: [], envKey: "FC_KEY", idleTimeoutMs: -5 },
+        },
+      },
+    })),
+    /idleTimeoutMs must be an integer from 0 to 86400000/,
+  );
+  assert.throws(
+    () => normalizeConfig(make({
+      providers: {
+        fc: {
+          enabled: true,
+          auto: ["fetch"],
+          keys: ["k1"],
+          integration: { kind: "stdio_mcp", command: "node", args: [], envKey: "FC_KEY", env: { BAD: 123 } },
+        },
+      },
+    })),
+    /integration\.env\.BAD must be a string/,
+  );
+
+  // direct_markdown.options.allowedPorts and tinyfish.options.{searchBaseUrl,fetchBaseUrl}
+  const dmOk = normalizeConfig({
+    version: 2,
+    statePath: "state.db",
+    providers: {
+      direct_markdown: {
+        enabled: true,
+        auto: ["fetch"],
+        keys: [],
+        integration: { kind: "rest", adapter: "direct_markdown" },
+        options: { allowedPorts: [8080, 8443] },
+      },
+      tinyfish: {
+        enabled: true,
+        auto: ["search", "fetch"],
+        keys: ["tf-key"],
+        integration: { kind: "rest", adapter: "tinyfish" },
+        options: { searchBaseUrl: "https://search.tinyfish.example/v1", fetchBaseUrl: "https://fetch.tinyfish.example" },
+      },
+    },
+  });
+  assert.deepEqual(dmOk.notes, []);
+  assert.deepEqual(dmOk.config.providers.direct_markdown?.options?.allowedPorts, [8080, 8443]);
+
+  assert.throws(
+    () => normalizeConfig({
+      version: 2,
+      statePath: "state.db",
+      providers: {
+        direct_markdown: {
+          enabled: true,
+          auto: ["fetch"],
+          keys: [],
+          integration: { kind: "rest", adapter: "direct_markdown" },
+          options: { allowedPorts: [0] },
+        },
+      },
+    }),
+    /allowedPorts must be an array of integer ports from 1 to 65535/,
+  );
+  assert.throws(
+    () => normalizeConfig({
+      version: 2,
+      statePath: "state.db",
+      providers: {
+        tinyfish: {
+          enabled: true,
+          auto: ["search"],
+          keys: ["tf-key"],
+          integration: { kind: "rest", adapter: "tinyfish" },
+          options: { searchBaseUrl: "ftp://bad.example" },
+        },
+      },
+    }),
+    /tinyfish\.options\.searchBaseUrl must be a valid http\(s\) URL/,
+  );
+  assert.throws(
+    () => normalizeConfig({
+      version: 2,
+      statePath: "state.db",
+      providers: {
+        tinyfish: {
+          enabled: true,
+          auto: ["fetch"],
+          keys: ["tf-key"],
+          integration: { kind: "rest", adapter: "tinyfish" },
+          options: { fetchBaseUrl: "not-a-url" },
+        },
+      },
+    }),
+    /tinyfish\.options\.fetchBaseUrl must be a valid http\(s\) URL/,
+  );
 });

@@ -1,7 +1,31 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { HttpError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import {
+  endpointOf, READ_ONLY_OPEN, requestJson, searchTool, timeoutOf,
+  type RestAdapter, type RestAdapterContext,
+} from "../base.js";
 import { normalizeBraveImage, normalizeItem, numberArg, stringArg } from "../normalize.js";
+
+function observeBraveQuota(headers: Headers, context?: RestAdapterContext): void {
+  if (!context?.recordPassiveQuota) return;
+  const rawRemaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
+  if (!rawRemaining) return;
+  const parts = rawRemaining.split(",").map((part) => Number(part.trim()));
+  if (parts.length >= 2) {
+    const monthly = parts[1];
+    if (monthly !== undefined && Number.isFinite(monthly) && monthly >= 0) {
+      context.recordPassiveQuota(monthly, "credits");
+    }
+    return;
+  }
+  const single = parts[0];
+  const rawLimit = headers.get("x-ratelimit-limit") ?? headers.get("ratelimit-limit");
+  const limitVal = rawLimit ? Number(rawLimit.split(",")[0]?.trim()) : undefined;
+  if (single !== undefined && Number.isFinite(single) && single >= 0 && limitVal !== undefined && Number.isFinite(limitVal) && limitVal > 100) {
+    context.recordPassiveQuota(single, "credits");
+  }
+}
 
 export class BraveAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -66,7 +90,7 @@ export class BraveAdapter implements RestAdapter {
         required: ["query"],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      annotations: READ_ONLY_OPEN,
     };
     const images: Tool = {
       name: "brave_image_search",
@@ -89,26 +113,35 @@ export class BraveAdapter implements RestAdapter {
         required: ["query"],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+      annotations: READ_ONLY_OPEN,
     };
     return [...searches, images, context];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
-    const root = baseUrlOf(config, "https://api.search.brave.com/res/v1").replace(/\/+$/, "");
-    if (tool === "brave_llm_context") return this.callLlmContext(args, key, root);
-    if (tool === "brave_image_search") return this.callImageSearch(args, key, root);
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    if (tool === "brave_llm_context") return this.callLlmContext(args, key, config, context);
+    if (tool === "brave_image_search") return this.callImageSearch(args, key, config, context);
     const kind = tool.includes("news") ? "news" : "web";
-    const url = new URL(`${root}/${kind}/search`);
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
+    const url = new URL(endpointOf(config, "https://api.search.brave.com", `/res/v1/${kind}/search`));
     // Plain text on Web Search (News Search does not accept text_decorations).
     if (kind === "web") url.searchParams.set("text_decorations", "false");
     url.searchParams.set("q", stringArg(args, "query"));
-    url.searchParams.set("count", String(numberArg(args, "limit", 6)));
-    for (const [source, target] of [["country", "country"], ["searchLang", "search_lang"], ["freshness", "freshness"], ["safesearch", "safesearch"]] as const) {
-      if (stringArg(args, source)) url.searchParams.set(target, stringArg(args, source));
+    url.searchParams.set("count", String(limit));
+    const country = stringArg(args, "country").trim();
+    if (country) url.searchParams.set("country", country.toUpperCase());
+    for (const [source, target] of [["searchLang", "search_lang"], ["freshness", "freshness"], ["safesearch", "safesearch"]] as const) {
+      const value = stringArg(args, source).trim();
+      if (value) url.searchParams.set(target, value);
     }
     if (typeof args.extraSnippets === "boolean") url.searchParams.set("extra_snippets", String(args.extraSnippets));
-    if (typeof args.offset === "number") url.searchParams.set("offset", String(args.offset));
+    if (typeof args.offset === "number" && Number.isFinite(args.offset)) url.searchParams.set("offset", String(args.offset));
     if (typeof args.goggles === "string" && args.goggles) url.searchParams.set("goggles", args.goggles);
     else if (Array.isArray(args.goggles)) {
       for (const goggle of args.goggles) {
@@ -117,34 +150,59 @@ export class BraveAdapter implements RestAdapter {
     }
     const data = await requestJson(url.toString(), {
       headers: { Accept: "application/json", "X-Subscription-Token": key },
+    }, {
+      timeoutMs: timeoutOf(config, 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+      onHeaders: (headers) => observeBraveQuota(headers, context),
     });
     const container = data[kind] as Record<string, unknown> | undefined;
     const rows = container?.results ?? data.results;
-    return { items: Array.isArray(rows) ? rows.map((row) => normalizeItem(row, { html: true, dateKeys: ["page_age", "age"] })) : [] };
+    return {
+      items: Array.isArray(rows)
+        ? rows.slice(0, limit).map((row) => normalizeItem(row, { html: true, dateKeys: ["page_age", "age"] }))
+        : [],
+    };
   }
 
-  private async callImageSearch(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
-    const url = new URL(`${root}/images/search`);
+  private async callImageSearch(
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 10)));
+    const url = new URL(endpointOf(config, "https://api.search.brave.com", "/res/v1/images/search"));
     url.searchParams.set("q", stringArg(args, "query"));
-    url.searchParams.set("count", String(numberArg(args, "limit", 10)));
-    url.searchParams.set("country", stringArg(args, "country", "ALL"));
+    url.searchParams.set("count", String(limit));
+    url.searchParams.set("country", stringArg(args, "country", "ALL").trim().toUpperCase() || "ALL");
     for (const [source, target] of [["searchLang", "search_lang"], ["safesearch", "safesearch"]] as const) {
-      if (stringArg(args, source)) url.searchParams.set(target, stringArg(args, source));
+      const value = stringArg(args, source).trim();
+      if (value) url.searchParams.set(target, value);
     }
     if (typeof args.spellcheck === "boolean") url.searchParams.set("spellcheck", String(args.spellcheck));
     const data = await requestJson(url.toString(), {
       headers: { Accept: "application/json", "X-Subscription-Token": key },
+    }, {
+      timeoutMs: timeoutOf(config, 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+      onHeaders: (headers) => observeBraveQuota(headers, context),
     });
-    return { items: Array.isArray(data.results) ? data.results.map(normalizeBraveImage) : [] };
+    return { items: Array.isArray(data.results) ? data.results.slice(0, limit).map(normalizeBraveImage) : [] };
   }
 
-  private async callLlmContext(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
+  private async callLlmContext(
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
     const body: Record<string, unknown> = {
       q: stringArg(args, "query"),
       maximum_number_of_tokens: numberArg(args, "maximumNumberOfTokens", 8192),
     };
+    const country = stringArg(args, "country").trim();
+    if (country) body.country = country.toUpperCase();
     for (const [source, target] of [
-      ["country", "country"],
       ["searchLang", "search_lang"],
       ["count", "count"],
       ["maximumNumberOfUrls", "maximum_number_of_urls"],
@@ -180,14 +238,25 @@ export class BraveAdapter implements RestAdapter {
       ["locationPostalCode", "X-Loc-Postal-Code"],
     ] as const) {
       const value = args[source];
-      if (typeof value === "string" && value.trim()) headers[target] = sanitizeHeaderValue(value);
+      if (typeof value === "string" && value.trim()) {
+        const normalized = source === "locationCountry" ? value.trim().toUpperCase() : value;
+        headers[target] = sanitizeHeaderValue(normalized);
+      }
       if (typeof value === "number" && Number.isFinite(value)) headers[target] = String(value);
     }
-    return requestJson(`${root}/llm/context`, {
+    const data = await requestJson(endpointOf(config, "https://api.search.brave.com", "/res/v1/llm/context"), {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-    }, 30_000);
+    }, {
+      timeoutMs: timeoutOf(config, 30_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+      onHeaders: (responseHeaders) => observeBraveQuota(responseHeaders, context),
+    });
+    if (!data.grounding || typeof data.grounding !== "object") {
+      throw new HttpError("HTTP 502: Brave LLM Context returned no grounding payload", 502);
+    }
+    return data;
   }
 }
 

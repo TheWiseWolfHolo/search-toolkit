@@ -1,10 +1,16 @@
 import { TargetPageError, textOfContent } from "./errors.js";
 import { bodyBlocks, cleanError, isRouteContentBlock, routeBlock, updateAutoMetadata, type Route } from "./provenance.js";
 import type { AutoQuality } from "./routes.js";
+import { safeSlice } from "./shape.js";
 
 export interface TruncateOptions {
-  offset?: number;
-  section?: string;
+  offset?: number | undefined;
+  section?: string | undefined;
+}
+
+export interface TruncateHintContext {
+  isBatch?: boolean | undefined;
+  section?: string | undefined;
 }
 
 interface FetchPage {
@@ -13,6 +19,8 @@ interface FetchPage {
 }
 
 const MIN_FETCH_CHARS = 80;
+const INTERSTITIAL_SHORT_MAX_CHARS = 1_500;
+const INTERSTITIAL_EXTENDED_MAX_CHARS = 6_000;
 
 const INTERSTITIAL_PAGE_PATTERN = new RegExp([
   "just a moment[\\s\\S]{0,160}enable javascript and cookies",
@@ -31,6 +39,35 @@ const INTERSTITIAL_PAGE_PATTERN = new RegExp([
   "当前环境异常|百度安全验证|请完成安全验证",
 ].join("|"), "i");
 
+const INTERSTITIAL_SECONDARY_SIGNALS: readonly RegExp[] = [
+  /cloudflare\s+ray\s+id|\bray\s+id\s*:/i,
+  /performance\s*(?:&|and)\s*security\s+by\s+cloudflare/i,
+  /why\s+have\s+i\s+been\s+blocked/i,
+  /security\s+service\s+to\s+protect\s+itself\s+from\s+online\s+attacks/i,
+  /checking\s+if\s+the\s+site\s+connection\s+is\s+secure/i,
+  /enable\s+javascript\s+and\s+cookies|javascript\s+is\s+required/i,
+  /please\s+stand\s+by|ddos\s+protection|bot\s+protection/i,
+  /reference\s*#[\da-f.]{6,}/i,
+  /access\s+to\s+this\s+page\s+has\s+been\s+denied/i,
+  /人机验证|安全验证|安全检测|请开启\s*javascript/i,
+];
+
+function substantiveProseChars(text: string): number {
+  let total = 0;
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/https?:\/\/\S+/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (line.length >= 60 && /[a-z\u4e00-\u9fff]{3,}/i.test(line)) {
+      total += line.length;
+    }
+  }
+  return total;
+}
+
 export function bodyText(output: unknown): string {
   return textOfContent(bodyBlocks(output));
 }
@@ -39,7 +76,15 @@ export function isUsableFetchText(text: string): boolean {
   // Some adapters prepend a Markdown title or `Title:` header and source URL. These are not page text.
   const trimmed = text.trim().replace(/^(?:(?:#|Title:)\s*[^\n]*\n+)?URL:\s*[^\n]*(?:\n+|$)/i, "");
   if (trimmed.length < MIN_FETCH_CHARS) return false;
-  if (trimmed.length < 1_500 && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
+  if (trimmed.length < INTERSTITIAL_SHORT_MAX_CHARS && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) return false;
+  if (trimmed.length < INTERSTITIAL_EXTENDED_MAX_CHARS && INTERSTITIAL_PAGE_PATTERN.test(trimmed)) {
+    const secondaryHits = INTERSTITIAL_SECONDARY_SIGNALS.filter((re) => re.test(trimmed)).length;
+    if (secondaryHits >= 2) return false;
+    const proseChars = substantiveProseChars(trimmed);
+    const proseRatio = proseChars / trimmed.length;
+    if (secondaryHits >= 1 && (proseChars < 1_800 || proseRatio < 0.55)) return false;
+    if (proseChars < 1_200 || proseRatio < 0.45) return false;
+  }
   return true;
 }
 
@@ -83,6 +128,32 @@ export function readableFetchOutput(output: unknown): unknown {
   return changed ? { ...record, content } : output;
 }
 
+const HTTP_STATUS_PREFIX = /(?:^|[\s([,])(?:http(?:\/\d(?:\.\d)?)?|status(?:[\s_-]?code)?|http[\s_-]?status(?:[\s_-]?code)?|crawl_http|scrape_http|error[\s_-]?code|returned|responded\s+with|failed\s+with)[\s_:=/-]+([45]\d\d)(?!\d)/i;
+const LEADING_HTTP_STATUS = /^\s*([45]\d\d)(?=\s*(?:$|[:\-–—]|not\s+found|page\s+not\s+found|gone|forbidden|blocked|unauthorized|too\s+many|rate\s+limit|unavailable|bad\s+gateway|gateway|internal|server\s+error|service|client\s+error|access\s+denied|legal|error\b))/i;
+const INLINE_HTTP_REASON = /\b(400\s+bad\s+request|401\s+unauthori[sz]ed|403\s+(?:forbidden|blocked|access\s+denied)|404\s+(?:page\s+)?not\s+found|408\s+request\s+timeout|410\s+gone|429\s+too\s+many\s+requests|451\s+unavailable|500\s+internal\s+server\s+error|502\s+bad\s+gateway|503\s+service\s+unavailable|504\s+gateway\s+timeout)\b/i;
+
+function validErrorStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 400 && value <= 599 ? value : undefined;
+}
+
+function extractPageStatus(source: unknown, message: string): number | undefined {
+  if (source && typeof source === "object") {
+    const obj = source as Record<string, unknown>;
+    const direct = validErrorStatus(obj.status)
+      ?? validErrorStatus(obj.statusCode)
+      ?? validErrorStatus(obj.status_code)
+      ?? validErrorStatus(obj.http_status_code);
+    if (direct !== undefined) return direct;
+  }
+  const prefixed = message.match(HTTP_STATUS_PREFIX)?.[1];
+  if (prefixed) return Number(prefixed);
+  const leading = message.match(LEADING_HTTP_STATUS)?.[1];
+  if (leading) return Number(leading);
+  const inline = message.match(INLINE_HTTP_REASON)?.[1]?.slice(0, 3);
+  if (inline) return Number(inline);
+  return undefined;
+}
+
 function envelopeText(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
@@ -93,10 +164,8 @@ function envelopeText(value: unknown): string | undefined {
       : typeof (err as { message?: unknown })?.message === "string"
         ? (err as { message: string }).message
         : JSON.stringify(err);
-    const status = typeof (err as { status?: unknown })?.status === "number"
-      ? (err as { status: number }).status
-      : Number(message.match(/\b([45]\d\d)\b/)?.[1]);
-    throw new TargetPageError(`reader could not get the page: ${message}`, Number.isFinite(status) ? status : undefined);
+    const status = extractPageStatus(err, message);
+    throw new TargetPageError(`reader could not get the page: ${message}`, status);
   }
   const pages = Array.isArray(record.results) ? record.results : Array.isArray(value) ? value : undefined;
   if (pages) {
@@ -106,8 +175,8 @@ function envelopeText(value: unknown): string | undefined {
     if (failed.length) {
       const first = failed[0] as Record<string, unknown>;
       const reason = String(first?.error ?? first?.message ?? "no content");
-      const status = Number(reason.match(/\b([45]\d\d)\b/)?.[1]);
-      throw new TargetPageError(`reader could not get the page: ${reason}`, Number.isFinite(status) ? status : undefined);
+      const status = extractPageStatus(first, reason);
+      throw new TargetPageError(`reader could not get the page: ${reason}`, status);
     }
     return undefined;
   }
@@ -149,6 +218,10 @@ export function parseFetchUrls(args: Record<string, unknown>): string[] {
     }
     if (parsed.username || parsed.password) {
       throw new Error("fetch_auto rejects URLs with embedded credentials");
+    }
+    // Strip non-SPA #fragments (preserve #/ and #!) so url#a and url#b dedupe and hit cache cleanly.
+    if (!parsed.hash.startsWith("#/") && !parsed.hash.startsWith("#!")) {
+      parsed.hash = "";
     }
     const href = parsed.toString();
     if (!normalized.includes(href)) normalized.push(href);
@@ -199,15 +272,61 @@ export function combineBatchFetch(
   };
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeHeadingTitle(raw: string): string {
+  return raw
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .replace(/\s+(?:#+|¶)\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function headingMatchTier(rawTitle: string, needle: string, boundaryRe: RegExp | undefined): number {
+  const title = normalizeHeadingTitle(rawTitle);
+  if (!title) return 0;
+  if (title === needle) return 3;
+  if (boundaryRe && boundaryRe.test(title)) return 2;
+  if (title.includes(needle)) return 1;
+  return 0;
+}
+
+function isSetextTitleCandidate(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^(?:#{1,6}\s|>|[-*+]\s|\d+\.\s|\||(?:[-*_]\s*){3,}$)/.test(trimmed)) return false;
+  return true;
+}
+
+interface MarkdownHeading {
+  line: number;
+  bodyStart: number;
+  level: number;
+  title: string;
+}
+
 function filterTextBySection(text: string, sectionQuery: string): string {
   const normalized = text.replace(/\r\n?/g, "\n");
-  const needle = sectionQuery.toLowerCase();
+  const needle = sectionQuery.trim().toLowerCase().replace(/\s+/g, " ");
   const lines = normalized.split("\n");
-  // Track fenced code blocks so `# comments` inside shell/python examples are never treated as headings.
-  const headings: Array<{ line: number; level: number; title: string }> = [];
+  // Track fenced code blocks (and YAML frontmatter) so comments or dashes inside them are never headings.
+  const headings: MarkdownHeading[] = [];
   let fenceChar: string | undefined;
   let fenceLen = 0;
-  for (let i = 0; i < lines.length; i += 1) {
+  let startLine = 0;
+  if (lines[0]?.trim() === "---") {
+    for (let k = 1; k < lines.length; k += 1) {
+      if (lines[k]?.trim() === "---") {
+        startLine = k + 1;
+        break;
+      }
+    }
+  }
+  for (let i = startLine; i < lines.length; i += 1) {
     const raw = lines[i] ?? "";
     const fence = raw.match(/^\s*(`{3,}|~{3,})/);
     if (fence?.[1]) {
@@ -222,15 +341,31 @@ function filterTextBySection(text: string, sectionQuery: string): string {
       continue;
     }
     if (fenceChar) continue;
-    const match = raw.match(/^(#{1,6})\s+(.+)$/);
-    if (match?.[1] && match[2]) {
-      headings.push({ line: i, level: match[1].length, title: match[2] });
+    const atx = raw.match(/^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/);
+    if (atx?.[1] && atx[2]) {
+      headings.push({ line: i, bodyStart: i + 1, level: atx[1].length, title: atx[2] });
+      continue;
+    }
+    const nextLine = lines[i + 1];
+    if (nextLine !== undefined && isSetextTitleCandidate(raw)) {
+      const setext = nextLine.match(/^\s{0,3}(={2,}|-{2,})\s*$/);
+      if (setext?.[1]) {
+        const level = setext[1][0] === "=" ? 1 : 2;
+        headings.push({ line: i, bodyStart: i + 2, level, title: raw.trim() });
+        i += 1;
+      }
     }
   }
 
+  const startsLatin = /^[a-z0-9]/.test(needle);
+  const endsLatin = /[a-z0-9]$/.test(needle);
+  const boundaryRe = needle && (startsLatin || endsLatin)
+    ? new RegExp(`${startsLatin ? "(?<![a-z0-9])" : ""}${escapeRegExp(needle)}${endsLatin ? "(?![a-z0-9])" : ""}`, "i")
+    : undefined;
+
   const matching = headings
-    .map((heading, idx) => ({ heading, idx }))
-    .filter(({ heading }) => heading.title.toLowerCase().includes(needle));
+    .map((heading, idx) => ({ heading, idx, tier: headingMatchTier(heading.title, needle, boundaryRe) }))
+    .filter(({ tier }) => tier > 0);
 
   if (matching.length > 0) {
     const sectionBounds = (idx: number, includeSiblingTabs: boolean): { start: number; end: number; bodyChars: number } => {
@@ -239,7 +374,7 @@ function filterTextBySection(text: string, sectionQuery: string): string {
       let sawBody = false;
       for (let j = idx + 1; j < headings.length; j += 1) {
         const next = headings[j]!;
-        const between = lines.slice(headings[j - 1]!.line + 1, next.line).join("\n").trim();
+        const between = lines.slice(headings[j - 1]!.bodyStart, next.line).join("\n").trim();
         if (between.length > 0) sawBody = true;
         if (next.level <= start.level) {
           if (includeSiblingTabs && !sawBody && next.level === start.level && start.level >= 3) {
@@ -249,17 +384,24 @@ function filterTextBySection(text: string, sectionQuery: string): string {
           break;
         }
       }
-      const bodyChars = lines.slice(start.line + 1, endLine).join("\n").trim().length;
+      const bodyChars = lines.slice(start.bodyStart, endLine).join("\n").trim().length;
       return { start: start.line, end: endLine, bodyChars };
     };
-    const evaluated = matching.map(({ heading, idx }) => ({
+    const evaluated = matching.map(({ heading, idx, tier }) => ({
       heading,
       idx,
+      tier,
       strict: sectionBounds(idx, false),
     }));
-    const chosen = evaluated.find((entry) => entry.strict.bodyChars > 0 && entry.heading.level >= 2)
-      ?? evaluated.find((entry) => entry.strict.bodyChars > 0)
-      ?? evaluated[0]!;
+    // Prefer non-empty section, then higher match specificity (exact > word-boundary > substring),
+    // then sub-headings (level >= 2) over H1 page titles, then document order.
+    evaluated.sort((a, b) =>
+      ((b.strict.bodyChars > 0 ? 1 : 0) - (a.strict.bodyChars > 0 ? 1 : 0))
+      || (b.tier - a.tier)
+      || ((b.heading.level >= 2 ? 1 : 0) - (a.heading.level >= 2 ? 1 : 0))
+      || (a.idx - b.idx),
+    );
+    const chosen = evaluated[0]!;
     const bounds = chosen.strict.bodyChars > 0 ? chosen.strict : sectionBounds(chosen.idx, true);
     return lines.slice(bounds.start, bounds.end).join("\n").trim();
   }
@@ -284,13 +426,47 @@ function filterTextBySection(text: string, sectionQuery: string): string {
     .join("\n\n");
 }
 
+function buildTruncationHint(
+  dropped: number,
+  status: FetchPage["status"] | undefined,
+  nextOffset: number | undefined,
+  isBatch: boolean,
+  section: string | undefined,
+): string {
+  if (status === "partial") {
+    return `…[partial response trimmed by ${dropped} characters]`;
+  }
+  const sectionLabel = section ? ` in section "${section}"` : "";
+  if (nextOffset === undefined) {
+    return `…[truncated: ${dropped} more characters${sectionLabel}; raise maxChars to read further]`;
+  }
+  if (isBatch && section) {
+    return `…[truncated: ${dropped} more characters${sectionLabel}; re-fetch this single URL with offset=${nextOffset} and section="${section}" or raise maxChars to read further]`;
+  }
+  if (isBatch) {
+    return `…[truncated: ${dropped} more characters; re-fetch this single URL with offset=${nextOffset} or raise maxChars to read further]`;
+  }
+  if (section) {
+    return `…[truncated: ${dropped} more characters${sectionLabel}; pass offset=${nextOffset} with section="${section}" or raise maxChars to read further]`;
+  }
+  return `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`;
+}
+
 /** Cap the readable text of a result, supporting optional section filtering and character offset. */
-export function truncateBody(output: unknown, maxChars: number, options: TruncateOptions = {}, status?: FetchPage["status"]): unknown {
+export function truncateBody(
+  output: unknown,
+  maxChars: number,
+  options: TruncateOptions = {},
+  status?: FetchPage["status"],
+  hintContext?: TruncateHintContext,
+): unknown {
   if (!output || typeof output !== "object") return output;
   const record = output as { content?: unknown };
   if (!Array.isArray(record.content)) return output;
-  let skip = options.offset && options.offset > 0 ? Math.floor(options.offset) : 0;
-  let remaining = maxChars;
+  const baseOffset = options.offset && options.offset > 0 ? Math.floor(options.offset) : 0;
+  let skip = baseOffset;
+  let remaining = Math.max(0, Math.floor(maxChars));
+  let emittedChars = 0;
   let dropped = 0;
   const sectionQuery = options.section?.trim();
   let sourceContent = record.content;
@@ -304,33 +480,49 @@ export function truncateBody(output: unknown, maxChars: number, options: Truncat
       sourceContent = [...(hasRoute ? [sourceContent[0]] : []), { type: "text", text: merged }, ...nonText];
     }
   }
-  const content = sourceContent.map((block, index) => {
-    if (index === 0 && isRouteContentBlock(block)) return block;
+  const content: unknown[] = [];
+  for (let index = 0; index < sourceContent.length; index += 1) {
+    const block = sourceContent[index];
+    if (index === 0 && isRouteContentBlock(block)) {
+      content.push(block);
+      continue;
+    }
     const text = block && typeof block === "object" ? (block as { type?: string; text?: unknown }) : undefined;
-    if (text?.type !== "text" || typeof text.text !== "string") return block;
+    if (text?.type !== "text" || typeof text.text !== "string") {
+      content.push(block);
+      continue;
+    }
     const sourceText = sectionQuery ? filterTextBySection(text.text, sectionQuery) : text.text;
     if (skip >= sourceText.length) {
       skip -= sourceText.length;
-      return { ...text, text: "" };
+      continue;
     }
-    const sliced = skip > 0 ? sourceText.slice(skip) : sourceText;
+    const sliced = skip > 0 ? safeSlice(sourceText, skip) : sourceText;
     skip = 0;
+    if (remaining <= 0) {
+      dropped += sliced.length;
+      continue;
+    }
     if (sliced.length <= remaining) {
       remaining -= sliced.length;
-      return { ...text, text: sliced };
+      emittedChars += sliced.length;
+      if (sliced.length > 0) content.push({ ...text, text: sliced });
+      continue;
     }
-    dropped += sliced.length - remaining;
-    const kept = sliced.slice(0, Math.max(remaining, 0));
+    const kept = safeSlice(sliced, 0, remaining);
+    dropped += sliced.length - kept.length;
+    emittedChars += kept.length;
     remaining = 0;
-    return { ...text, text: kept };
-  });
-  const nextOffset = dropped > 0 && status !== "partial" ? Math.max(0, Math.floor(options.offset ?? 0)) + maxChars : undefined;
+    if (kept.length > 0) content.push({ ...text, text: kept });
+  }
+  const nextOffset = dropped > 0 && status !== "partial" && emittedChars > 0
+    ? baseOffset + emittedChars
+    : undefined;
+  const effectiveSection = hintContext?.section?.trim() || sectionQuery || undefined;
   if (dropped > 0) {
     content.push({
       type: "text",
-      text: nextOffset !== undefined
-        ? `…[truncated: ${dropped} more characters; pass offset=${nextOffset} or raise maxChars to read further]`
-        : `…[partial response trimmed by ${dropped} characters]`,
+      text: buildTruncationHint(dropped, status, nextOffset, hintContext?.isBatch === true, effectiveSection),
     });
   }
   const clipped = { ...record, content };

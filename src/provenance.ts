@@ -17,21 +17,44 @@ const KNOWN_KEY_PREFIX = /\b(?:sk-[A-Za-z0-9_-]{12,}|tvly-[A-Za-z0-9_-]{12,}|fc-
 const BEARER_HEADER = /\b(Bearer\s+)[^\s"'`<>]+/gi;
 const SECRET_QUERY_PARAM = /([?&][a-z0-9_-]*(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|key)=)[^&\s"'`<>]+/gi;
 const PLAIN_SNAKE_IDENTIFIER = /^[a-z]+(?:_[a-z]+)+$/;
+const SCREAMING_SNAKE_IDENTIFIER = /^[A-Z]+(?:_[A-Z]+)+$/;
+const PLAIN_KEBAB_SLUG = /^[a-z]+(?:-[a-z]+){2,}$/;
+const UUID_TOKEN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Register configured key literals so `redact()` always masks them regardless of shape. */
+function isSafeNonSecretToken(token: string): boolean {
+  if (PLAIN_SNAKE_IDENTIFIER.test(token)) return true;
+  if (SCREAMING_SNAKE_IDENTIFIER.test(token)) return true;
+  if (PLAIN_KEBAB_SLUG.test(token)) return true;
+  if (UUID_TOKEN.test(token)) return true;
+  // Preserve long PascalCase/camelCase identifiers (letters only, lowercase word runs, not random mixed-case base62).
+  if (/^[A-Za-z]+$/.test(token) && /[a-z]{3,}/.test(token)) {
+    const uppers = token.match(/[A-Z]/g)?.length ?? 0;
+    if (uppers > 0 && uppers / token.length < 0.4) return true;
+  }
+  return false;
+}
+
+/** Register configured key literals (and URL-encoded forms) so `redact()` always masks them regardless of shape. */
 export function registerKnownSecrets(keys: Iterable<string>): void {
   for (const raw of keys) {
     const value = raw.trim();
     if (value.length >= 6 && !value.startsWith("env:") && !value.startsWith("file:")) {
       KNOWN_SECRETS.add(value);
+      const encoded = encodeURIComponent(value);
+      if (encoded !== value) KNOWN_SECRETS.add(encoded);
     }
   }
 }
 
+/** Reset process-global known secrets (for isolated tests). */
+export function clearKnownSecretsForTest(): void {
+  KNOWN_SECRETS.clear();
+}
+
 /**
  * Hide configured secrets, bearer tokens, secret query parameters, known key
- * prefixes, and high-entropy key-like runs while preserving plain lowercase
- * snake_case identifiers such as error codes and tool names.
+ * prefixes, and high-entropy key-like runs while preserving plain identifiers,
+ * URL slugs, and UUID request IDs (configured UUID keys are still masked via KNOWN_SECRETS).
  */
 export function redact(text: string): string {
   let out = text;
@@ -44,7 +67,7 @@ export function redact(text: string): string {
     .replace(BEARER_HEADER, "$1<redacted>")
     .replace(SECRET_QUERY_PARAM, "$1<redacted>")
     .replace(KNOWN_KEY_PREFIX, "<redacted>")
-    .replace(/[A-Za-z0-9_-]{24,}/g, (token) => (PLAIN_SNAKE_IDENTIFIER.test(token) ? token : "<redacted>"));
+    .replace(/[A-Za-z0-9_-]{24,}/g, (token) => (isSafeNonSecretToken(token) ? token : "<redacted>"));
 }
 
 export function cleanError(error: unknown): string {

@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { HttpError } from "../src/errors.js";
 import { BraveAdapter } from "../src/rest/adapters.js";
+import { RestProvider } from "../src/rest/base.js";
+import { cleanHighlightText } from "../src/rest/normalize.js";
+import { RotationStore } from "../src/rotation.js";
 import { SearchToolkit } from "../src/toolkit.js";
 
 test("Brave exposes Web, News, Images, and LLM Context as distinct tools", () => {
@@ -147,5 +151,88 @@ test("search_auto context mode routes to Brave LLM Context", async () => {
     await toolkit.close();
     globalThis.fetch = originalFetch;
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Brave malformed numeric HTML entities do not throw RangeError and web search uppercases country and slices to limit", async () => {
+  assert.doesNotThrow(() => cleanHighlightText("Bad &#9999999; &#x110000; &#xD800; and good &#65; &#x42;"));
+  assert.equal(cleanHighlightText("Good &#65;&#x42; and bad &#9999999;"), "Good AB and bad &#9999999;");
+
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = "";
+  globalThis.fetch = async (input) => {
+    capturedUrl = String(input);
+    return new Response(JSON.stringify({
+      web: {
+        results: [
+          { title: "One &#9999999;", url: "https://a.example/1", description: "Entity &#x110000; ok" },
+          { title: "Two", url: "https://a.example/2", description: "second" },
+          { title: "Three", url: "https://a.example/3", description: "third" },
+        ],
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const out = await new BraveAdapter().call("brave_web_search", {
+      query: "entities",
+      country: "sg",
+      limit: 2,
+    }, "test-key") as { items: Array<{ title: string; text: string }> };
+    assert.match(capturedUrl, /country=SG/);
+    assert.equal(out.items.length, 2);
+    assert.equal(out.items[0]?.title, "One &#9999999;");
+    assert.equal(out.items[0]?.text, "Entity &#x110000; ok");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Brave captures passive monthly X-RateLimit-Remaining quota via RestProvider and rejects missing LLM Context grounding with 502", async () => {
+  const originalFetch = globalThis.fetch;
+  const dir = mkdtempSync(join(tmpdir(), "search-toolkit-brave-quota-"));
+  const rotation = new RotationStore(join(dir, "state.db"));
+  const config = {
+    enabled: true,
+    auto: ["search"] as Array<"search">,
+    keys: ["brave-key-123456"],
+    integration: { kind: "rest" as const, adapter: "brave" as const },
+  };
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/llm/context")) {
+      return new Response(JSON.stringify({ sources: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({
+      web: { results: [{ title: "Hit", url: "https://hit.example/", description: "ok" }] },
+    }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "X-RateLimit-Remaining": "1, 1450",
+        "X-RateLimit-Limit": "1, 2000",
+      },
+    });
+  };
+  try {
+    const provider = new RestProvider("brave", config, rotation, new BraveAdapter());
+    const web = provider.bindings().find((b) => b.upstreamName === "brave_web_search");
+    const llm = provider.bindings().find((b) => b.upstreamName === "brave_llm_context");
+    assert.ok(web && llm);
+    await web.call({ query: "quota test" });
+    const status = rotation.status("brave", config.keys).keys[0]?.status;
+    assert.equal(status?.quota_remaining, 1450);
+    assert.equal(status?.quota_unit, "credits");
+
+    await assert.rejects(
+      llm.call({ query: "missing grounding" }),
+      (err: unknown) => err instanceof HttpError && err.status === 502 && /no grounding payload/.test(err.message),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    rotation.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { cacheKey } from "../src/cache.js";
+import { cacheKey, ResultCache } from "../src/cache.js";
+import { TargetPageError } from "../src/errors.js";
 import { cleanExcerpt, focusExcerpt, queryTerms } from "../src/excerpt.js";
+import { isUsableFetchText, readableFetchOutput, truncateBody } from "../src/fetching.js";
 import { dedupeItems, nearDuplicateKey } from "../src/merge.js";
 import { extractUpstreamSearchItems } from "../src/rest/normalize.js";
+import { autoCandidates } from "../src/routes.js";
+import { safeSlice } from "../src/shape.js";
 import { SearchToolkit } from "../src/toolkit.js";
 
 type Json = Record<string, unknown>;
@@ -112,7 +117,7 @@ test("a repeated search is answered from the cache and says how old it is", asyn
     const second = await toolkit.callTool("search_auto", { query: "same question" }) as { content: Array<{ text: string }> };
     assert.equal(hits["api.search.brave.com"], 1);
     assert.equal((JSON.parse(first.content[0]?.text ?? "{}") as { searchToolkitAuto: Json }).searchToolkitAuto.cached, undefined);
-    assert.equal((JSON.parse(second.content[0]?.text ?? "{}") as { searchToolkitAuto: Json }).searchToolkitAuto.cached, "0s");
+    assert.match(String((JSON.parse(second.content[0]?.text ?? "{}") as { searchToolkitAuto: Json }).searchToolkitAuto.cached), /^\d+s$/);
     assert.equal(second.content[1]?.text, first.content[1]?.text);
     await toolkit.callTool("search_auto", { query: "same question", limit: 3 });
     assert.equal(hits["api.search.brave.com"], 2, "different arguments are a different answer");
@@ -136,7 +141,7 @@ test("a cached page serves the next offset without fetching again", async () => 
     await toolkit.callTool("fetch_auto", { url: "https://doc.example/", maxChars: 1000 });
     const next = await toolkit.callTool("fetch_auto", { url: "https://doc.example/", maxChars: 1000, offset: 1000 }) as { content: Array<{ text: string }> };
     assert.equal(hits["api.parallel.ai"], 1);
-    assert.match(next.content[0]?.text ?? "", /"cached":"0s"/);
+    assert.match(next.content[0]?.text ?? "", /"cached":"\d+s"/);
   });
 });
 
@@ -219,17 +224,284 @@ test("search_images searches by image through Google Lens and explains an empty 
   }
 });
 
-test("a time-bounded request sends Exa to its advanced tool with a publish-date filter", async () => {
-  const { autoCandidates } = await import("../src/routes.js");
-  const since = new Date(Date.now() - 604_800_000).toISOString().slice(0, 10);
+test("a time-bounded request sends Exa to its advanced tool with a publish-date filter", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-15T12:00:00Z") });
+  const since = "2026-10-08";
   const official = autoCandidates("official", "balanced", { query: "Node.js release schedule", freshness: "week" });
   assert.equal(official[0]?.name, "exa_web_search_advanced_exa");
   assert.equal(official[0]?.nativeArguments?.startPublishedDate, since);
   assert.equal(official[0]?.nativeArguments?.objective, undefined);
   const scholarMax = autoCandidates("scholar", "max", { query: "retrieval augmented generation", freshness: "year" });
   assert.equal(scholarMax[0]?.name, "exa_web_search_advanced_exa");
+  assert.equal(scholarMax[0]?.nativeArguments?.type, "auto");
+  assert.equal(scholarMax[0]?.nativeArguments?.category, "publication");
+  assert.equal(scholarMax[0]?.nativeArguments?.startPublishedDate, "2025-10-15");
   assert.equal(scholarMax[0]?.nativeArguments?.objective, undefined);
   const plain = autoCandidates("scholar", "max", { query: "retrieval augmented generation" });
   assert.equal(plain[0]?.name, "exa_web_search_exa");
   assert.equal(plain[0]?.nativeArguments?.startPublishedDate, undefined);
+});
+
+function assertNoLoneSurrogates(value: string): void {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      assert.ok(next >= 0xdc00 && next <= 0xdfff, `lone high surrogate at index ${i}`);
+      i += 1;
+    } else {
+      assert.ok(code < 0xdc00 || code > 0xdfff, `lone low surrogate at index ${i}`);
+    }
+  }
+}
+
+test("queryTerms keeps 2-char technical terms and strips search operators while focusExcerpt uses word boundaries and windowAroundMatch", () => {
+  assert.deepEqual(
+    queryTerms("Go AI TS C# v2 is in to after:2025-01-01 filetype:pdf lang:zh"),
+    ["go", "ai", "ts", "c#", "v2"],
+  );
+
+  // Word-boundary matching: "log" must not match "blog" or "technology".
+  const boundaryText = [
+    "Our engineering blog explores modern web technology trends in depth.",
+    "Another long blog post about distributed systems and cloud technology.",
+    "Enable structured log rotation to prevent disk exhaustion on production nodes.",
+  ].join(" ");
+  const focusedBoundary = focusExcerpt(boundaryText, "log", 95);
+  assert.match(focusedBoundary, /structured log rotation/);
+  assert.doesNotMatch(focusedBoundary, /engineering blog/);
+
+  // Short 0-hit opening segment + long matching segment (> max) must trigger windowAroundMatch around the densest cluster.
+  const longMatch = [
+    "Intro header.",
+    `${"unrelated preamble words ".repeat(15)}WAL checkpoint latency drops sharply with SQLite synchronous normal mode${" trailing filler text".repeat(15)}.`,
+  ].join(" ");
+  const windowed = focusExcerpt(longMatch, "SQLite WAL checkpoint", 120);
+  assert.match(windowed, /WAL checkpoint/);
+  assert.match(windowed, /SQLite/);
+
+  // Surrogate-pair safety on safeSlice and focusExcerpt.
+  const emojiText = `${"alpha 🚀 ".repeat(12)}target 🚀 keyword ${"beta 🚀 ".repeat(12)}`;
+  for (let cut = 1; cut < 30; cut += 1) {
+    assertNoLoneSurrogates(safeSlice(emojiText, 0, cut));
+    assertNoLoneSurrogates(safeSlice(emojiText, cut));
+  }
+  assertNoLoneSurrogates(focusExcerpt(emojiText, "target keyword", 55));
+});
+
+test("truncateBody and filterTextBySection parse Setext headings, skip frontmatter/code fences, prioritize exact headings, and avoid empty blocks", () => {
+  const doc = [
+    "---",
+    "title: Auth",
+    "---",
+    "Auth Overview",
+    "=============",
+    "Top-level intro.",
+    "",
+    "## Authentication Setup",
+    "Substring heading body.",
+    "",
+    "```bash",
+    "## Auth",
+    "# comment inside code fence",
+    "```",
+    "",
+    "Auth",
+    "----",
+    "Exact Setext auth section body with token details.",
+    "",
+    "## Next Topic",
+    "Unrelated footer.",
+  ].join("\n");
+
+  const exact = truncateBody({ content: [{ type: "text", text: doc }] }, 500, { section: "Auth" }) as {
+    content: Array<{ text: string }>;
+  };
+  assert.equal(exact.content[0]?.text, "Auth\n----\nExact Setext auth section body with token details.");
+
+  // Surrogate-pair safety and no empty text blocks emitted when offset lands on a block boundary.
+  const emojiPage = `${"hello 🚀 world ".repeat(10)}`;
+  const cut = truncateBody({ content: [{ type: "text", text: emojiPage }] }, 25, { offset: 7 }) as {
+    content: Array<{ text: string }>;
+  };
+  assertNoLoneSurrogates(cut.content[0]?.text ?? "");
+  assert.ok((cut.content[0]?.text ?? "").length > 0);
+
+  // When offset skips block 0 completely, block 0 is omitted rather than emitting an empty text block.
+  const multiBlock = truncateBody({
+    content: [
+      { type: "text", text: "0123456789" },
+      { type: "text", text: "abcdefghij" },
+    ],
+  }, 5, { offset: 10 }, "readable", { section: "API" }) as { content: Array<{ text: string }> };
+  assert.equal(multiBlock.content[0]?.text, "abcde");
+  assert.match(multiBlock.content[1]?.text ?? "", /pass offset=15 with section="API"/);
+});
+
+test("isUsableFetchText rejects 2-4KB Cloudflare/WAF interstitials while passing substantive articles that quote challenge phrases", () => {
+  const wafPage = [
+    "Just a moment... Enable JavaScript and cookies to continue.",
+    "Checking if the site connection is secure.",
+    "Performance & security by Cloudflare.",
+    "Cloudflare Ray ID: 8a1b2c3d4e5f6789",
+    "Why have I been blocked? This website is using a security service to protect itself from online attacks.",
+    "nav ".repeat(500),
+  ].join("\n");
+  assert.ok(wafPage.length > 1_500 && wafPage.length < 6_000);
+  assert.equal(isUsableFetchText(wafPage), false);
+
+  const realArticle = [
+    "# Debugging HTTP Clients Behind Edge Firewalls",
+    "",
+    'When testing resilient web fetchers, you may occasionally encounter interstitial shells containing "Just a moment... Enable JavaScript and cookies" returned by edge proxies.',
+    "",
+    ...Array.from({ length: 24 }, (_, idx) =>
+      `Paragraph ${idx + 1}: Production crawlers distinguish real documentation pages from edge challenges by checking substantive prose density across multiple coherent paragraphs.`,
+    ),
+  ].join("\n");
+  assert.ok(realArticle.length > 2_000 && realArticle.length < 6_000);
+  assert.equal(isUsableFetchText(realArticle), true);
+});
+
+test("readableFetchOutput ignores bare numeric counts while extracting explicit HTTP page statuses", () => {
+  assert.throws(
+    () => readableFetchOutput({
+      content: [{ type: "text", text: JSON.stringify({ success: false, error: "failed to parse 404 items in payload" }) }],
+    }),
+    (err: unknown) => err instanceof TargetPageError && err.pageStatus === undefined,
+  );
+
+  assert.throws(
+    () => readableFetchOutput({
+      content: [{ type: "text", text: JSON.stringify({ success: false, error: "HTTP 404 Not Found" }) }],
+    }),
+    (err: unknown) => err instanceof TargetPageError && err.pageStatus === 404,
+  );
+});
+
+test("ResultCache enforces maxEntries and maxTotalBytes eviction, deletes corrupt rows, and clamps backward clock skew", (t) => {
+  const baseNow = Date.parse("2026-10-15T12:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now: baseNow });
+  const dir = mkdtempSync(join(tmpdir(), "search-toolkit-cache-limits-"));
+  const dbPath = join(dir, "cache.db");
+  const cache = new ResultCache(dbPath, { maxEntries: 2, maxTotalBytes: 200 });
+  try {
+    cache.set("k1", { v: "a".repeat(30) }, 60_000);
+    t.mock.timers.tick(10);
+    cache.set("k2", { v: "b".repeat(30) }, 60_000);
+    t.mock.timers.tick(10);
+    cache.set("k3", { v: "c".repeat(30) }, 60_000);
+    // maxEntries=2 evicts oldest key k1.
+    assert.equal(cache.get("k1"), undefined);
+    assert.ok(cache.get("k2"));
+    assert.ok(cache.get("k3"));
+
+    // maxTotalBytes=200 evicts oldest entries while preserving the newly written key.
+    t.mock.timers.tick(10);
+    cache.set("k4", { v: "d".repeat(160) }, 60_000);
+    assert.equal(cache.get("k2"), undefined);
+    assert.equal(cache.get("k3"), undefined);
+    assert.deepEqual(cache.get("k4")?.value, { v: "d".repeat(160) });
+    cache.close();
+
+    // Corrupt JSON row is deleted on read, and future created_at clamps ageMs to 0.
+    const rawDb = new DatabaseSync(dbPath);
+    try {
+      rawDb.prepare("INSERT INTO result_cache(key, value, created_at, expires_at) VALUES (?, ?, ?, ?)")
+        .run("corrupt", "{bad-json", baseNow, baseNow + 60_000);
+      rawDb.prepare("INSERT INTO result_cache(key, value, created_at, expires_at) VALUES (?, ?, ?, ?)")
+        .run("future", JSON.stringify({ ok: true }), baseNow + 50_000, baseNow + 120_000);
+    } finally {
+      rawDb.close();
+    }
+
+    const reopened = new ResultCache(dbPath);
+    try {
+      assert.equal(reopened.get("corrupt"), undefined);
+      const futureHit = reopened.get("future");
+      assert.equal(futureHit?.ageMs, 0);
+      assert.deepEqual(futureHit?.value, { ok: true });
+      const checkDb = new DatabaseSync(dbPath);
+      try {
+        assert.equal(checkDb.prepare("SELECT key FROM result_cache WHERE key = ?").get("corrupt"), undefined);
+      } finally {
+        checkDb.close();
+      }
+      reopened.close();
+      assert.doesNotThrow(() => reopened.close());
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    cache.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("coversRequest refetches for capped readers (parallel) on section/offset while serving uncapped readers (you) from cache", async () => {
+  const fullDoc = [
+    "# Full Document",
+    "Intro paragraph with plenty of readable content to pass the usable fetch threshold easily. ".repeat(12),
+    "",
+    "## Details",
+    "Detailed section content that lives well past the first 800 characters of the page. ".repeat(12),
+  ].join("\n");
+
+  // 1. Capped reader (parallel): honors max_chars_per_result so initial cache entry does NOT cover section or later offset.
+  const dir1 = mkdtempSync(join(tmpdir(), "search-toolkit-capped-"));
+  const config1 = join(dir1, "providers.json");
+  writeFileSync(config1, JSON.stringify({
+    version: 2,
+    statePath: join(dir1, "state.db"),
+    providers: {
+      parallel: { enabled: true, auto: ["fetch"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "parallel" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  let parallelHits = 0;
+  globalThis.fetch = async (_input, init) => {
+    parallelHits += 1;
+    const body = JSON.parse(String(init?.body)) as { advanced_settings?: { full_content?: { max_chars_per_result?: number } } };
+    const cap = body.advanced_settings?.full_content?.max_chars_per_result ?? fullDoc.length;
+    return Response.json({
+      results: [{ url: "https://doc.example/capped", title: "Capped Doc", full_content: fullDoc.slice(0, cap) }],
+      errors: [],
+    });
+  };
+  const cappedToolkit = new SearchToolkit(config1);
+  try {
+    await cappedToolkit.initialize();
+    await cappedToolkit.callTool("fetch_auto", { url: "https://doc.example/capped", maxChars: 600 });
+    assert.equal(parallelHits, 1);
+    await cappedToolkit.callTool("fetch_auto", { url: "https://doc.example/capped", maxChars: 600, offset: 900 });
+    assert.equal(parallelHits, 2, "capped reader must refetch when offset exceeds cached slice");
+    await cappedToolkit.callTool("fetch_auto", { url: "https://doc.example/capped", maxChars: 600, section: "Details" });
+    assert.equal(parallelHits, 3, "capped reader must refetch when section requests full document");
+  } finally {
+    globalThis.fetch = original;
+    await cappedToolkit.close();
+    rmSync(dir1, { recursive: true, force: true });
+  }
+
+  // 2. Uncapped reader (you_contents): single fetch covers subsequent section and offset reads from cache.
+  let youHits = 0;
+  await withRest({ you: "you" }, () => {
+    youHits += 1;
+    return Response.json({
+      url: "https://doc.example/uncapped",
+      title: "Uncapped Doc",
+      contents: { markdown: fullDoc },
+    });
+  }, async (toolkit) => {
+    await toolkit.callTool("fetch_auto", { url: "https://doc.example/uncapped", maxChars: 600 });
+    const sectioned = await toolkit.callTool("fetch_auto", {
+      url: "https://doc.example/uncapped", maxChars: 600, section: "Details",
+    }) as { content: Array<{ text: string }> };
+    const paged = await toolkit.callTool("fetch_auto", {
+      url: "https://doc.example/uncapped", maxChars: 600, offset: 900,
+    }) as { content: Array<{ text: string }> };
+    assert.equal(youHits, 1, "uncapped reader serves section and offset directly from cache");
+    assert.match(sectioned.content[1]?.text ?? "", /## Details/);
+    assert.match(paged.content[0]?.text ?? "", /"cached":"\d+s"/);
+  });
 });

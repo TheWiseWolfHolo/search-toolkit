@@ -6,13 +6,15 @@ import {
   isConnectionFailure,
   keyFaultStatusFromToolText,
   statusFromError,
+  TargetPageError,
   textOfContent,
   ToolResultError,
+  type ToolIntent,
 } from "./errors.js";
 import { callWithRotation, failureFlags } from "./keys.js";
 import { dedupeItems } from "./merge.js";
 import { cleanError, routeBlock } from "./provenance.js";
-import { renderItems } from "./render.js";
+import { renderPayload } from "./render.js";
 import { extractUpstreamSearchItems } from "./rest/normalize.js";
 import { keyFingerprint, maskKey, type RotationStore } from "./rotation.js";
 import type { CallOptions, KeySelection, ProviderConfig, ToolBinding } from "./types.js";
@@ -43,11 +45,13 @@ const DEFAULT_DENIED_TOOLS: Record<string, readonly string[]> = {
 const ANYSEARCH_CLIENT_HEADER = "X-Anysearch-Client";
 
 const DISCOVERY_TIMEOUT_MS = 25_000;
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+const DEFAULT_JOB_TIMEOUT_MS = 120_000;
 // Past this many keys, or after a timeout, another key will not help: the upstream itself is unreachable.
 const DISCOVERY_MAX_KEYS = 3;
-// Close idle local stdio_mcp child processes (such as firecrawl-mcp) after 10 minutes of inactivity;
-// invoke() transparently respawns them on the next call.
-const DEFAULT_STDIO_IDLE_MS = 10 * 60_000;
+// Close idle local stdio_mcp child processes and remote_mcp transports after 10 minutes of inactivity;
+// invoke() transparently reconnects / respawns them on the next call.
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const STDIO_ENV_ALLOWLIST = new Set([
   "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
   "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
@@ -68,9 +72,22 @@ function safeStdioEnv(extra: Record<string, string> | undefined, envKey: string,
   return env;
 }
 
+export function inferToolIntent(upstreamName: string): ToolIntent {
+  const normalized = sanitizeName(upstreamName);
+  if (/(?:^|_)(?:fetch|scrape|extract|contents|read)(?:_|$)/.test(normalized)) return "fetch";
+  if (/(?:^|_)(?:search|lens|context|news|images|scholar)(?:_|$)/.test(normalized)) return "search";
+  return "other";
+}
+
+function isLongRunningTool(upstreamName: string): boolean {
+  const normalized = sanitizeName(upstreamName);
+  return /(?:^|_)(?:agent|crawl|research|batch)(?:_|$)/.test(normalized);
+}
+
 interface ClientEntry {
   client: Client;
   inFlight: number;
+  closing?: boolean;
   idleTimer?: NodeJS.Timeout;
   close(): Promise<void>;
 }
@@ -115,8 +132,19 @@ export class UpstreamMcpProvider {
     const keylessRemote = this.config.integration.kind === "remote_mcp" && this.config.integration.auth.kind === "none" && keys.length === 0;
     if (keylessRemote) {
       const selection: KeySelection = { provider: this.name, slot: 0, key: "", masked: "none", fingerprint: "keyless" };
-      const entry = await withTimeout(this.clientFor(selection), DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
-      return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+      const pending = this.clientFor(selection);
+      try {
+        const entry = await withTimeout(pending, this.connectTimeoutMs(), `${this.name} connect`);
+        this.beginUse(entry);
+        try {
+          return await withTimeout(listAllTools(entry.client), this.connectTimeoutMs(), `${this.name} tools/list`);
+        } finally {
+          this.endUse(selection, pending, entry);
+        }
+      } catch (error) {
+        await this.dropClient(selection, pending);
+        throw error;
+      }
     }
     if (!keys.length) throw new Error(`${this.name} has no API key for MCP discovery`);
     const usable = this.rotation.usableSlots(this.name, keys);
@@ -127,10 +155,10 @@ export class UpstreamMcpProvider {
       const selection = selectionFor(this.name, slot, key);
       const pending = this.clientFor(selection);
       try {
-        const entry = await withTimeout(pending, DISCOVERY_TIMEOUT_MS, `${this.name} connect`);
+        const entry = await withTimeout(pending, this.connectTimeoutMs(), `${this.name} connect`);
         this.beginUse(entry);
         try {
-          return await withTimeout(listAllTools(entry.client), DISCOVERY_TIMEOUT_MS, `${this.name} tools/list`);
+          return await withTimeout(listAllTools(entry.client), this.connectTimeoutMs(), `${this.name} tools/list`);
         } finally {
           this.endUse(selection, pending, entry);
         }
@@ -184,23 +212,25 @@ export class UpstreamMcpProvider {
     trackRotation: boolean,
   ): Promise<unknown> {
     const started = performance.now();
+    const intent = inferToolIntent(upstreamName);
     try {
       const result = await this.invoke(selection, upstreamName, arguments_);
       const latencyMs = Math.round(performance.now() - started);
       if (result.isError) {
         const text = textOfContent(result.content);
-        const keyFault = structuredKeyFault(result.structuredContent) ?? keyFaultStatusFromToolText(text);
+        const keyFault = structuredKeyFault(result.structuredContent) ?? keyFaultStatusFromToolText(text, intent);
         if (keyFault) {
           throw new ToolResultError(`${this.name} upstream tool error: ${text.slice(0, 500)}`, result.content as unknown[], keyFault);
         }
-        // The key and transport worked; the tool rejected this particular request.
+        // The key and transport worked; the tool rejected this particular request or target page.
         if (trackRotation) this.safeRecord(selection, { ok: true, latencyMs, toolError: true, error: `tool error: ${cleanError(text)}` });
         return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
       }
       if (trackRotation) this.safeRecord(selection, { ok: true, latencyMs });
       return appendRotationMetadata(result, this.name, upstreamName, selection.masked, latencyMs);
-    } catch (error) {
+    } catch (rawError) {
       const latencyMs = Math.round(performance.now() - started);
+      const error = normalizeFetchRpcError(rawError, intent);
       const httpStatus = statusFromError(error);
       if (trackRotation) {
         this.safeRecord(selection, {
@@ -217,12 +247,25 @@ export class UpstreamMcpProvider {
 
   /** One tool call; a dead transport (closed stdio child, expired session) is rebuilt once on the same key. */
   private async invoke(selection: KeySelection, upstreamName: string, arguments_: Record<string, unknown>) {
+    const connectTimeout = this.connectTimeoutMs();
+    const rpcTimeout = this.callTimeoutMs(upstreamName);
     for (let attempt = 0; ; attempt += 1) {
       const pending = this.clientFor(selection);
-      const entry = await pending;
+      let entry: ClientEntry;
+      try {
+        entry = await withTimeout(pending, connectTimeout, `${this.name} connect`);
+      } catch (error) {
+        await this.dropClient(selection, pending);
+        if (attempt > 0 || !isConnectionFailure(error)) throw error;
+        continue;
+      }
       this.beginUse(entry);
       try {
-        return await entry.client.callTool({ name: upstreamName, arguments: arguments_ });
+        return await entry.client.callTool(
+          { name: upstreamName, arguments: arguments_ },
+          undefined,
+          { timeout: rpcTimeout },
+        );
       } catch (error) {
         if (attempt > 0 || !isConnectionFailure(error)) throw error;
         await this.dropClient(selection, pending);
@@ -232,12 +275,32 @@ export class UpstreamMcpProvider {
     }
   }
 
-  private stdioIdleMs(): number {
-    if (this.config.integration.kind !== "stdio_mcp") return 0;
+  private connectTimeoutMs(): number {
+    if (this.config.integration.kind === "remote_mcp" || this.config.integration.kind === "stdio_mcp") {
+      const configured = this.config.integration.timeoutMs;
+      if (typeof configured === "number" && Number.isInteger(configured) && configured >= 1_000) {
+        return Math.min(configured, DISCOVERY_TIMEOUT_MS);
+      }
+    }
+    return DISCOVERY_TIMEOUT_MS;
+  }
+
+  private callTimeoutMs(upstreamName: string): number {
+    if (this.config.integration.kind === "remote_mcp" || this.config.integration.kind === "stdio_mcp") {
+      const configured = this.config.integration.timeoutMs;
+      if (typeof configured === "number" && Number.isInteger(configured) && configured >= 1_000) {
+        return configured;
+      }
+    }
+    return isLongRunningTool(upstreamName) ? DEFAULT_JOB_TIMEOUT_MS : DEFAULT_CALL_TIMEOUT_MS;
+  }
+
+  private idleTimeoutMs(): number {
+    if (this.config.integration.kind !== "stdio_mcp" && this.config.integration.kind !== "remote_mcp") return 0;
     const configured = this.config.integration.idleTimeoutMs;
     return typeof configured === "number" && Number.isInteger(configured) && configured >= 0
       ? configured
-      : DEFAULT_STDIO_IDLE_MS;
+      : DEFAULT_IDLE_TIMEOUT_MS;
   }
 
   private beginUse(entry: ClientEntry): void {
@@ -250,7 +313,11 @@ export class UpstreamMcpProvider {
 
   private endUse(selection: KeySelection, pending: Promise<ClientEntry>, entry: ClientEntry): void {
     entry.inFlight = Math.max(0, entry.inFlight - 1);
-    const idleMs = this.stdioIdleMs();
+    if (entry.closing) {
+      if (entry.inFlight === 0) void entry.close().catch(() => undefined);
+      return;
+    }
+    const idleMs = this.idleTimeoutMs();
     if (entry.inFlight > 0 || this.closed || idleMs <= 0) return;
     if (this.clients.get(selection.fingerprint) !== pending) return;
     if (entry.idleTimer) clearTimeout(entry.idleTimer);
@@ -295,8 +362,16 @@ export class UpstreamMcpProvider {
     if (expected && pending !== expected) return;
     this.clients.delete(selection.fingerprint);
     if (!pending) return;
-    // Close asynchronously so a hung connect() promise cannot defeat discovery timeouts.
-    void pending.then((entry) => entry.close()).catch(() => undefined);
+    // Unlist immediately so new calls build a fresh transport, but wait for healthy sibling calls to finish before closing.
+    void pending.then((entry) => {
+      entry.closing = true;
+      if (entry.idleTimer) {
+        clearTimeout(entry.idleTimer);
+        delete entry.idleTimer;
+      }
+      if (entry.inFlight === 0) return entry.close();
+      return undefined;
+    }).catch(() => undefined);
   }
 
   private async createClient(selection: KeySelection): Promise<ClientEntry> {
@@ -315,11 +390,19 @@ export class UpstreamMcpProvider {
       if (integration.auth.kind === "header") headers.set(integration.auth.name, selection.key);
       if (integration.auth.kind === "bearer") headers.set("Authorization", `Bearer ${selection.key}`);
       const transport = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
-      await client.connect(transport, { timeout: DISCOVERY_TIMEOUT_MS });
+      try {
+        await client.connect(transport, { timeout: this.connectTimeoutMs() });
+      } catch (error) {
+        await transport.close().catch(() => undefined);
+        throw error;
+      }
+      let closed = false;
       const entry: ClientEntry = {
         client,
         inFlight: 0,
         close: async () => {
+          if (closed) return;
+          closed = true;
           if (entry.idleTimer) {
             clearTimeout(entry.idleTimer);
             delete entry.idleTimer;
@@ -339,11 +422,19 @@ export class UpstreamMcpProvider {
       });
       // Drain stderr before connecting so a chatty startup cannot fill the OS pipe buffer and stall handshake.
       transport.stderr?.on("data", () => undefined);
-      await client.connect(transport, { timeout: DISCOVERY_TIMEOUT_MS });
+      try {
+        await client.connect(transport, { timeout: this.connectTimeoutMs() });
+      } catch (error) {
+        await transport.close().catch(() => undefined);
+        throw error;
+      }
+      let closed = false;
       const entry: ClientEntry = {
         client,
         inFlight: 0,
         close: async () => {
+          if (closed) return;
+          closed = true;
           if (entry.idleTimer) {
             clearTimeout(entry.idleTimer);
             delete entry.idleTimer;
@@ -358,6 +449,27 @@ export class UpstreamMcpProvider {
 }
 
 /**
+ * For fetch/scrape MCP tools, a negative JSON-RPC error whose message describes
+ * a target-page 401/403/404/429 (not a qualified provider key/quota fault) must
+ * become a TargetPageError so healthy API keys are never disabled.
+ */
+function normalizeFetchRpcError(error: unknown, intent: ToolIntent): unknown {
+  if (intent !== "fetch" || !error || typeof error !== "object" || !("code" in error)) return error;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code !== "number" || code >= 0) return error;
+  // Preserve MCP transport/timeout/invalid-params codes.
+  if (code === -32_000 || code === -32_001 || code === -32_601 || code === -32_602) return error;
+  const text = error instanceof Error ? error.message : String(error);
+  if (keyFaultStatusFromToolText(text, "fetch") !== undefined) return error;
+  const pageMatch = text.match(/(?:status(?:\s+code)?|HTTP)\s*:?\s*(401|403|404|410|429|451|5\d{2})\b/i);
+  const pageStatus = pageMatch?.[1] ? Number(pageMatch[1]) : undefined;
+  if (pageStatus !== undefined || /unauthori[sz]ed|forbidden|too\s+many\s+requests|rate[\s_-]?limit|blocked|captcha|cloudflare|not\s+found/i.test(text)) {
+    return new TargetPageError(text, pageStatus);
+  }
+  return error;
+}
+
+/**
  * Firecrawl 3.3x+ reports API failures as `{ success: false, error: { code, status } }`.
  * Only codes that describe the key count; a 403 there can be the target site refusing.
  */
@@ -365,9 +477,9 @@ export function structuredKeyFault(structured: unknown): number | undefined {
   const error = (structured as { error?: { code?: unknown; status?: unknown } } | undefined)?.error;
   if (!error || typeof error !== "object") return undefined;
   const code = typeof error.code === "string" ? error.code.toLowerCase() : "";
-  if (code === "insufficient_credits" || error.status === 402) return 402;
+  if (code === "insufficient_credits" || code === "index_daily_limit" || error.status === 402) return 402;
   if (code === "unauthorized" || error.status === 401) return 401;
-  if (code === "rate_limited" || code === "index_daily_limit" || error.status === 429) return 429;
+  if (code === "rate_limited" || error.status === 429) return 429;
   return undefined;
 }
 
@@ -452,13 +564,29 @@ export function appendRotationMetadata(
   };
   const extracted = extractUpstreamSearchItems(upstreamTool, record);
   const items = extracted ? dedupeItems(extracted) : undefined;
-  const content = items
-    ? [{ type: "text", text: renderItems(items) }]
+  const upstreamStructured = record.structuredContent && typeof record.structuredContent === "object"
+    ? record.structuredContent as Record<string, unknown>
+    : undefined;
+  const upstreamAnswer = typeof upstreamStructured?.answer === "string" && upstreamStructured.answer.trim()
+    ? upstreamStructured.answer
+    : undefined;
+  const upstreamWarnings = Array.isArray(upstreamStructured?.warnings) && upstreamStructured.warnings.length
+    ? upstreamStructured.warnings
+    : undefined;
+  const data = items
+    ? {
+        items,
+        ...(upstreamAnswer ? { answer: upstreamAnswer } : {}),
+        ...(upstreamWarnings ? { warnings: upstreamWarnings } : {}),
+      }
+    : undefined;
+  const content = data
+    ? [{ type: "text", text: renderPayload(data, { dedupe: false }) }]
     : Array.isArray(record.content) ? record.content : [];
   return {
     ...record,
     content: [routeBlock(route), ...content],
-    ...(items
+    ...(data
       ? {
           structuredContent: {
             provider,
@@ -466,7 +594,7 @@ export function appendRotationMetadata(
             route,
             keySlot: masked,
             latencyMs,
-            data: { items },
+            data,
           },
         }
       : {}),

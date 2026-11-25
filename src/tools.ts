@@ -5,11 +5,16 @@ const READ_ONLY_OPEN = { readOnlyHint: true, destructiveHint: false, openWorldHi
 export const STATUS_TOOL: Tool = {
   name: "search_pool_status",
   title: "Search provider and key-pool status",
-  description: "Masked provider and key-pool health, cool-downs, and startup warnings. verbose=true adds every key slot's counters and the exposed tool list. Never returns raw keys.",
+  description: "Masked provider and key-pool health, cool-downs, and startup warnings. verbose=true adds every key slot's counters and the exposed tool list. refreshQuota=true (owner-only) queries provider billing APIs concurrently before reporting status. Never returns raw keys.",
   inputSchema: {
     type: "object",
     properties: {
       verbose: { type: "boolean", default: false, description: "Include every masked key slot and the complete tool list." },
+      refreshQuota: {
+        type: "boolean",
+        default: false,
+        description: "Owner-only. Query provider billing APIs concurrently to refresh cached balances before returning status (ignored or rejected for non-owner tokens).",
+      },
     },
     additionalProperties: false,
   },
@@ -19,7 +24,7 @@ export const STATUS_TOOL: Tool = {
 export const AUTO_TOOL: Tool = {
   name: "search_auto",
   title: "Search with the recommended provider",
-  description: "Quality-first web search that picks the provider by mode, quality, and query language (Parallel, Serper, Exa, You.com, Octen, Brave, DeepSeek, Vercel AI Gateway, Tavily); Chinese queries use Chinese-market settings. Repeats within a few minutes are served from cache and marked cached. balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes (including REST and MCP providers). Never selects Doubao, research, crawl, or agentic tools.",
+  description: "Quality-first web search that picks the best enabled provider by mode, quality, and query language; Chinese queries use Chinese-market settings. Repeats within a few minutes are served from cache and marked cached. balanced suits routine work; max uses deeper retrieval for complex or multi-hop questions. Supports domain filtering, time windows, per-result excerpt budgets, and crossCheck=true across independent indexes. Never selects Doubao, research, crawl, or agentic tools.",
   inputSchema: {
     type: "object",
     properties: {
@@ -88,7 +93,7 @@ export const AUTO_TOOL: Tool = {
 export const IMAGES_TOOL: Tool = {
   name: "search_images",
   title: "Search for images",
-  description: "Find images by text (`query`: Brave Images, then Serper Google Images and Parallel), or by image (`imageUrl`: Google Lens reverse search for pages showing the same or a similar picture, to identify it or trace where it came from). Returns image URLs, source pages, and publishers. imageUrl must be publicly reachable; local files are not supported.",
+  description: "Find images by text (`query`: Brave Images, then Serper Google Images and Parallel), or by image (`imageUrl`: Google Lens reverse search for pages showing the same or a similar picture, to identify it or trace where it came from). Provide either `query` or `imageUrl` (not both). Returns image URLs, source pages, and publishers. imageUrl must be publicly reachable; local files are not supported.",
   inputSchema: {
     type: "object",
     properties: {
@@ -106,7 +111,7 @@ export const IMAGES_TOOL: Tool = {
 export const FETCH_TOOL: Tool = {
   name: "fetch_auto",
   title: "Read one or more known URLs",
-  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through Direct Markdown (`Accept: text/markdown`), Exa, DeepSeek, Vercel AI Gateway, Tavily, Parallel, TinyFish, You.com, Octen, Firecrawl, LinkUp, or AnySearch, falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with Firecrawl (JavaScript rendering).",
+  description: "Fetch the readable content of one known URL (`url`) or up to 5 URLs concurrently (`urls`) through enabled page readers (starting with zero-cost Direct Markdown when enabled), falling back when a reader returns nothing usable or hits a challenge wall. Supports `offset` pagination and `section` filtering for large pages. quality=max leads with JavaScript-rendered readers (Firecrawl).",
   inputSchema: {
     type: "object",
     properties: {
@@ -183,29 +188,24 @@ export const MANAGEMENT_TOOL_NAMES = new Set([
   STATUS_TOOL.name, AUTO_TOOL.name, IMAGES_TOOL.name, FETCH_TOOL.name, PROBE_TOOL.name,
   GATEWAY_LIST_TOOL.name, GATEWAY_CALL_TOOL.name,
 ]);
-/** Specialist tools with capabilities not covered by search_auto/fetch_auto/search_images, exposed directly in the curated profile. */
+/**
+ * Specialist tools with capabilities not covered by search_auto/fetch_auto/search_images,
+ * exposed directly in the curated profile. Redundant fetch wrappers and heavy async research/agent
+ * jobs remain callable via provider_tools + provider_call without inflating curated tool-list tokens.
+ */
 export const CURATED_SPECIALIST_TOOLS = new Set([
   "brave_llm_context",
   "parallel_search",
-  "parallel_extract",
   "you_search",
-  "you_contents",
   "deepseek_search",
-  "deepseek_fetch",
   "vercel_deepseek_search",
-  "vercel_deepseek_fetch",
   "vercel_parallel_fast",
   "serper_scholar",
   "exa_web_search_advanced_exa",
-  "exa_agent_run",
   "grok_x_search",
   "grok_web_x_search",
   "doubao_search",
   "anysearch_batch_search",
   "firecrawl_firecrawl_map",
   "firecrawl_firecrawl_crawl",
-  "firecrawl_firecrawl_check_crawl_status",
-  "linkup_linkup_research",
-  "tavily_tavily_research",
 ]);
-

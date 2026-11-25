@@ -5,31 +5,36 @@ import { cacheKey, ResultCache } from "./cache.js";
 import { integrationFingerprint, ToolCatalogCache, toolsFingerprint } from "./catalog.js";
 import { loadConfigWithNotes } from "./config.js";
 import {
-  CapabilityGateError, isPageFailure, PlanLimitError, shouldFailoverProvider, statusFromError, textOfContent, ToolResultError,
+  CapabilityGateError, InvalidRequestError, isPageFailure, isQuotaExhausted, isTimeout, PlanLimitError,
+  shouldFailoverProvider, statusFromError, textOfContent, ToolResultError,
 } from "./errors.js";
 import {
-  bodyText, combineBatchFetch, isUsableFetchResult, parseFetchUrls, readableFetchOutput, truncateBody, type TruncateOptions,
+  bodyText, combineBatchFetch, isUsableFetchResult, isUsableFetchText, parseFetchUrls, readableFetchOutput,
+  truncateBody, type TruncateOptions,
 } from "./fetching.js";
-import { mergeItems, type MergedItem } from "./merge.js";
-import {
-  attachRouteMetadata, bodyBlocks, cleanError, isRouteContentBlock, isToolErrorResult, registerKnownSecrets, result, routeBlock, type Route,
-  updateAutoMetadata,
-} from "./provenance.js";
-import { renderItems } from "./render.js";
-import { RestProvider } from "./rest/base.js";
-import { adapterFor } from "./rest/adapters.js";
 import { eligibleSlots, slotTier } from "./keys.js";
-import { FLAKY_SCORE, RotationStore } from "./rotation.js";
+import { dedupeItems, mergeItems, type MergedItem } from "./merge.js";
 import {
-  autoCandidates, autoMode, fetchCandidates, imageCandidates,
-  type AutoCandidate, type AutoQuality,
+  attachRouteMetadata, bodyBlocks, cleanError, isRouteContentBlock, isToolErrorResult, registerKnownSecrets,
+  result, routeBlock, type Route, updateAutoMetadata,
+} from "./provenance.js";
+import { readAllQuotas, type QuotaRow } from "./quota.js";
+import { renderItems, renderPayload } from "./render.js";
+import { adapterFor } from "./rest/adapters.js";
+import { RestProvider } from "./rest/base.js";
+import { FLAKY_SCORE, formatDuration, RotationStore } from "./rotation.js";
+import {
+  autoCandidates, autoMode, cleanDomains, fetchCandidates, imageCandidates,
+  type AutoCandidate, type AutoFreshness, type AutoQuality,
 } from "./routes.js";
 import { shapeTool } from "./shape.js";
 import {
   AUTO_TOOL, CURATED_SPECIALIST_TOOLS, FETCH_TOOL, GATEWAY_CALL_TOOL, GATEWAY_LIST_TOOL, GATEWAY_TOOL_NAMES,
   IMAGES_TOOL, MANAGEMENT_TOOL_NAMES, PROBE_TOOL, STATUS_TOOL,
 } from "./tools.js";
-import type { AutoCapability, ProviderConfig, SearchItem, ToolBinding, ToolkitConfig, ToolkitProfile } from "./types.js";
+import type {
+  AutoCapability, CallToolOptions, ProviderConfig, SearchItem, ToolBinding, ToolkitConfig, ToolkitProfile,
+} from "./types.js";
 import { UpstreamMcpProvider } from "./upstream.js";
 
 export { isUsableFetchText, truncateBody, type TruncateOptions } from "./fetching.js";
@@ -79,8 +84,18 @@ interface CrossCheckSummary {
   corroborated: number;
 }
 
+interface FetchCacheEntry {
+  output?: unknown;
+  requestChars?: number;
+  providerCapped?: boolean;
+}
+
 /** Readers that return their JSON envelope as text. */
 const ENVELOPE_READERS = new Set(["tavily", "firecrawl"]);
+/** Fetch providers that accept and enforce a max-characters cap on their response. */
+const CAPPED_FETCH_PROVIDERS = new Set(["exa", "parallel"]);
+/** Zero-cost promotional tools that remain usable even when a provider's paid credit balance hits 402. */
+const ZERO_COST_PROMO_TOOLS = new Set(["vercel_parallel_fast"]);
 
 export interface ToolkitOptions {
   profile?: ToolkitProfile;
@@ -112,7 +127,10 @@ export class SearchToolkit {
   private readonly validators = new Map<string, Validator | null>();
   private readonly validatorFactory = new AjvJsonSchemaValidator();
   private readonly catalog: ToolCatalogCache;
+  private readonly inflight = new Map<string, Promise<unknown>>();
+  private readonly fetchInflight = new Map<string, { requestChars: number; promise: Promise<{ output: unknown; readable: boolean }> }>();
   private closed = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(configPath?: string, options: ToolkitOptions = {}) {
     const loaded = loadConfigWithNotes(configPath);
@@ -126,10 +144,18 @@ export class SearchToolkit {
       Object.entries(this.config.providers).map(([name, provider]) => [name, provider.keys]),
     ));
     this.profile = options.profile ?? profileFromEnv() ?? this.config.profile ?? "full";
-    this.catalog = new ToolCatalogCache(join(dirname(this.config.statePath), "tool-catalog.json"));
+    this.catalog = new ToolCatalogCache(
+      this.rotation.database(),
+      join(dirname(this.config.statePath), "tool-catalog.json"),
+    );
     const cache = this.config.cache ?? {};
     const cacheOn = options.cache ?? (process.env.SEARCH_TOOLKIT_CACHE !== "off" && cache.enabled !== false);
-    this.cache = cacheOn ? new ResultCache(this.rotation.database()) : undefined;
+    this.cache = cacheOn
+      ? new ResultCache(this.rotation.database(), {
+          ...(cache.maxEntries !== undefined ? { maxEntries: cache.maxEntries } : {}),
+          ...(cache.maxTotalBytes !== undefined ? { maxTotalBytes: cache.maxTotalBytes } : {}),
+        })
+      : undefined;
     this.cacheTtl = {
       search: (cache.searchTtlSeconds ?? 900) * 1000,
       news: (cache.newsTtlSeconds ?? 300) * 1000,
@@ -139,10 +165,11 @@ export class SearchToolkit {
 
   async initialize(): Promise<void> {
     const providers = Object.entries(this.config.providers).filter(([, config]) => config.enabled);
+    const pendingRefreshes: Array<() => void> = [];
     // Providers are independent, so connect and discover them concurrently.
     const settled = await Promise.all(providers.map(async ([name, config]) => {
       try {
-        return { name, bindings: await this.providerBindings(name, config) };
+        return { name, bindings: await this.providerBindings(name, config, pendingRefreshes) };
       } catch (error) {
         this.warnings.push(`${name}: ${cleanError(error)}`);
         return { name, bindings: { shaped: [] as ToolBinding[], full: [] as Tool[] } };
@@ -156,6 +183,8 @@ export class SearchToolkit {
       }
     }
     for (const managed of this.managementBindings()) this.bindings.set(managed.exposed.name, managed);
+    // Start stale background catalog refreshes only after initial registrations finish so fast refreshes cannot be overwritten.
+    for (const startRefresh of pendingRefreshes) startRefresh();
   }
 
   /** Tools visible to MCP clients under the active profile (or a per-token HTTP profile override). */
@@ -167,35 +196,67 @@ export class SearchToolkit {
     return exposed.filter((tool) => !GATEWAY_TOOL_NAMES.has(tool.name));
   }
 
+  /** Convenience helper returning visible tools filtered by profile and optional allowTool predicate. */
+  visibleTools(
+    profileOrAllow?: ToolkitProfile | ((tool: Tool) => boolean),
+    allowTool?: (tool: Tool) => boolean,
+  ): Tool[] {
+    const profile = typeof profileOrAllow === "string" ? profileOrAllow : undefined;
+    const filter = typeof profileOrAllow === "function" ? profileOrAllow : allowTool;
+    return this.listTools(profile).filter((tool) => filter?.(tool) ?? true);
+  }
+
   /** Subscribe to tool-catalog changes (an upstream's tools changed after a background refresh). */
   onToolsChanged(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
+  /** Refresh live balance/quota readings from enabled providers' billing APIs. */
+  async refreshQuotas(options?: { providers?: string[]; force?: boolean }): Promise<QuotaRow[]> {
+    return readAllQuotas(this.config.providers, this.rotation, options);
+  }
+
   async callTool(
     name: string,
     arguments_: Record<string, unknown>,
-    callOptions?: { profile?: ToolkitProfile; allowTool?: (tool: Tool) => boolean },
+    callOptions?: CallToolOptions,
   ): Promise<unknown> {
     const binding = this.bindings.get(name);
     if (!binding) throw new Error(`Unknown Search Toolkit tool: ${name}`);
     const args = this.validateArguments(binding.exposed, arguments_);
     if (name === GATEWAY_LIST_TOOL.name) return this.gatewayList(args, callOptions?.allowTool);
-    if (name === STATUS_TOOL.name) return result(this.status(args.verbose === true, callOptions));
+    if (name === GATEWAY_CALL_TOOL.name) return this.gatewayCall(args, callOptions?.allowTool);
+    if (name === PROBE_TOOL.name) return this.probe(args, callOptions?.allowTool);
+    if (name === STATUS_TOOL.name) {
+      if (args.refreshQuota === true) {
+        if (callOptions?.isOwner === false) {
+          throw new Error("refreshQuota requires owner access");
+        }
+        const quotaRows = await this.refreshQuotas();
+        const snapshot = this.status(args.verbose === true, callOptions) as Record<string, unknown>;
+        return result({ ...snapshot, quotaRefresh: quotaRows });
+      }
+      return result(this.status(args.verbose === true, callOptions));
+    }
     return this.invokeBinding(binding, args);
   }
 
   private async invokeBinding(binding: ToolBinding, args: Record<string, unknown>): Promise<unknown> {
-    if (!CACHED_DIRECT_PROVIDERS.has(binding.provider)) return binding.call(args);
+    const callOpts = ZERO_COST_PROMO_TOOLS.has(binding.exposed.name) ? { allowExhausted: true } : undefined;
+    if (!CACHED_DIRECT_PROVIDERS.has(binding.provider)) return binding.call(args, callOpts);
     // A Grok multi-agent answer costs dollars; asking the same question again within minutes reuses it.
     const key = cacheKey(binding.exposed.name, { ...args, query: typeof args.query === "string" ? args.query.trim() : args.query });
     const hit = this.fromCache(key);
     if (hit) return hit;
-    const output = await binding.call(args);
-    // Do not cache unsourced model-memory fallback answers from Grok.
-    if (binding.provider === "grok" && /^\[Grok no /m.test(bodyText(output))) return output;
-    return this.remember(key, output, this.cacheTtl.search);
+    return this.withSingleflight(key, async () => {
+      const recheck = this.fromCache(key);
+      if (recheck) return recheck;
+      const output = await binding.call(args, callOpts);
+      // Do not cache unsourced model-memory fallback answers from Grok.
+      if (binding.provider === "grok" && /^\[Grok no /m.test(bodyText(output))) return output;
+      return this.remember(key, output, this.cacheTtl.search);
+    });
   }
 
   /** Validate and default arguments against the exposed schema. A schema the validator cannot compile is left to the upstream. */
@@ -211,19 +272,23 @@ export class SearchToolkit {
     }
     if (!validator) return arguments_;
     const validation = validator(arguments_ ?? {});
-    if (!validation.valid) throw new Error(`Invalid arguments for ${tool.name}: ${validation.errorMessage}`);
+    if (!validation.valid) throw new InvalidRequestError(`Invalid arguments for ${tool.name}: ${validation.errorMessage}`);
     return validation.data as Record<string, unknown>;
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
     this.closed = true;
-    this.listeners.clear();
-    await Promise.allSettled(Array.from(this.upstreams.values(), (provider) => provider.close()));
-    this.rotation.close();
-    this.cache?.close();
+    this.closePromise ??= (async () => {
+      this.listeners.clear();
+      await Promise.allSettled(Array.from(this.upstreams.values(), (provider) => provider.close()));
+      this.catalog.close();
+      this.rotation.close();
+      this.cache?.close();
+    })();
+    return this.closePromise;
   }
 
-  status(verbose = false, scope?: { profile?: ToolkitProfile; allowTool?: (tool: Tool) => boolean }): unknown {
+  status(verbose = false, scope?: Pick<CallToolOptions, "profile" | "allowTool">): unknown {
     const activeProfile = scope?.profile ?? this.profile;
     const tools = this.listTools(activeProfile).filter((tool) => scope?.allowTool?.(tool) ?? true);
     const failureScores = this.rotation.providerFailureScores();
@@ -249,7 +314,11 @@ export class SearchToolkit {
     };
   }
 
-  private async providerBindings(name: string, config: ProviderConfig): Promise<{ shaped: ToolBinding[]; full: Tool[] }> {
+  private async providerBindings(
+    name: string,
+    config: ProviderConfig,
+    pendingRefreshes: Array<() => void>,
+  ): Promise<{ shaped: ToolBinding[]; full: Tool[] }> {
     let bindings: ToolBinding[];
     if (config.integration.kind === "rest") {
       bindings = new RestProvider(name, config, this.rotation, adapterFor(config.integration.adapter)).bindings();
@@ -262,7 +331,10 @@ export class SearchToolkit {
       if (cached) {
         // Ready immediately from the snapshot; the upstream is contacted on first use.
         tools = cached.tools;
-        if (cached.stale) this.refreshCatalog(name, config, provider, fingerprint, toolsFingerprint(tools));
+        if (cached.stale) {
+          const known = toolsFingerprint(tools);
+          pendingRefreshes.push(() => this.refreshCatalog(name, config, provider, fingerprint, known));
+        }
       } else {
         tools = await provider.discover();
         this.catalog.set(name, fingerprint, tools);
@@ -275,8 +347,9 @@ export class SearchToolkit {
   private shapeBindings(config: ProviderConfig, bindings: ToolBinding[]): { shaped: ToolBinding[]; full: Tool[] } {
     const full: Tool[] = [];
     const shaped = bindings.map((binding) => {
-      full.push(binding.exposed);
       const override = config.toolPolicy?.descriptions?.[binding.upstreamName];
+      // Preserve operator description overrides in provider_tools(name) while keeping full parameter schemas.
+      full.push(override !== undefined ? { ...binding.exposed, description: override } : binding.exposed);
       return { ...binding, exposed: shapeTool(binding.exposed, this.config.shaping, override) };
     });
     return { shaped, full };
@@ -310,9 +383,15 @@ export class SearchToolkit {
       if (this.closed) return;
       this.catalog.set(name, fingerprint, tools);
       if (toolsFingerprint(tools) === known) return;
-      this.registerProvider(name, this.shapeBindings(config, filterBindings(config, provider.bindingsFor(tools))));
-      for (const listener of this.listeners) listener();
-    }).catch(() => undefined);
+      try {
+        this.registerProvider(name, this.shapeBindings(config, filterBindings(config, provider.bindingsFor(tools))));
+        for (const listener of this.listeners) listener();
+      } catch (error) {
+        this.warnings.push(`${name} catalog refresh: ${cleanError(error)}`);
+      }
+    }).catch((error) => {
+      if (!this.closed) this.warnings.push(`${name} catalog refresh: ${cleanError(error)}`);
+    });
   }
 
   private managementBindings(): ToolBinding[] {
@@ -327,82 +406,126 @@ export class SearchToolkit {
     ];
   }
 
+  private withSingleflight<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const existing = this.inflight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = work().finally(() => {
+      if (this.inflight.get(key) === promise) this.inflight.delete(key);
+    });
+    this.inflight.set(key, promise);
+    return promise;
+  }
+
   private async callAuto(args: Record<string, unknown>): Promise<unknown> {
     const mode = autoMode(args.mode);
     const quality: AutoQuality = args.quality === "max" ? "max" : "balanced";
     const limit = Number(args.limit ?? 6);
-    const maxCharsPerItem = typeof args.maxCharsPerResult === "number"
-      ? args.maxCharsPerResult
-      : quality === "max" ? DEFAULT_MAX_EXCERPT_CHARS : DEFAULT_BALANCED_EXCERPT_CHARS;
+    const explicitMaxChars = typeof args.maxCharsPerResult === "number" ? args.maxCharsPerResult : undefined;
+    const maxCharsPerItem = explicitMaxChars
+      ?? (quality === "max" ? DEFAULT_MAX_EXCERPT_CHARS : DEFAULT_BALANCED_EXCERPT_CHARS);
     const query = String(args.query ?? "");
+    const includeDomains = cleanDomains(args.includeDomains);
+    const excludeDomains = cleanDomains(args.excludeDomains);
+    const effectiveFreshness = normalizedFreshness(mode, args.freshness);
     const key = cacheKey("search_auto:v2", {
-      query: query.trim(), mode, quality, limit, freshness: args.freshness,
-      includeDomains: canonicalDomainList(args.includeDomains),
-      excludeDomains: canonicalDomainList(args.excludeDomains),
-      maxCharsPerResult: args.maxCharsPerResult,
-      maximumNumberOfTokens: mode === "context" ? args.maximumNumberOfTokens : undefined, crossCheck: args.crossCheck === true,
+      query: query.trim(),
+      mode,
+      quality,
+      limit,
+      freshness: effectiveFreshness,
+      includeDomains: includeDomains.length ? [...new Set(includeDomains)].sort() : undefined,
+      excludeDomains: excludeDomains.length ? [...new Set(excludeDomains)].sort() : undefined,
+      maxCharsPerResult: explicitMaxChars,
+      maximumNumberOfTokens: mode === "context" ? args.maximumNumberOfTokens : undefined,
+      crossCheck: args.crossCheck === true,
     });
     const hit = this.fromCache(key);
     if (hit) return hit;
-    const ttl = mode === "current" ? this.cacheTtl.news : this.cacheTtl.search;
-    const candidates = autoCandidates(mode, quality, args);
-    const spec: ChainSpec = {
-      tool: "search_auto",
-      capability: "search",
-      maxProviders: 3,
-      meta: { mode, quality },
-      emptyError: `No automatic provider is available for mode ${mode}`,
-      usable: mode === "context" ? hasContextContent : (output) => itemsOf(output)?.length !== 0,
-    };
-    let remaining = candidates;
-    let history: ChainHistory | undefined;
-    if (args.crossCheck === true && mode !== "context") {
-      const checked = await this.crossCheck(candidates, spec, limit, maxCharsPerItem, query);
-      if (checked) {
-        if (checked.output) return checked.summary.status === "complete" ? this.remember(key, checked.output, ttl) : checked.output;
-        // Both sides were unusable. Spend the remaining attempt on a different provider.
-        const tried = new Set(checked.attempts.map((attempt) => attempt.provider));
-        remaining = candidates.filter((candidate) => !tried.has(this.bindings.get(candidate.name)?.provider ?? ""));
-        spec.meta.crossCheck = checked.summary;
-        history = checked;
-      } else spec.meta.crossCheck = { routes: [], status: "unavailable", corroborated: 0 };
-    }
-    const output = await this.runChain(remaining, spec, history);
-    const rendered = mode === "context" ? output : capSearchOutput(output, maxCharsPerItem, limit, query);
-    return history ? rendered : this.remember(key, rendered, ttl);
+
+    return this.withSingleflight(key, async () => {
+      const recheck = this.fromCache(key);
+      if (recheck) return recheck;
+      const ttl = mode === "current" ? this.cacheTtl.news : this.cacheTtl.search;
+      const candidates = autoCandidates(mode, quality, args);
+      const hasDomainFilter = includeDomains.length > 0 || excludeDomains.length > 0;
+      const domainTransform = hasDomainFilter
+        ? (output: unknown) => filterOutputByDomains(output, includeDomains, excludeDomains)
+        : undefined;
+      const spec: ChainSpec = {
+        tool: "search_auto",
+        capability: "search",
+        maxProviders: 3,
+        meta: { mode, quality },
+        emptyError: `No automatic provider is available for mode ${mode}`,
+        usable: mode === "context" ? hasContextContent : (output) => itemsOf(output)?.length !== 0,
+        ...(domainTransform ? { transform: domainTransform } : {}),
+      };
+      let remaining = candidates;
+      let history: ChainHistory | undefined;
+      if (args.crossCheck === true && mode !== "context") {
+        const checked = await this.crossCheck(candidates, spec, limit, maxCharsPerItem, query, includeDomains, excludeDomains);
+        if (checked) {
+          if (checked.output) return checked.summary.status === "complete" ? this.remember(key, checked.output, ttl) : checked.output;
+          if (checked.fatalError) throw checked.fatalError;
+          // Both sides were unusable. Spend the remaining attempt on a different provider.
+          const tried = new Set(checked.attempts.map((attempt) => attempt.provider));
+          remaining = candidates.filter((candidate) => !tried.has(this.bindings.get(candidate.name)?.provider ?? ""));
+          spec.meta.crossCheck = checked.summary;
+          history = checked;
+        } else spec.meta.crossCheck = { routes: [], status: "unavailable", corroborated: 0 };
+      }
+      const output = await this.runChain(remaining, spec, history);
+      // Context mode keeps full passages unless maxCharsPerResult was explicitly given, while still capping item count.
+      const capChars = mode === "context" ? explicitMaxChars : maxCharsPerItem;
+      const rendered = capSearchOutput(output, capChars, limit, query);
+      return history ? rendered : this.remember(key, rendered, ttl);
+    });
   }
 
   private async callImageSearch(args: Record<string, unknown>): Promise<unknown> {
     const imageUrl = typeof args.imageUrl === "string" ? args.imageUrl.trim() : "";
     const query = typeof args.query === "string" ? args.query.trim() : "";
-    if (!imageUrl && !query) throw new Error("Invalid arguments for search_images: provide query (text) or imageUrl (an image to search by)");
+    if (imageUrl && query) {
+      throw new InvalidRequestError("Invalid arguments for search_images: provide either query or imageUrl, not both");
+    }
+    if (!imageUrl && !query) {
+      throw new InvalidRequestError("Invalid arguments for search_images: provide query (text) or imageUrl (an image to search by)");
+    }
     if (imageUrl) {
       let parsed: URL;
       try {
         parsed = new URL(imageUrl);
       } catch {
-        throw new Error("Invalid arguments for search_images: imageUrl must be a public http(s) URL; local files cannot be searched by image");
+        throw new InvalidRequestError("Invalid arguments for search_images: imageUrl must be a public http(s) URL; local files cannot be searched by image");
       }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error("Invalid arguments for search_images: imageUrl must be a public http(s) URL; local files cannot be searched by image");
+        throw new InvalidRequestError("Invalid arguments for search_images: imageUrl must be a public http(s) URL; local files cannot be searched by image");
       }
       if (parsed.username || parsed.password) {
-        throw new Error("Invalid arguments for search_images: imageUrl must not contain embedded credentials");
+        throw new InvalidRequestError("Invalid arguments for search_images: imageUrl must not contain embedded credentials");
       }
     }
     const key = cacheKey("search_images", {
-      query: imageUrl ? undefined : query, imageUrl: imageUrl || undefined, limit: args.limit, language: args.language, safesearch: args.safesearch,
+      query: imageUrl ? undefined : query,
+      imageUrl: imageUrl || undefined,
+      limit: args.limit,
+      language: args.language,
+      safesearch: args.safesearch,
     });
     const hit = this.fromCache(key);
     if (hit) return hit;
-    return this.remember(key, await this.runChain(imageCandidates(args), {
-      tool: "search_images",
-      capability: "images",
-      maxProviders: 2,
-      meta: { mode: imageUrl ? "reverse-image" : "images" },
-      emptyError: "No automatic image-search provider is available",
-      usable: (output) => itemsOf(output)?.length !== 0,
-    }), this.cacheTtl.search);
+    return this.withSingleflight(key, async () => {
+      const recheck = this.fromCache(key);
+      if (recheck) return recheck;
+      return this.remember(key, await this.runChain(imageCandidates(args), {
+        tool: "search_images",
+        capability: "images",
+        maxProviders: 2,
+        meta: { mode: imageUrl ? "reverse-image" : "images" },
+        emptyError: "No automatic image-search provider is available",
+        usable: (output) => itemsOf(output)?.length !== 0,
+      }), this.cacheTtl.search);
+    });
   }
 
   private async callFetch(args: Record<string, unknown>): Promise<unknown> {
@@ -416,11 +539,11 @@ export class SearchToolkit {
       ...(section ? { section } : {}),
     };
     if (urls.length === 1) {
-      return this.fetchSingleUrl(urls[0] as string, quality, maxChars, truncateOpts);
+      return this.fetchSingleUrl(urls[0] as string, quality, maxChars, truncateOpts, false);
     }
     const perUrlChars = Math.floor(maxChars / urls.length);
     const settled = await Promise.allSettled(
-      urls.map((url) => this.fetchSingleUrl(url, quality, perUrlChars, truncateOpts)),
+      urls.map((url) => this.fetchSingleUrl(url, quality, perUrlChars, truncateOpts, true)),
     );
     return combineBatchFetch(urls, settled, quality);
   }
@@ -430,46 +553,76 @@ export class SearchToolkit {
     quality: AutoQuality,
     maxChars: number,
     truncateOpts: TruncateOptions,
+    isBatch: boolean,
   ): Promise<unknown> {
     // Read one character beyond the window (and at least 500 chars so small batch budgets do not trigger thin-page fallbacks).
     const baseChars = Math.max(500, (truncateOpts.offset ?? 0) + maxChars + 1);
     const requestChars = truncateOpts.section ? Math.max(baseChars, 100_000) : baseChars;
+    const hintContext = {
+      ...(isBatch ? { isBatch: true } : {}),
+      ...(truncateOpts.section ? { section: truncateOpts.section } : {}),
+    };
     // One cached read serves later pages and sections of the same document while it covers them.
     const key = cacheKey("fetch_auto:v2", { url, quality });
     const hit = this.cache?.get(key);
-    const cached = hit?.value as { output?: unknown; requestChars?: number } | undefined;
-    if (hit && cached?.output && coversRequest(cached.output, cached.requestChars ?? 0, requestChars)) {
-      return truncateBody(markCached(cached.output, hit.ageMs), maxChars, truncateOpts, "readable");
+    const cached = hit?.value as FetchCacheEntry | undefined;
+    if (hit && cached?.output && coversRequest(cached.output, cached.requestChars ?? 0, requestChars, cached.providerCapped)) {
+      return truncateBody(markCached(cached.output, hit.ageMs), maxChars, truncateOpts, "readable", hintContext);
     }
-    const output = await this.runChain(fetchCandidates(quality, { url, maxChars: requestChars }), {
-      tool: "fetch_auto",
-      capability: "fetch",
-      maxProviders: 3,
-      meta: { mode: "fetch", quality },
-      emptyError: "No automatic fetch provider is available",
-      usable: isUsableFetchResult,
-      failover: isPageFailure,
-      transform: (candidate, provider) => ENVELOPE_READERS.has(provider) ? readableFetchOutput(candidate) : candidate,
-    });
-    const readable = succeeded(output);
-    if (readable) this.cache?.set(key, { output, requestChars }, this.cacheTtl.fetch);
-    return truncateBody(output, maxChars, truncateOpts, readable ? "readable" : "partial");
+
+    const activeFetch = this.fetchInflight.get(key);
+    if (activeFetch && activeFetch.requestChars >= requestChars) {
+      const { output, readable } = await activeFetch.promise;
+      return truncateBody(output, maxChars, truncateOpts, readable ? "readable" : "partial", hintContext);
+    }
+
+    const runFetch = (async () => {
+      const output = await this.runChain(fetchCandidates(quality, { url, maxChars: requestChars }), {
+        tool: "fetch_auto",
+        capability: "fetch",
+        maxProviders: 3,
+        meta: { mode: "fetch", quality },
+        emptyError: "No automatic fetch provider is available",
+        usable: isUsableFetchResult,
+        failover: isPageFailure,
+        transform: (candidate, provider) => ENVELOPE_READERS.has(provider) ? readableFetchOutput(candidate) : candidate,
+      });
+      const readable = succeeded(output);
+      if (readable) {
+        const provider = (output as { structuredContent?: { route?: { provider?: string } } })?.structuredContent?.route?.provider;
+        const providerCapped = provider ? CAPPED_FETCH_PROVIDERS.has(provider) : true;
+        this.cache?.set(key, { output, requestChars, providerCapped } satisfies FetchCacheEntry, this.cacheTtl.fetch);
+      }
+      return { output, readable };
+    })();
+
+    const tracker = { requestChars, promise: runFetch };
+    this.fetchInflight.set(key, tracker);
+    try {
+      const { output, readable } = await runFetch;
+      return truncateBody(output, maxChars, truncateOpts, readable ? "readable" : "partial", hintContext);
+    } finally {
+      if (this.fetchInflight.get(key) === tracker) this.fetchInflight.delete(key);
+    }
   }
 
-  private eligible(candidates: AutoCandidate[], capability: AutoCapability) {
+  private eligibleBuckets(candidates: AutoCandidate[], capability: AutoCapability): {
+    active: RoutedCandidate[];
+    cooling: RoutedCandidate[];
+  } {
     const matched = candidates
       .map((candidate, index) => ({ candidate, candidateRank: index + 1, binding: this.bindings.get(candidate.name) }))
-      .filter((entry): entry is typeof entry & { binding: ToolBinding } => {
+      .filter((entry): entry is RoutedCandidate => {
         if (!entry.binding) return false;
         return this.config.providers[entry.binding.provider]?.auto.includes(capability) === true;
       });
     // Healthy providers first, then ones failing repeatedly right now, then ones left only with
-    // exhausted keys (worth one last try), then ones with every usable key benched.
+    // exhausted keys (worth one last try); cooling providers (all keys benched) are kept separate.
     const scores = this.rotation.providerFailureScores(capability);
-    const ready: typeof matched = [];
-    const flaky: typeof matched = [];
-    const sunk: typeof matched = [];
-    const cooling: typeof matched = [];
+    const ready: RoutedCandidate[] = [];
+    const flaky: RoutedCandidate[] = [];
+    const sunk: RoutedCandidate[] = [];
+    const cooling: RoutedCandidate[] = [];
     for (const entry of matched) {
       const provider = entry.binding.provider;
       const config = this.config.providers[provider];
@@ -477,45 +630,63 @@ export class SearchToolkit {
       const slots = config ? eligibleSlots(config, [entry.binding.upstreamName, entry.binding.exposed.name]) : undefined;
       // Capability-gated with zero eligible slots (e.g., paid-only tool on a free-only pool): skip outright.
       if (slots && slots.length === 0) continue;
-      if (keys.length > 0 && this.rotation.usableSlots(provider, keys, slots).length === 0) {
-        (this.rotation.sunkSlots(provider, keys, slots).length ? sunk : cooling).push(entry);
-      } else if ((scores.get(provider) ?? 0) >= FLAKY_SCORE) flaky.push(entry);
+      if (keys.length > 0) {
+        const allowExhausted = ZERO_COST_PROMO_TOOLS.has(entry.binding.exposed.name);
+        const summary = this.rotation.slotSummary(provider, keys, slots, allowExhausted);
+        if (summary.healthy.length === 0) {
+          (summary.sunk.length > 0 ? sunk : cooling).push(entry);
+          continue;
+        }
+      }
+      if ((scores.get(provider) ?? 0) >= FLAKY_SCORE) flaky.push(entry);
       else ready.push(entry);
     }
-    return [...ready, ...flaky, ...sunk, ...cooling];
+    return { active: [...ready, ...flaky, ...sunk], cooling };
   }
 
   /** Try candidates in order; move on only after a recognised availability failure or an unusable answer. */
   private async runChain(candidates: AutoCandidate[], spec: ChainSpec, history?: ChainHistory): Promise<unknown> {
-    const eligible = this.eligible(candidates, spec.capability);
+    const { active, cooling } = this.eligibleBuckets(candidates, spec.capability);
+    // Avoid selecting cooling providers when active providers exist (prevents pointless local errors);
+    // fall back to cooling only when nothing else exists so recovery-time diagnostics are surfaced.
+    const eligible = active.length > 0 || history ? active : cooling;
     if (!eligible.length && !history) throw new Error(spec.emptyError);
 
     const attempts = history ? [...history.attempts] : [];
     let lastError = history?.lastError;
     let fallback = history?.fallback;
     let realAttempts = attempts.filter((attempt) => attempt.outcome !== "skipped").length;
+    const providerWideFailed = new Set<string>();
+    const providerExhausted = new Set<string>();
+
     for (const entry of eligible) {
       if (realAttempts >= spec.maxProviders) break;
-      const base = { provider: entry.binding.provider, tool: entry.binding.exposed.name, candidateRank: entry.candidateRank };
-      const isZeroCostProbe = entry.binding.exposed.name === "direct_markdown_fetch";
+      const provider = entry.binding.provider;
+      const toolName = entry.binding.exposed.name;
+      if (providerWideFailed.has(provider)) continue;
+      if (providerExhausted.has(provider) && !ZERO_COST_PROMO_TOOLS.has(toolName)) continue;
+
+      const base = { provider, tool: toolName, candidateRank: entry.candidateRank };
+      const isZeroCostProbe = toolName === "direct_markdown_fetch";
       try {
-        const raw = await entry.binding.call(adaptCandidateArguments(entry.binding.exposed, entry.candidate.nativeArguments ?? {}));
+        const callOpts = ZERO_COST_PROMO_TOOLS.has(toolName) ? { allowExhausted: true } : undefined;
+        const raw = await entry.binding.call(adaptCandidateArguments(entry.binding.exposed, entry.candidate.nativeArguments ?? {}), callOpts);
         if (isToolErrorResult(raw)) {
           throw new ToolResultError(textOfContent(bodyBlocks(raw)).slice(0, 500), bodyBlocks(raw));
         }
-        const output = spec.transform ? spec.transform(raw, entry.binding.provider) : raw;
+        const output = spec.transform ? spec.transform(raw, provider) : raw;
         if (isToolErrorResult(output)) {
           throw new ToolResultError(textOfContent(bodyBlocks(output)).slice(0, 500), bodyBlocks(output));
         }
         if (spec.usable && !spec.usable(output)) {
           attempts.push({ ...base, outcome: "empty" });
           realAttempts += 1;
-          if (!fallback || bodyText(output).length > bodyText(fallback.output).length) fallback = { entry, output };
+          if (!fallback || isBetterFallback(output, fallback.output)) fallback = { entry, output };
           continue;
         }
         attempts.push({ ...base, outcome: "success" });
         realAttempts += 1;
-        this.noteOutcome(entry.binding.provider, false, spec.capability);
+        this.noteOutcome(provider, false, spec.capability);
         return attachRouteMetadata(entry.binding, output, {
           ...spec.meta,
           candidateRank: entry.candidateRank,
@@ -533,17 +704,22 @@ export class SearchToolkit {
         });
         if (!skippedProbe) {
           realAttempts += 1;
-          if (shouldPenalizeProvider(error)) this.noteOutcome(entry.binding.provider, true, spec.capability);
+          if (shouldPenalizeProvider(error)) this.noteOutcome(provider, true, spec.capability);
+          if (isQuotaExhausted(error)) {
+            providerExhausted.add(provider);
+          } else if (isProviderWideFault(error, status)) {
+            providerWideFailed.add(provider);
+          }
         }
         if (!shouldFailoverProvider(error) && !spec.failover?.(error)) throw autoFailure(error, attempts, spec.tool);
       }
     }
     if (fallback) {
-      // Every reader answered thinly; return the fullest answer rather than an error.
+      // Every reader answered thinly; return the fullest non-challenge answer rather than an error.
       return attachRouteMetadata(fallback.entry.binding, fallback.output, {
         ...spec.meta,
         candidateRank: fallback.entry.candidateRank,
-        providerAttempt: attempts.length,
+        providerAttempt: realAttempts,
         attempts,
       });
     }
@@ -560,9 +736,12 @@ export class SearchToolkit {
     limit: number,
     maxCharsPerItem: number,
     query: string,
-  ): Promise<(ChainHistory & { output?: unknown; summary: CrossCheckSummary }) | undefined> {
+    includeDomains: string[],
+    excludeDomains: string[],
+  ): Promise<(ChainHistory & { output?: unknown; summary: CrossCheckSummary; fatalError?: Error }) | undefined> {
     const seen = new Set<string>();
-    const pair = this.eligible(candidates, spec.capability).filter((entry) => {
+    const { active } = this.eligibleBuckets(candidates, spec.capability);
+    const pair = active.filter((entry) => {
       const provider = entry.binding.provider;
       if (seen.has(provider)) return false;
       seen.add(provider);
@@ -570,37 +749,59 @@ export class SearchToolkit {
     }).slice(0, 2);
     if (pair.length < 2) return undefined;
 
-    const settled = await Promise.allSettled(pair.map((entry) => entry.binding.call({ ...(entry.candidate.nativeArguments ?? {}) })));
+    const settled = await Promise.allSettled(
+      pair.map((entry) => entry.binding.call(
+        adaptCandidateArguments(entry.binding.exposed, entry.candidate.nativeArguments ?? {}),
+        ZERO_COST_PROMO_TOOLS.has(entry.binding.exposed.name) ? { allowExhausted: true } : undefined,
+      )),
+    );
     const lists: Array<{ provider: string; items: MergedItem[] }> = [];
     const routes: Route[] = [];
     const failed: string[] = [];
     const empty: string[] = [];
+    const errors: unknown[] = [];
     const history: ChainHistory = { attempts: [] };
+    const hasDomainFilter = includeDomains.length > 0 || excludeDomains.length > 0;
+
     settled.forEach((outcome, index) => {
       const entry = pair[index] as RoutedCandidate;
       const { provider, upstreamName, exposed } = entry.binding;
       const base = { provider, tool: exposed.name, candidateRank: entry.candidateRank };
       if (outcome.status === "rejected") {
         history.lastError = outcome.reason;
+        errors.push(outcome.reason);
         const status = statusFromError(outcome.reason);
         history.attempts.push({ ...base, outcome: "error", ...(status ? { status } : {}) });
         failed.push(provider);
         if (shouldPenalizeProvider(outcome.reason)) this.noteOutcome(provider, true, spec.capability);
         return;
       }
-      const items = isToolErrorResult(outcome.value) ? undefined : itemsOf(outcome.value);
-      if (!items) {
-        history.lastError = isToolErrorResult(outcome.value)
-          ? new ToolResultError(textOfContent(bodyBlocks(outcome.value)).slice(0, 500), bodyBlocks(outcome.value))
-          : new Error(`${exposed.name} returned no structured search results`);
+      if (isToolErrorResult(outcome.value)) {
+        const toolErr = new ToolResultError(textOfContent(bodyBlocks(outcome.value)).slice(0, 500), bodyBlocks(outcome.value));
+        history.lastError = toolErr;
+        errors.push(toolErr);
+        history.attempts.push({ ...base, outcome: "error" });
+        failed.push(provider);
+        if (shouldPenalizeProvider(toolErr)) this.noteOutcome(provider, true, spec.capability);
+        return;
+      }
+      const rawItems = itemsOf(outcome.value);
+      if (!rawItems) {
+        const shapeErr = new Error(`${exposed.name} returned no structured search results`);
+        history.lastError = shapeErr;
+        errors.push(shapeErr);
         history.attempts.push({ ...base, outcome: "error" });
         failed.push(provider);
         return;
       }
+      const items = hasDomainFilter
+        ? filterItemsByDomains(rawItems as SearchItem[], includeDomains, excludeDomains)
+        : rawItems as SearchItem[];
       if (items.length === 0) {
         history.attempts.push({ ...base, outcome: "empty" });
         empty.push(provider);
-        history.fallback ??= { entry, output: outcome.value };
+        const filteredValue = hasDomainFilter ? filterOutputByDomains(outcome.value, includeDomains, excludeDomains) : outcome.value;
+        history.fallback ??= { entry, output: filteredValue };
         return;
       }
       history.attempts.push({ ...base, outcome: "success" });
@@ -611,12 +812,22 @@ export class SearchToolkit {
 
     const merged = mergeItems(lists, limit);
     const summary: CrossCheckSummary = {
-      routes, failed, empty,
+      routes,
+      failed,
+      empty,
       status: lists.length === 2 ? "complete" : lists.length === 1 ? "partial" : "unavailable",
       corroborated: merged.filter((item) => item.foundBy.length > 1).length,
     };
     const route = routes[0];
-    if (!route) return { ...history, summary };
+    if (!route) {
+      // If both sides errored with non-failover faults (e.g. 400/422), stop instead of burning a 3rd provider.
+      const allNonFailoverErrors = empty.length === 0 && errors.length > 0 && errors.every((err) => !shouldFailoverProvider(err));
+      return {
+        ...history,
+        summary,
+        ...(allNonFailoverErrors ? { fatalError: autoFailure(history.lastError ?? new Error(spec.emptyError), history.attempts, spec.tool) } : {}),
+      };
+    }
     const auto = { ...spec.meta, crossCheck: summary };
     return {
       ...history,
@@ -674,15 +885,18 @@ export class SearchToolkit {
     return { content: [{ type: "text", text: rows.length ? rows.join("\n") : "No provider tools match." }] };
   }
 
-  private async gatewayCall(args: Record<string, unknown>): Promise<unknown> {
+  private async gatewayCall(args: Record<string, unknown>, allowTool?: (tool: Tool) => boolean): Promise<unknown> {
     const name = String(args.name ?? "");
     const target = this.bindings.get(name);
     if (!target || MANAGEMENT_TOOL_NAMES.has(name)) throw new Error(`Unknown provider tool: ${name}`);
+    if (allowTool && !allowTool(target.exposed)) {
+      throw new Error(`Tool ${name} is not available for this token`);
+    }
     const inner = args.arguments && typeof args.arguments === "object" ? args.arguments as Record<string, unknown> : {};
     return this.invokeBinding(target, this.validateArguments(target.exposed, inner));
   }
 
-  private async probe(args: Record<string, unknown>): Promise<unknown> {
+  private async probe(args: Record<string, unknown>, allowTool?: (tool: Tool) => boolean): Promise<unknown> {
     const provider = String(args.provider ?? "");
     const config = this.config.providers[provider];
     if (!config?.enabled) throw new Error(`Provider is not enabled: ${provider}`);
@@ -694,6 +908,9 @@ export class SearchToolkit {
       ?? providerTools.find((item) => /search/i.test(item.exposed.name))
       ?? providerTools[0];
     if (!selected || selected.provider !== provider) throw new Error(`No callable tool found for provider: ${provider}`);
+    if (allowTool && !allowTool(selected.exposed)) {
+      throw new Error(`Tool ${selected.exposed.name} is not available for this token`);
+    }
     // Each call is pinned to one slot, walking the pool, so sticky and drain pools are probed key by key.
     const requestedSlot = typeof args.slot === "number" && Number.isInteger(args.slot) ? args.slot : undefined;
     if (requestedSlot !== undefined && (requestedSlot < 0 || requestedSlot >= config.keys.length)) {
@@ -727,6 +944,11 @@ function binding(tool: Tool, call: ToolBinding["call"]): ToolBinding {
   return { exposed: tool, provider: "search_toolkit", upstreamName: tool.name, call };
 }
 
+function normalizedFreshness(mode: ReturnType<typeof autoMode>, value: unknown): AutoFreshness | undefined {
+  if (value === "day" || value === "week" || value === "month" || value === "year") return value;
+  return mode === "current" ? "week" : undefined;
+}
+
 /**
  * Fill schema-required metadata fields added by newer upstream MCP servers
  * (such as Firecrawl hosted v2 MCP requiring `objective` on `firecrawl_scrape`)
@@ -742,24 +964,28 @@ function adaptCandidateArguments(tool: Tool, args: Record<string, unknown>): Rec
   return next;
 }
 
-/** A routed answer whose last attempt succeeded; thin fetch fallbacks and failures are not reused. */
+/** A routed answer whose last attempt succeeded and is not an error result; thin fetch fallbacks and failures are not reused. */
 function succeeded(output: unknown): boolean {
+  if (isToolErrorResult(output)) return false;
   const structured = (output as { structuredContent?: { route?: unknown; searchAuto?: { attempts?: unknown } } })?.structuredContent;
   if (!structured?.route) return false;
   const attempts = structured.searchAuto?.attempts;
   return !Array.isArray(attempts) || (attempts.at(-1) as { outcome?: string } | undefined)?.outcome === "success";
 }
 
-/** A cached page serves a request when it was fetched with at least as much room, or already holds the whole page. */
-function coversRequest(output: unknown, cachedChars: number, wantedChars: number): boolean {
+/**
+ * A cached page serves a request when the answering reader returned the whole page
+ * uncapped, or when a capped reader fetched at least as many characters as requested.
+ */
+function coversRequest(output: unknown, cachedChars: number, wantedChars: number, providerCapped = true): boolean {
+  if (!providerCapped) return true;
   if (cachedChars >= wantedChars) return true;
-  const length = bodyText(output).length;
-  return length >= wantedChars || length < cachedChars * 0.9;
+  return bodyText(output).length >= wantedChars;
 }
 
 /** Say in the route block that this answer was reused, and how old it is. */
 function markCached(output: unknown, ageMs: number): unknown {
-  const seconds = Math.round(ageMs / 1000);
+  const seconds = Math.max(0, Math.round(ageMs / 1000));
   return updateAutoMetadata(output, { cached: seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m` });
 }
 
@@ -777,29 +1003,48 @@ function annotateSlots(config: ProviderConfig, rotation: SlotStatus): SlotStatus
   };
 }
 
+function isLowBalance(remaining: number, unit: string | undefined): boolean {
+  if (remaining <= 0) return true;
+  if (unit === "USD") return remaining < 2;
+  if (unit === "CNY") return remaining < 10;
+  if (unit === "cents") return remaining < 200;
+  if (unit === "credits") return remaining < 200;
+  return false;
+}
+
 function compactRotation(rotation: SlotStatus): unknown {
   const counts = { healthy: 0, cooldown: 0, disabled: 0, exhausted: 0 };
   const unhealthySlots: Array<Record<string, unknown>> = [];
   let remaining: number | undefined;
+  let quotaUnit: string | undefined;
+  let oldestCheckedAt: number | undefined;
   for (const key of rotation.keys) {
     const details = key.status as Record<string, unknown>;
     if (typeof details.quota_remaining === "number") remaining = (remaining ?? 0) + details.quota_remaining;
+    if (!quotaUnit && typeof details.quota_unit === "string") quotaUnit = details.quota_unit;
+    if (typeof details.quota_checked_at === "number") {
+      oldestCheckedAt = oldestCheckedAt === undefined ? details.quota_checked_at : Math.min(oldestCheckedAt, details.quota_checked_at);
+    }
     const status = details.status === "cooldown" || details.status === "disabled" || details.status === "exhausted"
       ? details.status
       : "healthy";
     counts[status] += 1;
     if (status !== "healthy") {
-      const { slot: _duplicateSlot, ...health } = details;
+      const { slot: _duplicateSlot, quota_checked_at: _ts, ...health } = details;
       const { tier, label } = key as { tier?: string; label?: string };
       unhealthySlots.push({ slot: key.slot, masked: key.masked, ...(tier ? { tier } : {}), ...(label ? { label } : {}), ...health });
     }
   }
+  const lowBalance = remaining !== undefined && isLowBalance(remaining, quotaUnit);
   return {
     keyCount: rotation.keyCount,
     nextSlot: rotation.nextSlot,
     ...counts,
     // Sum of the last `search-toolkit quota` readings, in the provider's unit.
     ...(remaining !== undefined ? { remaining: Number(remaining.toFixed(2)) } : {}),
+    ...(quotaUnit ? { quotaUnit } : {}),
+    ...(oldestCheckedAt !== undefined ? { quotaChecked: `${formatDuration(Math.max(0, Date.now() - oldestCheckedAt))} ago` } : {}),
+    ...(lowBalance ? { lowBalance: true } : {}),
     unhealthySlots,
   };
 }
@@ -843,19 +1088,121 @@ function firstSentence(text: string, max: number): string {
   return sentence.length > max ? `${sentence.slice(0, max - 1).trimEnd()}…` : sentence;
 }
 
+function isLocalNoHealthySlotsError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /has no healthy key slots available/i.test(msg);
+}
+
 function shouldPenalizeProvider(error: unknown): boolean {
-  if (error instanceof PlanLimitError || error instanceof CapabilityGateError) return false;
+  if (error instanceof PlanLimitError || error instanceof CapabilityGateError || error instanceof InvalidRequestError) return false;
+  if (isLocalNoHealthySlotsError(error)) return false;
   return shouldFailoverProvider(error) && !isPageFailure(error);
 }
 
-function canonicalDomainList(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) return undefined;
-  const cleaned = Array.from(new Set(
-    value
-      .map((item) => String(item ?? "").trim().replace(/^https?:\/\//i, "").replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase())
-      .filter(Boolean),
-  )).sort();
-  return cleaned.length ? cleaned : undefined;
+function isProviderWideFault(error: unknown, status: number | undefined): boolean {
+  if (isPageFailure(error) || error instanceof PlanLimitError || error instanceof CapabilityGateError) return false;
+  if (isTimeout(error)) return true;
+  if (status !== undefined) return status === 401 || status === 429 || status === 434 || status >= 500;
+  return shouldFailoverProvider(error);
+}
+
+function isBetterFallback(candidate: unknown, current: unknown): boolean {
+  const candText = bodyText(candidate);
+  const currText = bodyText(current);
+  const candUsable = isUsableFetchText(candText);
+  const currUsable = isUsableFetchText(currText);
+  if (candUsable !== currUsable) return candUsable;
+  const candInterstitial = /cloudflare|verify you are human|just a moment|access denied|enable javascript|环境异常|安全验证/i.test(candText);
+  const currInterstitial = /cloudflare|verify you are human|just a moment|access denied|enable javascript|环境异常|安全验证/i.test(currText);
+  if (candInterstitial !== currInterstitial) return !candInterstitial;
+  return candText.length > currText.length;
+}
+
+function matchesDomainRule(urlString: string, rule: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(urlString);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  const path = parsed.pathname.toLowerCase().replace(/\/+$/, "");
+  const slash = rule.indexOf("/");
+  const ruleHost = (slash >= 0 ? rule.slice(0, slash) : rule).replace(/^www\./, "");
+  const rulePath = slash >= 0 ? rule.slice(slash).replace(/\/+$/, "") : "";
+  if (host !== ruleHost && !host.endsWith(`.${ruleHost}`)) return false;
+  if (!rulePath) return true;
+  return path === rulePath || path.startsWith(`${rulePath}/`);
+}
+
+function filterItemsByDomains<T extends SearchItem>(items: T[], includeDomains: string[], excludeDomains: string[]): T[] {
+  return items.filter((item) => {
+    if (!item?.url) return includeDomains.length === 0;
+    if (includeDomains.length > 0 && !includeDomains.some((rule) => matchesDomainRule(item.url, rule))) return false;
+    if (excludeDomains.length > 0 && excludeDomains.some((rule) => matchesDomainRule(item.url, rule))) return false;
+    return true;
+  });
+}
+
+function replaceStructuredItems(output: unknown, nextItems: SearchItem[]): unknown {
+  if (!output || typeof output !== "object") return output;
+  const record = output as Record<string, unknown>;
+  const structured = record.structuredContent && typeof record.structuredContent === "object"
+    ? record.structuredContent as Record<string, unknown>
+    : undefined;
+  if (!structured) return output;
+  if (structured.data && typeof structured.data === "object" && Array.isArray((structured.data as { items?: unknown }).items)) {
+    return {
+      ...record,
+      structuredContent: {
+        ...structured,
+        data: { ...(structured.data as Record<string, unknown>), items: nextItems },
+      },
+    };
+  }
+  if (structured.result && typeof structured.result === "object") {
+    const res = structured.result as Record<string, unknown>;
+    if (res.data && typeof res.data === "object" && Array.isArray((res.data as { items?: unknown }).items)) {
+      return {
+        ...record,
+        structuredContent: {
+          ...structured,
+          result: {
+            ...res,
+            data: { ...(res.data as Record<string, unknown>), items: nextItems },
+          },
+        },
+      };
+    }
+    if (Array.isArray(res.items)) {
+      return {
+        ...record,
+        structuredContent: {
+          ...structured,
+          result: { ...res, items: nextItems },
+        },
+      };
+    }
+  }
+  return output;
+}
+
+function payloadRecordOf(output: unknown): Record<string, unknown> | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const structured = (output as {
+    structuredContent?: { data?: Record<string, unknown>; result?: { data?: Record<string, unknown> } & Record<string, unknown> };
+  }).structuredContent;
+  if (structured?.data && typeof structured.data === "object") return structured.data;
+  if (structured?.result?.data && typeof structured.result.data === "object") return structured.result.data;
+  if (structured?.result && typeof structured.result === "object") return structured.result;
+  return undefined;
+}
+
+function filterOutputByDomains(output: unknown, includeDomains: string[], excludeDomains: string[]): unknown {
+  const items = itemsOf(output);
+  if (!items) return output;
+  const filtered = filterItemsByDomains(items as SearchItem[], includeDomains, excludeDomains);
+  return replaceStructuredItems(output, filtered);
 }
 
 function hasContextContent(output: unknown): boolean {
@@ -884,16 +1231,29 @@ function itemsOf(output: unknown): unknown[] | undefined {
   return Array.isArray(items) ? items : undefined;
 }
 
-function capSearchOutput(output: unknown, maxCharsPerItem: number, limit: number, query: string): unknown {
+function capSearchOutput(output: unknown, maxCharsPerItem: number | undefined, limit: number, query: string): unknown {
   const items = itemsOf(output);
   if (!items || !output || typeof output !== "object") return output;
   const record = output as { content?: unknown };
   if (!Array.isArray(record.content)) return output;
-  const capped = (items as SearchItem[]).slice(0, limit);
-  const routeBlock = isRouteContentBlock(record.content[0]) ? [record.content[0]] : [];
+  const deduped = dedupeItems(items as SearchItem[], limit);
+  const updated = replaceStructuredItems(output, deduped) as Record<string, unknown>;
+  const payload = payloadRecordOf(updated);
+  const renderTarget = payload ? { ...payload, items: deduped } : { items: deduped };
+  const route = isRouteContentBlock(record.content[0]) ? [record.content[0]] : [];
   return {
-    ...(output as object),
-    content: [...routeBlock, { type: "text", text: renderItems(capped, { maxCharsPerItem, query }) }],
+    ...updated,
+    content: [
+      ...route,
+      {
+        type: "text",
+        text: renderPayload(renderTarget, {
+          ...(maxCharsPerItem !== undefined ? { maxCharsPerItem } : {}),
+          dedupe: false,
+          query,
+        }),
+      },
+    ],
   };
 }
 

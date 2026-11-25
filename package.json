@@ -21,9 +21,9 @@
     "search-toolkit-http": "dist/src/http-server.js"
   },
   "files": [
-    "dist/",
-    "!dist/tests/",
-    "!dist/scripts/",
+    "dist/src/",
+    "!dist/src/**/*.map",
+    "!dist/src/**/*.d.ts",
     "skills/search-toolkit/",
     "config.example.json",
     "README.md",
@@ -31,15 +31,17 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "npm run clean && tsc -p tsconfig.json",
     "clean": "node -e \"import('node:fs').then((fs) => fs.rmSync('dist', { recursive: true, force: true }))\"",
-    "test": "npm run build && node --test dist/tests/*.test.js",
-    "smoke:mcp": "npm run build && node dist/scripts/smoke-mcp.js",
-    "measure": "npm run build && node dist/scripts/measure.js",
-    "smoke:http": "npm run build && node dist/scripts/smoke-http.js",
-    "probe:all": "npm run build && node dist/scripts/probe-all.js",
-    "prepack": "npm test",
-    "eval:search": "npm run build && node dist/scripts/eval-search.js"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "build:all": "tsc -p tsconfig.json",
+    "test": "npm run build:all && node --test dist/tests/*.test.js",
+    "smoke:mcp": "npm run build:all && node dist/scripts/smoke-mcp.js",
+    "measure": "npm run build:all && node dist/scripts/measure.js",
+    "smoke:http": "npm run build:all && node dist/scripts/smoke-http.js",
+    "probe:all": "npm run build:all && node dist/scripts/probe-all.js",
+    "prepack": "npm test && npm run clean && npm run build",
+    "eval:search": "npm run build:all && node dist/scripts/eval-search.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

@@ -1,9 +1,13 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TargetPageError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import {
+  cleanHosts, collectValidatedUrls, formatExtractedLink, formatExtractedPage, READ_ONLY_OPEN, requestJson,
+  searchTool, timeoutOf, validateFetchTargetUrl, type RestAdapter, type RestAdapterContext,
+} from "../base.js";
 import { arrayArg, normalizeItem, numberArg, objectRecord, stringArg, stringValue } from "../normalize.js";
 
+const SEARCH_ENDPOINT = "https://api.search.tinyfish.ai";
 const FETCH_ENDPOINT = "https://api.fetch.tinyfish.ai";
 
 const FETCH_TOOL: Tool = {
@@ -25,8 +29,29 @@ const FETCH_TOOL: Tool = {
     },
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  annotations: READ_ONLY_OPEN,
 };
+
+function resolveTinyfishUrl(config: ProviderConfig | undefined, kind: "search" | "fetch"): string {
+  const optionKey = kind === "search" ? "searchBaseUrl" : "fetchBaseUrl";
+  const rawOption = config?.options?.[optionKey];
+  if (typeof rawOption === "string" && rawOption.trim()) {
+    validateFetchTargetUrl(rawOption.trim(), `tinyfish_${kind}`);
+    return rawOption.trim();
+  }
+  const configuredBase = config?.integration.kind === "rest" && config.integration.baseUrl
+    ? config.integration.baseUrl.trim()
+    : undefined;
+  if (!configuredBase) return kind === "search" ? SEARCH_ENDPOINT : FETCH_ENDPOINT;
+  const lower = configuredBase.toLowerCase();
+  if (kind === "search") {
+    return lower.includes("api.fetch.tinyfish.ai") || /\/fetch\/?$/.test(lower)
+      ? SEARCH_ENDPOINT
+      : configuredBase;
+  }
+  // Avoid routing POST fetch requests onto a search-only baseUrl when search & fetch live on separate hosts.
+  return lower.includes("fetch") ? configuredBase : FETCH_ENDPOINT;
+}
 
 export class TinyfishAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -48,11 +73,18 @@ export class TinyfishAdapter implements RestAdapter {
     ), FETCH_TOOL];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    if (tool === "tinyfish_fetch") return this.fetch(args, key, config);
-    const base = baseUrlOf(config, "https://api.search.tinyfish.ai");
-    const url = new URL(base);
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    if (tool === "tinyfish_fetch") return this.fetch(args, key, config, context);
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
+    const url = new URL(resolveTinyfishUrl(config, "search"));
     url.searchParams.set("query", stringArg(args, "query"));
+    url.searchParams.set("limit", String(limit));
     for (const [source, target] of [
       ["location", "location"],
       ["language", "language"],
@@ -66,38 +98,51 @@ export class TinyfishAdapter implements RestAdapter {
     if (typeof args.recencyMinutes === "number" && Number.isFinite(args.recencyMinutes)) {
       url.searchParams.set("recency_minutes", String(Math.round(args.recencyMinutes)));
     }
-    for (const [source, target] of [["includeDomains", "include_domains"], ["excludeDomains", "exclude_domains"]] as const) {
-      const values = arrayArg(args, source);
-      if (values.length) url.searchParams.set(target, values.join(","));
-    }
-    const data = await requestJson(url.toString(), { headers: { "X-API-Key": key } });
+    const includeDomains = cleanHosts(arrayArg(args, "includeDomains"));
+    const excludeDomains = cleanHosts(arrayArg(args, "excludeDomains"));
+    if (includeDomains.length) url.searchParams.set("include_domains", includeDomains.join(","));
+    if (excludeDomains.length) url.searchParams.set("exclude_domains", excludeDomains.join(","));
+    const data = await requestJson(url.toString(), {
+      headers: { "X-API-Key": key },
+    }, {
+      timeoutMs: timeoutOf(config, 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     return {
       items: Array.isArray(data.results)
-        ? data.results.slice(0, numberArg(args, "limit", 6)).map((row) => normalizeTinyfishItem(row))
+        ? data.results.slice(0, limit).map((row) => normalizeTinyfishItem(row))
         : [],
     };
   }
 
-  private async fetch(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    const urls = [...new Set([stringArg(args, "url").trim(), ...arrayArg(args, "urls")].filter(Boolean))].slice(0, 10);
-    if (!urls.length) throw new Error("tinyfish_fetch requires url or urls");
+  private async fetch(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const urls = collectValidatedUrls(args, "tinyfish_fetch", 10);
     const format = stringArg(args, "format", "markdown");
-    const perUrlTimeoutMs = typeof args.perUrlTimeoutMs === "number" ? args.perUrlTimeoutMs : 45_000;
+    const perUrlTimeoutMs = typeof args.perUrlTimeoutMs === "number" && Number.isFinite(args.perUrlTimeoutMs)
+      ? args.perUrlTimeoutMs
+      : 45_000;
     const body: Record<string, unknown> = { urls, format, per_url_timeout_ms: perUrlTimeoutMs };
     if (stringArg(args, "purpose").trim()) body.purpose = stringArg(args, "purpose").trim();
     if (typeof args.links === "boolean") body.links = args.links;
-    if (typeof args.ttl === "number") body.ttl = args.ttl;
+    if (typeof args.ttl === "number" && Number.isFinite(args.ttl)) body.ttl = args.ttl;
     for (const [source, target] of [["includeSelectors", "include_selectors"], ["excludeSelectors", "exclude_selectors"]] as const) {
       const values = arrayArg(args, source);
       if (values.length) body[target] = values;
     }
-    const configuredBase = config.integration.kind === "rest" ? config.integration.baseUrl : undefined;
-    const fetchUrl = configuredBase && !configuredBase.includes("api.search.tinyfish.ai") ? configuredBase : FETCH_ENDPOINT;
+    const fetchUrl = resolveTinyfishUrl(config, "fetch");
     const data = await requestJson(fetchUrl, {
       method: "POST",
       headers: { "X-API-Key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, Math.max(60_000, perUrlTimeoutMs + 15_000));
+    }, {
+      timeoutMs: timeoutOf(config, Math.max(60_000, perUrlTimeoutMs + 15_000)),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     const results = Array.isArray(data.results) ? data.results.map(objectRecord) : [];
     const errors = Array.isArray(data.errors) ? data.errors.map(objectRecord) : [];
     const readable = results.filter((page) => readableText(page.text));
@@ -114,13 +159,18 @@ export class TinyfishAdapter implements RestAdapter {
     }
     const text = readable.map((page) => {
       const title = stringValue(page.title);
-      const url = stringValue(page.final_url) ?? stringValue(page.url) ?? "";
+      const url = stringValue(page.final_url) ?? stringValue(page.url);
       const date = stringValue(page.published_date);
-      const header = [title ? `# ${title}` : "", url ? `URL: ${url}${date ? ` (${date.slice(0, 10)})` : ""}` : ""].filter(Boolean).join("\n");
-      const linksBlock = args.links === true && Array.isArray(page.links) && page.links.length
-        ? `\n\nLinks:\n${page.links.slice(0, 50).map(formatLink).filter(Boolean).join("\n")}`
-        : "";
-      return `${[header, readableText(page.text)].filter(Boolean).join("\n\n")}${linksBlock}`;
+      const links = args.links === true && Array.isArray(page.links)
+        ? page.links.slice(0, 50).map(formatExtractedLink).filter(Boolean)
+        : [];
+      return formatExtractedPage({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        ...(date ? { date } : {}),
+        body: readableText(page.text),
+        ...(links.length ? { links } : {}),
+      });
     }).join("\n\n---\n\n");
     return { text, ...(errors.length ? { errors } : {}) };
   }
@@ -148,15 +198,6 @@ function formatSelectorHints(error: Record<string, unknown>): string {
     parts.push(`candidates: ${error.candidate_selectors.map(String).slice(0, 6).join(", ")}`);
   }
   return parts.length ? ` (${parts.join("; ")})` : "";
-}
-
-function formatLink(entry: unknown): string {
-  if (typeof entry === "string") return `- ${entry}`;
-  const link = objectRecord(entry);
-  const href = stringValue(link.url) ?? stringValue(link.href);
-  if (!href) return "";
-  const label = stringValue(link.text) ?? stringValue(link.title);
-  return label ? `- ${label}: ${href}` : `- ${href}`;
 }
 
 function readableText(value: unknown): string {

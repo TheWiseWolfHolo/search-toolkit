@@ -31,19 +31,67 @@ interface Item {
   date?: string;
 }
 
-const args = process.argv.slice(2);
-const flag = (name: string) => {
-  const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
-};
-const limit = Number(flag("--limit") ?? 8);
-const only = flag("--only")?.split(",");
-const onlyVariants = flag("--variants")?.split(",");
+function parseArgs(argv: string[]): { config?: string; only?: string[]; variants?: string[]; limit: number; help: boolean } {
+  let config: string | undefined;
+  let only: string[] | undefined;
+  let variants: string[] | undefined;
+  let limit = 8;
+  let help = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i] as string;
+    if (arg === "-h" || arg === "--help") {
+      help = true;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq >= 0 ? arg.slice(0, eq) : arg;
+    const takeValue = (): string => {
+      if (eq >= 0) return arg.slice(eq + 1);
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) throw new Error(`${name} requires a value`);
+      i += 1;
+      return next;
+    };
+    if (name === "--config") {
+      config = takeValue();
+    } else if (name === "--only") {
+      only = takeValue().split(",").map((item) => item.trim()).filter(Boolean);
+    } else if (name === "--variants") {
+      variants = takeValue().split(",").map((item) => item.trim()).filter(Boolean);
+    } else if (name === "--limit") {
+      const raw = takeValue();
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 20) {
+        throw new Error(`--limit must be an integer from 1 to 20, got "${raw}"`);
+      }
+      limit = parsed;
+    } else {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+  }
+  return {
+    ...(config ? { config } : {}),
+    ...(only ? { only } : {}),
+    ...(variants ? { variants } : {}),
+    limit,
+    help,
+  };
+}
+
+const parsedArgs = parseArgs(process.argv.slice(2));
+if (parsedArgs.help) {
+  console.log("Usage: npm run eval:search [-- --config <path>] [--only id1,id2] [--variants a,b] [--limit 8]");
+  process.exit(0);
+}
+
+const limit = parsedArgs.limit;
+const only = parsedArgs.only;
+const onlyVariants = parsedArgs.variants;
 const WEB: Kind[] = ["web", "code"];
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 
 const VARIANTS: Variant[] = [
-  // The unified route as shipped, in the query's own mode. Compare it with the single-provider rows.
+  // The unified route as shipped, in the query's own mode. Run sequentially after single-provider workers to avoid 429 bursts.
   { name: "auto", tool: "search_auto", kinds: ["web", "news", "scholar", "code"], args: (query, n, spec) => ({ query, limit: n, mode: spec.mode }) },
   { name: "parallel", tool: "parallel_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, maxResults: n, mode: "fast" }) },
   { name: "parallel-news", tool: "parallel_search", kinds: ["news"], args: (query, n) => ({ query, maxResults: n, mode: "fast", afterDate: daysAgo(7) }) },
@@ -59,8 +107,8 @@ const VARIANTS: Variant[] = [
   { name: "serper-news", tool: "serper_news", kinds: ["news"], args: (query, n) => ({ query, limit: n, tbs: "qdr:w" }) },
   { name: "serper-news-zh", tool: "serper_news", kinds: ["news"], lang: "zh", args: (query, n) => ({ query, limit: n, tbs: "qdr:w", gl: "cn", hl: "zh-cn" }) },
   { name: "serper-scholar", tool: "serper_scholar", kinds: ["scholar"], args: (query, n) => ({ query, limit: n }) },
-  { name: "deepseek", tool: "deepseek_search", kinds: [...WEB, "news"], args: (query, n) => ({ query, limit: n }) },
-  { name: "vercel-deepseek", tool: "vercel_deepseek_search", kinds: [...WEB, "news"], args: (query, n) => ({ query, limit: n }) },
+  { name: "deepseek", tool: "deepseek_search", kinds: [...WEB, "news"], args: (query, n, spec) => ({ query, limit: n, ...(spec.kind === "news" ? { afterDate: daysAgo(7) } : {}) }) },
+  { name: "vercel-deepseek", tool: "vercel_deepseek_search", kinds: [...WEB, "news"], args: (query, n, spec) => ({ query, limit: n, ...(spec.kind === "news" ? { afterDate: daysAgo(7) } : {}) }) },
   { name: "vercel-parallel-fast", tool: "vercel_parallel_fast", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, maxResults: n }) },
   { name: "exa", tool: "exa_web_search_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, objective: query }) },
   // maxAgeHours is how stale a cached page may be (older ones are re-crawled live), not a publish-date filter.
@@ -69,7 +117,7 @@ const VARIANTS: Variant[] = [
   { name: "exa-github-lite", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "lite", includeDomains: ["github.com"] }) },
   { name: "exa-lite", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "lite" }) },
   { name: "exa-hl", tool: "exa_web_search_advanced_exa", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, numResults: n, type: "auto", enableHighlights: true }) },
-  { name: "exa-publication", tool: "exa_web_search_advanced_exa", kinds: ["scholar"], args: (query, n) => ({ query, numResults: n, category: "publication" }) },
+  { name: "exa-publication", tool: "exa_web_search_advanced_exa", kinds: ["scholar"], args: (query, n) => ({ query, numResults: n, type: "lite", category: "publication" }) },
   { name: "exa-github", tool: "exa_web_search_advanced_exa", kinds: ["code"], args: (query, n) => ({ query, numResults: n, type: "auto", includeDomains: ["github.com"] }) },
   { name: "tavily", tool: "tavily_tavily_search", kinds: [...WEB, "scholar"], args: (query, n) => ({ query, max_results: n, search_depth: "basic" }) },
   { name: "tavily-news", tool: "tavily_tavily_search", kinds: ["news"], args: (query, n) => ({ query, max_results: n, search_depth: "basic", topic: "news", time_range: "week" }) },
@@ -119,6 +167,13 @@ function itemsOf(output: unknown): Item[] {
   return Array.isArray(items) ? items as Item[] : [];
 }
 
+function errorTextOf(output: unknown): string {
+  const content = (output as { content?: Array<{ type?: string; text?: string }> })?.content;
+  if (!Array.isArray(content)) return "tool returned isError=true";
+  const text = content.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join(" ").trim();
+  return (text || "tool returned isError=true").slice(0, 200);
+}
+
 function score(query: Query, items: Item[], now: number) {
   const top = items.slice(0, limit);
   const count = Math.min(top.length / limit, 1);
@@ -136,15 +191,6 @@ function score(query: Query, items: Item[], now: number) {
   return { count: top.length, gold3, goldShare, lang, dated, fresh, duplicates, composite };
 }
 
-const file = JSON.parse(readFileSync(resolve(process.cwd(), "evals/search-queries.json"), "utf8")) as { queries: Query[] };
-const queries = file.queries.filter((query) => !only || only.includes(query.id));
-// The cache would hide providers behind earlier answers; every call here must reach one.
-const toolkit = new SearchToolkit(flag("--config"), { profile: "full", cache: false });
-await toolkit.initialize();
-const available = new Set(toolkit.listTools().map((tool) => tool.name));
-const variants = VARIANTS.filter((variant) => available.has(variant.tool) && (!onlyVariants || onlyVariants.includes(variant.name)));
-const now = Date.now();
-
 interface Row {
   query: string;
   lang: string;
@@ -158,14 +204,14 @@ interface Row {
   items?: Item[];
 }
 
-// One worker per provider keeps each provider at one request at a time.
-const byProvider = new Map<string, Variant[]>();
-for (const variant of variants) {
-  const provider = variant.tool.split("_")[0] as string;
-  byProvider.set(provider, [...(byProvider.get(provider) ?? []), variant]);
-}
+const file = JSON.parse(readFileSync(resolve(process.cwd(), "evals/search-queries.json"), "utf8")) as { queries: Query[] };
+const queries = file.queries.filter((query) => !only || only.includes(query.id));
+// The cache would hide providers behind earlier answers; every call here must reach one.
+const toolkit = new SearchToolkit(parsedArgs.config, { profile: "full", cache: false });
 const rows: Row[] = [];
-await Promise.all(Array.from(byProvider.values(), async (group) => {
+const now = Date.now();
+
+async function runGroup(group: Variant[]): Promise<void> {
   for (const query of queries) {
     for (const variant of group) {
       if (!variant.kinds.includes(query.kind) || (variant.lang && variant.lang !== query.lang)) continue;
@@ -177,6 +223,7 @@ await Promise.all(Array.from(byProvider.values(), async (group) => {
         rows.push({
           query: query.id, lang: query.lang, kind: query.kind, mode: query.mode, variant: variant.name,
           ok: !isError, latencyMs: Math.round(performance.now() - started),
+          ...(isError ? { error: errorTextOf(output) } : {}),
           metrics: score(query, items, now),
           items: items.slice(0, limit).map(({ title, url, date }) => ({ title, url, ...(date ? { date } : {}) })),
         });
@@ -190,9 +237,32 @@ await Promise.all(Array.from(byProvider.values(), async (group) => {
       process.stderr.write(".");
     }
   }
-}));
-process.stderr.write("\n");
-await toolkit.close();
+}
+
+try {
+  await toolkit.initialize();
+  const available = new Set(toolkit.listTools().map((tool) => tool.name));
+  const variants = VARIANTS.filter((variant) => available.has(variant.tool) && (!onlyVariants || onlyVariants.includes(variant.name)));
+
+  const autoVariants = variants.filter((variant) => variant.tool === "search_auto");
+  const providerVariants = variants.filter((variant) => variant.tool !== "search_auto");
+
+  // One worker per provider keeps each provider at one request at a time.
+  const byProvider = new Map<string, Variant[]>();
+  for (const variant of providerVariants) {
+    const provider = variant.tool.split("_")[0] as string;
+    byProvider.set(provider, [...(byProvider.get(provider) ?? []), variant]);
+  }
+  await Promise.all(Array.from(byProvider.values(), (group) => runGroup(group)));
+
+  // Run unified search_auto after single-provider workers finish so it never causes concurrent 429 bursts.
+  if (autoVariants.length) {
+    await runGroup(autoVariants);
+  }
+  process.stderr.write("\n");
+} finally {
+  await toolkit.close();
+}
 
 // A failed call scores zero: availability is part of quality.
 function summarize(filter: (row: Row) => boolean) {

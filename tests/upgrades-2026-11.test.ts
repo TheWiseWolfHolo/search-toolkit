@@ -15,11 +15,11 @@ import {
 import { focusExcerpt } from "../src/excerpt.js";
 import { isUsableFetchText, readableFetchOutput, truncateBody } from "../src/fetching.js";
 import { createSearchToolkitHttpApp } from "../src/http.js";
-import { redact, registerKnownSecrets } from "../src/provenance.js";
+import { clearKnownSecretsForTest, redact, registerKnownSecrets } from "../src/provenance.js";
 import { readQuota } from "../src/quota.js";
 import { BraveAdapter } from "../src/rest/providers/brave.js";
 import { DeepSeekAdapter } from "../src/rest/providers/deepseek.js";
-import { DirectMarkdownAdapter, isPrivateIp } from "../src/rest/providers/direct-markdown.js";
+import { createFetchTransport, DirectMarkdownAdapter, isPrivateIp } from "../src/rest/providers/direct-markdown.js";
 import { DoubaoAdapter } from "../src/rest/providers/doubao.js";
 import { GrokAdapter } from "../src/rest/providers/grok.js";
 import { JinaAdapter } from "../src/rest/providers/jina.js";
@@ -44,12 +44,17 @@ const REST = (adapter: RestAdapterName, options?: Record<string, unknown>): Prov
 });
 
 test("redact preserves snake_case error codes and tool names while masking real keys", () => {
-  registerKnownSecrets(["my_super_secret_custom_key"]);
-  assert.equal(redact("error: concurrency_limit_exceeded on exa_web_search_advanced_exa"), "error: concurrency_limit_exceeded on exa_web_search_advanced_exa");
-  assert.equal(redact("Bearer sk-proj-abc12345678901234567890"), "Bearer <redacted>");
-  assert.equal(redact("https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-1234567890abcdef"), "https://mcp.tavily.com/mcp/?tavilyApiKey=<redacted>");
-  assert.equal(redact("leaked my_super_secret_custom_key here"), "leaked <redacted> here");
-  assert.equal(redact("token=vck_1234567890abcdef12345678"), "token=<redacted>");
+  registerKnownSecrets(["my_super_secret_custom_key", "key+with/special=chars"]);
+  try {
+    assert.equal(redact("error: concurrency_limit_exceeded on exa_web_search_advanced_exa"), "error: concurrency_limit_exceeded on exa_web_search_advanced_exa");
+    assert.equal(redact("Bearer sk-proj-abc12345678901234567890"), "Bearer <redacted>");
+    assert.equal(redact("https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-1234567890abcdef"), "https://mcp.tavily.com/mcp/?tavilyApiKey=<redacted>");
+    assert.equal(redact("leaked my_super_secret_custom_key here"), "leaked <redacted> here");
+    assert.equal(redact(`url?k=${encodeURIComponent("key+with/special=chars")}`), "url?k=<redacted>");
+    assert.equal(redact("token=vck_1234567890abcdef12345678"), "token=<redacted>");
+  } finally {
+    clearKnownSecretsForTest();
+  }
 });
 
 test("error classification covers Tavily 432/433/434, TinyFish daily cap, and prevents ToolResultError disconnects", () => {
@@ -256,7 +261,15 @@ test("DirectMarkdownAdapter negotiates text/markdown, skips HTML, and blocks pri
   assert.equal(isPrivateIp("[2606:4700::6810:85e5]"), false);
 
   const publicLookup = async () => [{ address: "93.184.216.34" }];
-  const adapter = new DirectMarkdownAdapter(publicLookup);
+  let contentType = "text/markdown; charset=utf-8";
+  let body = "# Guide\n\n" + "Detailed markdown documentation content. ".repeat(6);
+  const adapter = new DirectMarkdownAdapter(
+    publicLookup,
+    createFetchTransport(async () => new Response(body, {
+      status: 200,
+      headers: { "Content-Type": contentType, "x-markdown-tokens": "142" },
+    })),
+  );
   const cfg: ProviderConfig = { enabled: true, auto: ["fetch"], keys: [], integration: { kind: "rest", adapter: "direct_markdown" } };
   await assert.rejects(adapter.call("direct_markdown_fetch", { url: "http://127.0.0.1:8080/secret" }, "", cfg), /private IP/);
   await assert.rejects(adapter.call("direct_markdown_fetch", { url: "http://localhost/admin" }, "", cfg), /private or local host/);
@@ -277,31 +290,20 @@ test("DirectMarkdownAdapter negotiates text/markdown, skips HTML, and blocks pri
     (err: unknown) => err instanceof TargetPageError && err.pageStatus === undefined,
   );
 
-  const original = globalThis.fetch;
-  let contentType = "text/markdown; charset=utf-8";
-  let body = "# Guide\n\n" + "Detailed markdown documentation content. ".repeat(6);
-  globalThis.fetch = async () => new Response(body, {
-    status: 200,
-    headers: { "Content-Type": contentType, "x-markdown-tokens": "142" },
-  });
-  try {
-    const ok = await adapter.call("direct_markdown_fetch", { url: "https://docs.example.test/guide" }, "", cfg) as { text: string; markdownTokens?: number };
-    assert.match(ok.text, /^URL: https:\/\/docs\.example\.test\/guide\n\n# Guide/);
-    assert.equal(ok.markdownTokens, 142);
+  const ok = await adapter.call("direct_markdown_fetch", { url: "https://docs.example.test/guide" }, "", cfg) as { text: string; markdownTokens?: number };
+  assert.match(ok.text, /^URL: https:\/\/docs\.example\.test\/guide\n\n# Guide/);
+  assert.equal(ok.markdownTokens, 142);
 
-    // Public IPv6 literal should be accepted cleanly without bracket parsing bugs.
-    const ipv6Ok = await adapter.call("direct_markdown_fetch", { url: "https://[2606:4700::6810:85e5]/guide" }, "", cfg) as { text: string };
-    assert.match(ipv6Ok.text, /# Guide/);
+  // Public IPv6 literal should be accepted cleanly without bracket parsing bugs.
+  const ipv6Ok = await adapter.call("direct_markdown_fetch", { url: "https://[2606:4700::6810:85e5]/guide" }, "", cfg) as { text: string };
+  assert.match(ipv6Ok.text, /# Guide/);
 
-    contentType = "text/html; charset=utf-8";
-    body = "<html><body>Hello</body></html>";
-    await assert.rejects(
-      adapter.call("direct_markdown_fetch", { url: "https://docs.example.test/guide" }, "", cfg),
-      (err: unknown) => err instanceof TargetPageError && err.pageStatus === undefined,
-    );
-  } finally {
-    globalThis.fetch = original;
-  }
+  contentType = "text/html; charset=utf-8";
+  body = "<html><body>Hello</body></html>";
+  await assert.rejects(
+    adapter.call("direct_markdown_fetch", { url: "https://docs.example.test/guide" }, "", cfg),
+    (err: unknown) => err instanceof TargetPageError && err.pageStatus === undefined,
+  );
 });
 
 test("quota reads DeepSeek and Vercel Gateway balances and does not bench TinyFish or Vercel Gateway $0 wallet", async () => {
@@ -433,7 +435,7 @@ test("upgraded provider adapters send current contracts (Parallel, Octen, TinyFi
     await new GrokAdapter().call("grok_web_search", { query: "q" }, "k", REST("grok", { model: "grok-4.20-0309-non-reasoning", reasoningEffort: "low" }));
     assert.equal(calls.at(-1)?.body.reasoning, undefined);
 
-    // Doubao sends NeedSummary, surfaces 10406 as 402, does not classify Count exceeds limit as 429, and converts Unix PublishTime.
+    // Doubao sends NeedSummary, surfaces 10406 as 402, maps InvalidParameter to 422 rather than 429/502, and converts Unix PublishTime.
     reply = { ResponseMetadata: { Error: { CodeN: 10406, Code: "InsufficientBalance", Message: "no credit" } } };
     await assert.rejects(
       new DoubaoAdapter().call("doubao_search", { query: "测试" }, "k", REST("doubao")),
@@ -444,7 +446,7 @@ test("upgraded provider adapters send current contracts (Parallel, Octen, TinyFi
     reply = { ResponseMetadata: { Error: { Code: "InvalidParameter", Message: "Count exceeds limit" } } };
     await assert.rejects(
       new DoubaoAdapter().call("doubao_search", { query: "测试" }, "k", REST("doubao")),
-      (err: unknown) => err instanceof HttpError && err.status === 502,
+      (err: unknown) => err instanceof HttpError && err.status === 422,
     );
 
     reply = { Result: { WebResults: [{ Title: "T", Url: "https://d.example", Summary: "S", Content: "Full Content", PublishTime: 1761004800 }] } };
@@ -572,7 +574,7 @@ test("direct_markdown skipped probe does not consume fetch_auto failover slots a
   await toolkit.initialize();
   const original = globalThis.fetch;
   const hitHosts: string[] = [];
-  globalThis.fetch = async (input) => {
+  const mockFetch: typeof fetch = async (input) => {
     const url = String(input);
     hitHosts.push(new URL(url).hostname);
     if (url.includes("api.deepseek.com")) {
@@ -591,6 +593,13 @@ test("direct_markdown skipped probe does not consume fetch_auto failover slots a
     // direct_markdown hits https://1.1.1.1/page directly and receives HTML -> skipped cleanly.
     return new Response("<html><body>HTML only</body></html>", { status: 200, headers: { "Content-Type": "text/html" } });
   };
+  globalThis.fetch = mockFetch;
+  const dmAdapter = new DirectMarkdownAdapter(undefined, createFetchTransport(mockFetch));
+  const dmBinding = (toolkit as unknown as {
+    bindings: Map<string, { call: (args: Record<string, unknown>) => Promise<unknown> }>;
+  }).bindings.get("direct_markdown_fetch");
+  assert.ok(dmBinding);
+  dmBinding.call = (args) => dmAdapter.call("direct_markdown_fetch", args, "", toolkit.config.providers.direct_markdown!);
   try {
     // 1.1.1.1 skips DNS so test stays 100% offline. direct_markdown (skipped) + deepseek (fail #1)
     // + parallel (fail #2) + you (success #3): requires skipped probe NOT to consume the 3-provider cap!

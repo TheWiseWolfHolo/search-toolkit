@@ -5,7 +5,9 @@ import {
   appendRotationMetadata,
   DEFAULT_FIRECRAWL_TOOLS,
   filterUpstreamTools,
+  inferToolIntent,
   safeToolAnnotations,
+  structuredKeyFault,
 } from "../src/upstream.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -122,4 +124,54 @@ test("upstream direct results expose route provenance to models", () => {
       },
     },
   });
+});
+
+test("inferToolIntent distinguishes fetch, search, and other upstream tool names", () => {
+  assert.equal(inferToolIntent("web_fetch_exa"), "fetch");
+  assert.equal(inferToolIntent("firecrawl_scrape"), "fetch");
+  assert.equal(inferToolIntent("linkup-fetch"), "fetch");
+  assert.equal(inferToolIntent("anysearch-extract"), "fetch");
+  assert.equal(inferToolIntent("web_search_exa"), "search");
+  assert.equal(inferToolIntent("tavily_search"), "search");
+  assert.equal(inferToolIntent("linkup-search"), "search");
+  assert.equal(inferToolIntent("firecrawl_credit_usage"), "other");
+  assert.equal(inferToolIntent("firecrawl_map"), "other");
+});
+
+test("structuredKeyFault maps Firecrawl structured error codes including index_daily_limit without blaming 403", () => {
+  assert.equal(structuredKeyFault({ error: { code: "index_daily_limit" } }), 402);
+  assert.equal(structuredKeyFault({ error: { code: "insufficient_credits" } }), 402);
+  assert.equal(structuredKeyFault({ error: { status: 402 } }), 402);
+  assert.equal(structuredKeyFault({ error: { code: "unauthorized" } }), 401);
+  assert.equal(structuredKeyFault({ error: { code: "rate_limited" } }), 429);
+  assert.equal(structuredKeyFault({ error: { status: 403, code: "forbidden" } }), undefined);
+});
+
+test("appendRotationMetadata preserves upstream structuredContent answer and warnings alongside extracted search items", () => {
+  const output = appendRotationMetadata(
+    {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          results: [{ title: "Tavily Hit", url: "https://tavily.example/hit", content: "Snippet text" }],
+        }),
+      }],
+      structuredContent: {
+        answer: "Synthesized answer from upstream.",
+        warnings: ["partial index coverage"],
+      },
+    },
+    "tavily",
+    "tavily_search",
+    "masked",
+    25,
+  ) as {
+    content: Array<{ text: string }>;
+    structuredContent: { data: { items: unknown[]; answer?: string; warnings?: string[] } };
+  };
+  assert.equal(output.structuredContent.data.items.length, 1);
+  assert.equal(output.structuredContent.data.answer, "Synthesized answer from upstream.");
+  assert.deepEqual(output.structuredContent.data.warnings, ["partial index coverage"]);
+  assert.match(output.content[1]?.text ?? "", /1\. Tavily Hit/);
+  assert.match(output.content[1]?.text ?? "", /Warnings: partial index coverage/);
 });

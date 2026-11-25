@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { fetchCandidates, SearchToolkit } from "../src/toolkit.js";
+import { parseFetchUrls } from "../src/fetching.js";
+import { chineseScript } from "../src/routes.js";
+import { autoCandidates, fetchCandidates, imageCandidates, SearchToolkit } from "../src/toolkit.js";
 
 const fakeServer = fileURLToPath(new URL("./fixtures/fake-mcp.js", import.meta.url));
 
@@ -380,7 +382,7 @@ test("fetch_auto counts full bodies separately from excerpts and provides a cont
         total: 2, succeeded: 1, partial: ["https://example.com/excerpt"],
       });
       assert.match(text(output), /\(parallel, partial\)/);
-      assert.match(text(output), /pass offset=250/);
+      assert.match(text(output), /re-fetch this single URL with offset=250/);
       const pages = (output as { structuredContent: { result: { pages: unknown[] } } }).structuredContent.result.pages;
       assert.deepEqual(pages, [
         { url: "https://example.com/excerpt", status: "partial" },
@@ -448,5 +450,149 @@ test("search_auto prioritizes providers with healthy keys over providers whose k
   } finally {
     restore();
   }
+});
+
+test("path-scoped excludeDomains never widens to whole-host exclusions and is post-filtered deterministically", async () => {
+  const pathOnly = autoCandidates("general", "balanced", {
+    query: "mcp sdk",
+    excludeDomains: ["github.com/spam-org"],
+  });
+  const byName = new Map(pathOnly.map((item) => [item.name, item.nativeArguments]));
+  // Host-only providers must NOT receive whole-host github.com in excludeDomains/exclude_domains.
+  assert.equal(byName.get("you_search")?.excludeDomains, undefined);
+  assert.equal(byName.get("octen_search")?.excludeDomains, undefined);
+  assert.equal(byName.get("tavily_tavily_search")?.exclude_domains, undefined);
+  // Path-capable providers still receive the path-scoped exclusion and precede host-only providers.
+  assert.deepEqual(byName.get("exa_web_search_advanced_exa")?.excludeDomains, ["github.com/spam-org"]);
+  const names = pathOnly.map((item) => item.name);
+  assert.ok(names.indexOf("brave_web_search") < names.indexOf("you_search"));
+  assert.ok(names.indexOf("exa_web_search_advanced_exa") < names.indexOf("tavily_tavily_search"));
+
+  // Mixed includeDomains + path-scoped excludeDomains prioritizes providers supporting both simultaneously ahead of parallel_search.
+  const mixed = autoCandidates("general", "balanced", {
+    query: "mcp sdk",
+    includeDomains: ["github.com/org"],
+    excludeDomains: ["github.com/org/legacy"],
+  });
+  const mixedNames = mixed.map((item) => item.name);
+  assert.ok(mixedNames.indexOf("serper_search") < mixedNames.indexOf("parallel_search"));
+  assert.ok(mixedNames.indexOf("exa_web_search_advanced_exa") < mixedNames.indexOf("parallel_search"));
+
+  // End-to-end search_auto and crossCheck post-filter leaked URLs from providers that ignore path exclusions.
+  const restore = stubSearchFetch({
+    "api.parallel.ai": {
+      results: [
+        { url: "https://github.com/org/legacy/old-issue", title: "Legacy Issue", excerpts: ["should be filtered"] },
+        { url: "https://github.com/org/core/README.md", title: "Core Repo", excerpts: ["kept from parallel"] },
+        { url: "https://unrelated.example/page", title: "Unrelated", excerpts: ["outside includeDomains"] },
+      ],
+    },
+    "ydc-index.io": {
+      results: {
+        web: [
+          { url: "https://github.com/org/legacy/v1", title: "Legacy V1", snippets: ["filtered out"] },
+          { url: "https://github.com/org/core/README.md", title: "Core Repo", snippets: ["kept from you"] },
+        ],
+        news: [],
+      },
+    },
+  });
+  try {
+    await withToolkit({
+      parallel: restProvider("parallel"),
+      you: restProvider("you"),
+    }, async (toolkit) => {
+      const single = await toolkit.callTool("search_auto", {
+        query: "mcp sdk",
+        includeDomains: ["github.com/org"],
+        excludeDomains: ["github.com/org/legacy"],
+      }) as { structuredContent: { result: { data?: { items: Array<{ url: string }> }; items?: Array<{ url: string }> } } };
+      const singleItems = single.structuredContent.result.data?.items ?? single.structuredContent.result.items ?? [];
+      assert.deepEqual(singleItems.map((item) => item.url), ["https://github.com/org/core/README.md"]);
+
+      const checked = await toolkit.callTool("search_auto", {
+        query: "mcp sdk",
+        includeDomains: ["github.com/org"],
+        excludeDomains: ["github.com/org/legacy"],
+        crossCheck: true,
+      }) as { structuredContent: { result: { items: Array<{ url: string }> } } };
+      assert.deepEqual(checked.structuredContent.result.items.map((item) => item.url), ["https://github.com/org/core/README.md"]);
+    });
+  } finally {
+    restore();
+  }
+});
+
+test("scholar max with freshness keeps Exa Auto publication filtering and startPublishedDate", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-15T12:00:00Z") });
+  const candidates = autoCandidates("scholar", "max", {
+    query: "retrieval augmented generation",
+    freshness: "year",
+    limit: 5,
+  });
+  assert.equal(candidates[0]?.name, "exa_web_search_advanced_exa");
+  assert.deepEqual(candidates[0]?.nativeArguments, {
+    query: "retrieval augmented generation",
+    numResults: 7,
+    type: "auto",
+    category: "publication",
+    startPublishedDate: "2025-10-15",
+  });
+});
+
+test("Chinese script detection distinguishes Traditional TW/HK from Simplified CN and passes DeepSeek zh language", () => {
+  assert.equal(chineseScript("台北捷運票價調整"), "zh-hant");
+  assert.equal(chineseScript("香港立法會最新議程"), "zh-hant");
+  assert.equal(chineseScript("深圳地铁16号线"), "zh-hans");
+  assert.equal(chineseScript("Node.js documentation"), undefined);
+
+  const tw = new Map(autoCandidates("general", "balanced", { query: "台北捷運票價調整", limit: 6 }).map((c) => [c.name, c.nativeArguments]));
+  assert.deepEqual(tw.get("brave_web_search"), { query: "台北捷運票價調整", limit: 8, searchLang: "zh-hant", country: "TW" });
+  assert.deepEqual(tw.get("serper_search"), { query: "台北捷運票價調整", limit: 8, gl: "tw", hl: "zh-tw" });
+  assert.equal(tw.get("you_search")?.language, "zh-hant");
+  assert.equal(tw.get("you_search")?.country, "TW");
+  assert.deepEqual(tw.get("deepseek_search")?.languages, ["zh"]);
+
+  const hk = new Map(autoCandidates("general", "balanced", { query: "香港立法會最新議程", limit: 6 }).map((c) => [c.name, c.nativeArguments]));
+  assert.deepEqual(hk.get("brave_web_search"), { query: "香港立法會最新議程", limit: 8, searchLang: "zh-hant", country: "HK" });
+  assert.deepEqual(hk.get("serper_search"), { query: "香港立法會最新議程", limit: 8, gl: "hk", hl: "zh-hk" });
+  assert.equal(hk.get("you_search")?.language, "zh-hant");
+  assert.equal(hk.get("you_search")?.country, "HK");
+
+  const cn = new Map(autoCandidates("general", "balanced", { query: "深圳地铁16号线", limit: 6 }).map((c) => [c.name, c.nativeArguments]));
+  assert.deepEqual(cn.get("deepseek_search")?.languages, ["zh"]);
+  assert.deepEqual(cn.get("vercel_deepseek_search")?.languages, ["zh"]);
+});
+
+test("imageCandidates filters out providers whose query length or word limits are exceeded", () => {
+  const longToken = "a".repeat(450);
+  const byChars = imageCandidates({ query: longToken }).map((c) => c.name);
+  assert.equal(byChars.includes("brave_image_search"), false);
+  assert.ok(byChars.includes("serper_images"));
+  assert.ok(byChars.includes("parallel_image_search"));
+
+  const manyWords = Array.from({ length: 40 }, (_, i) => `w${i}`).join(" ");
+  const byWords = imageCandidates({ query: manyWords }).map((c) => c.name);
+  assert.equal(byWords.includes("serper_images"), false);
+  assert.ok(byWords.includes("brave_image_search"));
+  assert.ok(byWords.includes("parallel_image_search"));
+});
+
+test("parseFetchUrls strips non-SPA fragments for dedupe while preserving SPA hash routes", () => {
+  assert.deepEqual(
+    parseFetchUrls({
+      urls: [
+        "https://example.com/guide#intro",
+        "https://example.com/guide#details",
+        "https://example.com/app#/settings",
+        "https://example.com/app#!home",
+      ],
+    }),
+    [
+      "https://example.com/guide",
+      "https://example.com/app#/settings",
+      "https://example.com/app#!home",
+    ],
+  );
 });
 

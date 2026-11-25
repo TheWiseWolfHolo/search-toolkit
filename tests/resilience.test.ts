@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
-  HttpError, isPageFailure, isTimeout, shouldFailoverProvider, statusFromError, TargetPageError, ToolResultError,
+  HttpError, InvalidRequestError, isPageFailure, isTimeout, shouldFailoverProvider, statusFromError, TargetPageError, ToolResultError,
 } from "../src/errors.js";
 import { callWithRotation } from "../src/keys.js";
 import { isRouteContentBlock, routeBlock } from "../src/provenance.js";
@@ -47,6 +47,7 @@ test("key faults try every key, transient faults one more, timeouts and page fai
     assert.equal(await countAttempts(store, Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" })), 1);
     assert.equal(await countAttempts(store, new TargetPageError("page answered 403", 403)), 1);
     assert.equal(await countAttempts(store, new HttpError("HTTP 422: bad", 422)), 1);
+    assert.equal(await countAttempts(store, new InvalidRequestError("bad argument combination")), 1);
   });
 });
 
@@ -98,6 +99,46 @@ test("a page that blocks Parallel extract leaves every Parallel key healthy", as
     for (const key of status.keys) assert.equal(key.status.status, "healthy");
     const used = status.keys.find((key) => Number(key.status.requests) > 0);
     assert.match(String(used?.status.last_error), /page answered 403/);
+    assert.equal(used?.status.failures, 0);
+    assert.equal(used?.status.tool_errors, 1);
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("InvalidRequestError in a REST provider never retries another key or inflates key failures", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-invalid-req-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      parallel: { enabled: true, auto: ["fetch"], keys: KEYS, integration: { kind: "rest", adapter: "parallel" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("{}", { status: 200 });
+  };
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    await assert.rejects(
+      toolkit.callTool("parallel_extract", { url: "file:///etc/passwd" }),
+      (err: unknown) => err instanceof InvalidRequestError,
+    );
+    assert.equal(calls, 0);
+    const status = toolkit.rotation.status("parallel", KEYS);
+    for (const key of status.keys) {
+      assert.equal(key.status.status, "healthy");
+      assert.equal(key.status.requests, 0);
+      assert.equal(key.status.failures, 0);
+      assert.equal(key.status.tool_errors, 0);
+    }
   } finally {
     globalThis.fetch = original;
     await toolkit.close();

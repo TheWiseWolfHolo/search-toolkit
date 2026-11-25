@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REST_ADAPTER_NAMES } from "./rest/adapters.js";
 import type { AutoCapability, KeyMeta, KeyStrategy, KeyTier, ProviderConfig, ToolkitConfig } from "./types.js";
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -15,17 +16,17 @@ const FETCH_CAPABLE = new Set([
 const STRATEGIES: readonly KeyStrategy[] = ["round_robin", "sticky", "drain"];
 const TIERS: readonly KeyTier[] = ["free", "paid"];
 const KEY_FIELDS = new Set(["key", "tier", "label", "allowTools", "denyTools"]);
-const KNOWN_REST_ADAPTERS = new Set([
-  "querit", "serper", "doubao", "jina", "tinyfish", "brave", "you", "parallel", "grok", "octen",
-  "deepseek", "vercel_gateway", "direct_markdown",
-]);
+const KNOWN_REST_ADAPTERS = new Set(REST_ADAPTER_NAMES);
 const KNOWN_AUTH_KINDS = new Set(["header", "bearer", "query", "none"]);
+const TOP_LEVEL_FIELDS = new Set(["version", "statePath", "profile", "shaping", "cache", "providers"]);
+const TOOL_POLICY_FIELDS = new Set(["allow", "deny", "descriptions"]);
 // Provider options that some adapter actually reads. Everything else is dead weight.
 const CONSUMED_OPTIONS: Record<string, readonly string[]> = {
   grok: ["model", "multiAgentModel", "reasoningEffort", "systemPrompt", "customUrl"],
   deepseek: ["localization"],
   vercel_gateway: ["model", "reasoning", "enableParallelFast", "localization", "fallbackModels", "authMethod"],
-  direct_markdown: ["timeoutMs"],
+  direct_markdown: ["timeoutMs", "allowedPorts"],
+  tinyfish: ["searchBaseUrl", "fetchBaseUrl"],
 };
 const PROVIDER_FIELDS = new Set([
   "enabled", "automatic", "manualOnly", "auto", "keys", "integration", "toolPolicy", "options",
@@ -36,6 +37,11 @@ export interface LoadedConfig {
   config: ToolkitConfig;
   /** Non-fatal observations: legacy format, dead fields. Surfaced as startup warnings. */
   notes: string[];
+}
+
+export interface NormalizeConfigOptions {
+  /** When false, validate env:/file: syntax without requiring local env vars or secret files (used by migrateConfig). */
+  resolveSecrets?: boolean;
 }
 
 export function defaultConfigPath(): string {
@@ -69,21 +75,35 @@ export function loadConfigWithNotes(path = defaultConfigPath()): LoadedConfig {
   return normalizeConfig(readConfigFile(path), dirname(resolve(path)));
 }
 
+function resolvePathRef(rawPath: string, baseDir?: string): string {
+  const trimmed = rawPath.trim();
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return resolve(homedir(), trimmed.slice(2));
+  }
+  return baseDir ? resolve(baseDir, trimmed) : trimmed;
+}
+
 /** Accept v1 and v2 files and return the v2 shape the rest of the code uses. */
-export function normalizeConfig(raw: unknown, baseDir?: string): LoadedConfig {
+export function normalizeConfig(raw: unknown, baseDir?: string, options: NormalizeConfigOptions = {}): LoadedConfig {
   const record = asRecord(raw, "config");
   const version = record.version;
   if (version !== 1 && version !== 2) throw new Error(`Unsupported config version: ${String(version)}`);
   const notes: string[] = [];
+  for (const field of Object.keys(record)) {
+    if (!TOP_LEVEL_FIELDS.has(field)) notes.push(`config.${field} is not a recognised field and is ignored`);
+  }
   if (version === 1) {
     notes.push("config uses the v1 format (automatic/manualOnly); run `search-toolkit migrate-config --write` to upgrade it");
   }
   const providersRaw = asRecord(record.providers, "providers");
+  const resolveSecrets = options.resolveSecrets !== false;
   const providers: Record<string, ProviderConfig> = {};
   for (const [name, value] of Object.entries(providersRaw)) {
-    providers[name] = normalizeProvider(name, asRecord(value, `${name}`), version, notes, baseDir);
+    providers[name] = normalizeProvider(name, asRecord(value, `${name}`), version, notes, baseDir, resolveSecrets);
   }
-  const config: ToolkitConfig = { version: 2, statePath: record.statePath as string, providers };
+  const rawStatePath = typeof record.statePath === "string" ? record.statePath.trim() : "";
+  const statePath = rawStatePath ? resolvePathRef(rawStatePath, baseDir) : (record.statePath as string);
+  const config: ToolkitConfig = { version: 2, statePath, providers };
   if (record.profile !== undefined) config.profile = record.profile as NonNullable<ToolkitConfig["profile"]>;
   if (record.shaping !== undefined) config.shaping = record.shaping as NonNullable<ToolkitConfig["shaping"]>;
   if (record.cache !== undefined) config.cache = record.cache as NonNullable<ToolkitConfig["cache"]>;
@@ -91,7 +111,14 @@ export function normalizeConfig(raw: unknown, baseDir?: string): LoadedConfig {
   return { config, notes };
 }
 
-function normalizeProvider(name: string, raw: Record<string, unknown>, version: unknown, notes: string[], baseDir?: string): ProviderConfig {
+function normalizeProvider(
+  name: string,
+  raw: Record<string, unknown>,
+  version: unknown,
+  notes: string[],
+  baseDir: string | undefined,
+  resolveSecrets: boolean,
+): ProviderConfig {
   for (const field of Object.keys(raw)) {
     if (!PROVIDER_FIELDS.has(field)) notes.push(`${name}.${field} is not a recognised field and is ignored`);
   }
@@ -114,7 +141,7 @@ function normalizeProvider(name: string, raw: Record<string, unknown>, version: 
   const unused = Object.keys(options ?? {}).filter((key) => !consumed.includes(key));
   if (unused.length) notes.push(`${name}.options.{${unused.join(",")}} is never read by this server`);
   const enabled = raw.enabled === true;
-  const { keys, keyRefs, keyMeta } = normalizeKeys(name, raw.keys, enabled, notes, baseDir);
+  const { keys, keyRefs, keyMeta } = normalizeKeys(name, raw.keys, enabled && resolveSecrets, notes, baseDir);
   const provider: ProviderConfig = { enabled, auto, keys, integration };
   if (keyRefs.some((ref) => ref !== undefined)) provider.keyRefs = keyRefs;
   if (keyMeta.some((meta) => Object.keys(meta).length)) provider.keyMeta = keyMeta;
@@ -131,13 +158,13 @@ function normalizeProvider(name: string, raw: Record<string, unknown>, version: 
 
 /**
  * Resolve `env:VAR_NAME` and `file:/path/to/secret` indirections so credentials
- * do not need to sit in plaintext inside providers.json. Disabled providers skip
- * env/file reads so example or paused entries stay valid and never fail on
- * unreadable paths.
+ * do not need to sit in plaintext inside providers.json. Disabled providers and
+ * offline config migrations skip env/file reads so paused or portable entries
+ * stay valid and never fail on unreadable paths.
  */
 function resolveKeyRef(
   rawKey: string,
-  enabled: boolean,
+  shouldResolve: boolean,
   label: string,
   baseDir?: string,
 ): { value: string; ref?: string } {
@@ -147,7 +174,7 @@ function resolveKeyRef(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
       throw new Error(`${label} has invalid env reference: ${trimmed}`);
     }
-    if (!enabled) return { value: trimmed, ref: trimmed };
+    if (!shouldResolve) return { value: trimmed, ref: trimmed };
     const envVal = process.env[varName]?.trim();
     if (!envVal) throw new Error(`${label}: environment variable ${varName} is not set`);
     if (/[\r\n]/.test(envVal)) throw new Error(`${label}: resolved key from ${varName} contains newline characters`);
@@ -156,7 +183,7 @@ function resolveKeyRef(
   if (trimmed.startsWith("file:")) {
     const filePath = trimmed.slice(5).trim();
     if (!filePath) throw new Error(`${label} has empty file reference`);
-    if (!enabled) return { value: trimmed, ref: trimmed };
+    if (!shouldResolve) return { value: trimmed, ref: trimmed };
     const resolved = filePath.startsWith("~/") || filePath.startsWith("~\\")
       ? resolve(homedir(), filePath.slice(2))
       : resolve(baseDir ?? process.cwd(), filePath);
@@ -178,7 +205,7 @@ function resolveKeyRef(
 function normalizeKeys(
   name: string,
   raw: unknown,
-  enabled: boolean,
+  shouldResolve: boolean,
   notes: string[],
   baseDir?: string,
 ): { keys: string[]; keyRefs: Array<string | undefined>; keyMeta: KeyMeta[] } {
@@ -189,7 +216,7 @@ function normalizeKeys(
   raw.forEach((entry, slot) => {
     const label = `${name}.keys[${slot}]`;
     if (typeof entry === "string") {
-      const resolved = resolveKeyRef(entry, enabled, label, baseDir);
+      const resolved = resolveKeyRef(entry, shouldResolve, label, baseDir);
       keys.push(resolved.value);
       keyRefs.push(resolved.ref);
       keyMeta.push({});
@@ -215,7 +242,7 @@ function normalizeKeys(
       if (record[field] === undefined) continue;
       meta[field] = toolNames(record[field], `${label}.${field}`);
     }
-    const resolved = resolveKeyRef(record.key as string, enabled, label, baseDir);
+    const resolved = resolveKeyRef(record.key as string, shouldResolve, label, baseDir);
     keys.push(resolved.value);
     keyRefs.push(resolved.ref);
     keyMeta.push(meta);
@@ -237,12 +264,13 @@ function keyDocument(key: string, meta: KeyMeta | undefined): unknown {
 
 /**
  * Produce a clean v2 document from any readable config: legacy switches become
- * `auto`, and options no adapter reads are dropped. Returns what changed so the
- * caller can show it before writing.
+ * `auto`, and options no adapter reads are dropped. Preserves `env:`/`file:` refs
+ * without requiring them to be resolvable on the machine running migration.
  */
 export function migrateConfig(raw: unknown, baseDir?: string): { document: Record<string, unknown>; changes: string[] } {
-  const { config, notes } = normalizeConfig(raw, baseDir);
+  const { config, notes } = normalizeConfig(raw, baseDir, { resolveSecrets: false });
   const source = asRecord(raw, "config");
+  const rawStatePath = typeof source.statePath === "string" && source.statePath.trim() ? source.statePath.trim() : config.statePath;
   const changes = notes.filter((note) => !note.startsWith("config uses the v1 format"));
   if (source.version === 1) changes.unshift("version 1 → 2: automatic/manualOnly replaced by auto[] (exa, tavily, firecrawl, linkup, anysearch, parallel, you also get fetch where they were automatic or Firecrawl)");
   const providers = Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [name, {
@@ -259,7 +287,7 @@ export function migrateConfig(raw: unknown, baseDir?: string): { document: Recor
   return {
     document: {
       version: 2,
-      statePath: config.statePath,
+      statePath: rawStatePath,
       ...(config.profile ? { profile: config.profile } : {}),
       ...(config.shaping ? { shaping: config.shaping } : {}),
       ...(config.cache ? { cache: config.cache } : {}),
@@ -271,7 +299,7 @@ export function migrateConfig(raw: unknown, baseDir?: string): { document: Recor
 
 export function validateConfig(config: ToolkitConfig): void {
   if (config.version !== 2) throw new Error(`Unsupported config version: ${String(config.version)}`);
-  if (!config.statePath || typeof config.statePath !== "string") throw new Error("statePath is required");
+  if (!config.statePath || typeof config.statePath !== "string" || !config.statePath.trim()) throw new Error("statePath is required");
   if (!config.providers || typeof config.providers !== "object") throw new Error("providers is required");
   if (config.profile !== undefined && config.profile !== "full" && config.profile !== "curated" && config.profile !== "lean") {
     throw new Error("profile must be \"full\", \"curated\", or \"lean\"");
@@ -300,6 +328,35 @@ function validateCache(cache: NonNullable<ToolkitConfig["cache"]>): void {
       throw new Error(`cache.${field} must be an integer from 0 to 86400`);
     }
   }
+  if (cache.maxEntries !== undefined && (!Number.isInteger(cache.maxEntries) || cache.maxEntries < 0 || cache.maxEntries > 100_000)) {
+    throw new Error("cache.maxEntries must be an integer from 0 to 100000");
+  }
+  if (cache.maxTotalBytes !== undefined && (!Number.isInteger(cache.maxTotalBytes) || cache.maxTotalBytes < 0 || cache.maxTotalBytes > 1_073_741_824)) {
+    throw new Error("cache.maxTotalBytes must be an integer from 0 to 1073741824");
+  }
+}
+
+function validateHttpUrl(raw: unknown, label: string): void {
+  if (typeof raw !== "string" || !raw.trim()) throw new Error(`${label} must be a valid http(s) URL`);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${label} must be a valid http(s) URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${label} must be a valid http(s) URL`);
+  }
+}
+
+function validateStringRecord(value: unknown, label: string, rejectNewlines = false): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a string-to-string object`);
+  }
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v !== "string") throw new Error(`${label}.${k} must be a string`);
+    if (rejectNewlines && /[\r\n]/.test(v)) throw new Error(`${label}.${k} must not contain newline characters`);
+  }
 }
 
 function validateIntegration(name: string, integration: ProviderConfig["integration"]): void {
@@ -311,15 +368,7 @@ function validateIntegration(name: string, integration: ProviderConfig["integrat
       throw new Error(`${name}.integration.adapter is unknown: ${String(integration.adapter)}`);
     }
     if (integration.baseUrl !== undefined) {
-      let parsed: URL;
-      try {
-        parsed = new URL(integration.baseUrl);
-      } catch {
-        throw new Error(`${name}.integration.baseUrl must be a valid http(s) URL`);
-      }
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error(`${name}.integration.baseUrl must be a valid http(s) URL`);
-      }
+      validateHttpUrl(integration.baseUrl, `${name}.integration.baseUrl`);
     }
     if (integration.timeoutMs !== undefined && (!Number.isInteger(integration.timeoutMs) || integration.timeoutMs < 1_000 || integration.timeoutMs > 300_000)) {
       throw new Error(`${name}.integration.timeoutMs must be an integer from 1000 to 300000`);
@@ -330,21 +379,22 @@ function validateIntegration(name: string, integration: ProviderConfig["integrat
     if (typeof integration.url !== "string" || !integration.url.trim()) {
       throw new Error(`${name}.integration.url is required`);
     }
-    let parsed: URL;
-    try {
-      parsed = new URL(integration.url);
-    } catch {
-      throw new Error(`${name}.integration.url must be a valid http(s) URL`);
-    }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error(`${name}.integration.url must be a valid http(s) URL`);
-    }
+    validateHttpUrl(integration.url, `${name}.integration.url`);
     const auth = integration.auth as { kind?: unknown; name?: unknown } | undefined;
     if (!auth || typeof auth !== "object" || typeof auth.kind !== "string" || !KNOWN_AUTH_KINDS.has(auth.kind)) {
       throw new Error(`${name}.integration.auth.kind must be one of header, bearer, query, none`);
     }
     if ((auth.kind === "header" || auth.kind === "query") && (typeof auth.name !== "string" || !auth.name.trim())) {
       throw new Error(`${name}.integration.auth.name is required for ${auth.kind} auth`);
+    }
+    if (integration.headers !== undefined) {
+      validateStringRecord(integration.headers, `${name}.integration.headers`, true);
+    }
+    if (integration.timeoutMs !== undefined && (!Number.isInteger(integration.timeoutMs) || integration.timeoutMs < 1_000 || integration.timeoutMs > 300_000)) {
+      throw new Error(`${name}.integration.timeoutMs must be an integer from 1000 to 300000`);
+    }
+    if (integration.idleTimeoutMs !== undefined && (!Number.isInteger(integration.idleTimeoutMs) || integration.idleTimeoutMs < 0 || integration.idleTimeoutMs > 86_400_000)) {
+      throw new Error(`${name}.integration.idleTimeoutMs must be an integer from 0 to 86400000`);
     }
     return;
   }
@@ -357,6 +407,12 @@ function validateIntegration(name: string, integration: ProviderConfig["integrat
     }
     if (typeof integration.envKey !== "string" || !integration.envKey.trim()) {
       throw new Error(`${name}.integration.envKey is required`);
+    }
+    if (integration.env !== undefined) {
+      validateStringRecord(integration.env, `${name}.integration.env`);
+    }
+    if (integration.timeoutMs !== undefined && (!Number.isInteger(integration.timeoutMs) || integration.timeoutMs < 1_000 || integration.timeoutMs > 300_000)) {
+      throw new Error(`${name}.integration.timeoutMs must be an integer from 1000 to 300000`);
     }
     if (integration.idleTimeoutMs !== undefined && (!Number.isInteger(integration.idleTimeoutMs) || integration.idleTimeoutMs < 0 || integration.idleTimeoutMs > 86_400_000)) {
       throw new Error(`${name}.integration.idleTimeoutMs must be an integer from 0 to 86400000`);
@@ -375,8 +431,13 @@ function validateProvider(name: string, provider: ProviderConfig): void {
   if (provider.enabled && provider.keys.length === 0 && !keylessAllowed) {
     throw new Error(`${name} is enabled but has no keys`);
   }
-  const unique = new Set(provider.keys.map((key) => key.trim()).filter(Boolean));
-  if (unique.size !== provider.keys.length) throw new Error(`${name}.keys contains blanks or duplicates`);
+  if (provider.enabled) {
+    const unique = new Set(provider.keys.map((key) => key.trim()).filter(Boolean));
+    if (unique.size !== provider.keys.length) throw new Error(`${name}.keys contains blanks or duplicates`);
+  } else {
+    const nonBlank = provider.keys.map((key) => key.trim()).filter(Boolean);
+    if (new Set(nonBlank).size !== nonBlank.length) throw new Error(`${name}.keys contains duplicates`);
+  }
   if (provider.strategy !== undefined && !STRATEGIES.includes(provider.strategy)) {
     throw new Error(`${name}.strategy must be one of ${STRATEGIES.join(", ")}`);
   }
@@ -392,8 +453,28 @@ function validateProvider(name: string, provider: ProviderConfig): void {
     if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1_000 || (timeoutMs as number) > 15_000)) {
       throw new Error(`${name}.options.timeoutMs must be an integer from 1000 to 15000`);
     }
+    const allowedPorts = provider.options?.allowedPorts;
+    if (allowedPorts !== undefined) {
+      if (!Array.isArray(allowedPorts) || allowedPorts.some((port) => !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535)) {
+        throw new Error(`${name}.options.allowedPorts must be an array of integer ports from 1 to 65535`);
+      }
+    }
+  }
+  if (provider.integration.kind === "rest" && provider.integration.adapter === "tinyfish") {
+    if (provider.options?.searchBaseUrl !== undefined) {
+      validateHttpUrl(provider.options.searchBaseUrl, `${name}.options.searchBaseUrl`);
+    }
+    if (provider.options?.fetchBaseUrl !== undefined) {
+      validateHttpUrl(provider.options.fetchBaseUrl, `${name}.options.fetchBaseUrl`);
+    }
+  }
+  if (provider.integration.kind === "rest" && provider.integration.adapter === "grok" && provider.options?.customUrl !== undefined) {
+    validateHttpUrl(provider.options.customUrl, `${name}.options.customUrl`);
   }
   for (const [policyName, values] of Object.entries(provider.toolPolicy ?? {})) {
+    if (!TOOL_POLICY_FIELDS.has(policyName)) {
+      throw new Error(`${name}.toolPolicy.${policyName} is not a recognised field (expected allow, deny, or descriptions)`);
+    }
     if (policyName === "descriptions") {
       if (!values || typeof values !== "object" || Array.isArray(values)
         || Object.values(values).some((text) => typeof text !== "string")) {

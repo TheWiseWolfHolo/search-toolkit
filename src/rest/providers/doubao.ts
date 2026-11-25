@@ -1,8 +1,16 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { HttpError } from "../../errors.js";
+import { redact } from "../../provenance.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
-import { arrayArg, normalizeItem, numberArg, objectRecord, objectValue, stringArg } from "../normalize.js";
+import {
+  baseUrlOf, cleanHosts, requestJson, searchTool, timeoutOf,
+  type RestAdapter, type RestAdapterContext,
+} from "../base.js";
+import {
+  arrayArg, DEFAULT_ITEM_TEXT_CHARS, formatEpochDate, normalizeItem, numberArg, objectRecord, objectValue, stringArg,
+} from "../normalize.js";
+
+const NEED_CONTENT_MAX_CHARS = 32_000;
 
 export class DoubaoAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -20,68 +28,85 @@ export class DoubaoAdapter implements RestAdapter {
     )];
   }
 
-  async call(_tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
+  async call(
+    _tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
     const filter: Record<string, unknown> = { NeedUrl: true };
-    const sites = arrayArg(args, "sites");
-    const blockHosts = arrayArg(args, "blockHosts");
+    const sites = cleanHosts(arrayArg(args, "sites"));
+    const blockHosts = cleanHosts(arrayArg(args, "blockHosts"));
     if (sites.length) filter.Sites = sites.join("|");
     if (blockHosts.length) filter.BlockHosts = blockHosts.join("|");
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
     const body: Record<string, unknown> = {
       Query: stringArg(args, "query"),
       SearchType: "web",
-      Count: numberArg(args, "limit", 6),
+      Count: limit,
       NeedSummary: true,
       Filter: filter,
     };
     const timeRange = stringArg(args, "timeRange").trim();
     if (timeRange) body.TimeRange = timeRange;
-    if (args.needContent === true) body.NeedContent = true;
+    const preferContent = args.needContent === true;
+    if (preferContent) body.NeedContent = true;
     const contentFormat = stringArg(args, "contentFormat");
     if (contentFormat) body.ContentFormat = contentFormat;
     const data = await requestJson(baseUrlOf(config, "https://open.feedcoopapi.com/search_api/web_search"), {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify(body),
+    }, {
+      timeoutMs: timeoutOf(config, 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
     });
     const metaError = objectRecord(objectRecord(data.ResponseMetadata).Error);
     if (metaError.Code || metaError.CodeN || metaError.Message) {
       const codeN = typeof metaError.CodeN === "number" ? metaError.CodeN : Number(metaError.CodeN);
-      const code = String(metaError.Code ?? "");
-      const message = String(metaError.Message ?? code ?? "Doubao error");
-      const status = codeN === 10406 || /balance|quota|arrears|insufficient/i.test(`${code} ${message}`)
+      const code = String(metaError.Code ?? "").trim();
+      const rawMessage = String(metaError.Message ?? code ?? "Doubao error");
+      const safeMessage = redact(rawMessage).slice(0, 500);
+      const combined = `${code} ${safeMessage}`;
+      const status = codeN === 10406 || /balance|quota|arrears|insufficient|余额不足|欠费|配额/i.test(combined)
         ? 402
-        : codeN === 700429 || /rate[\s_-]?limit|qps|throttl|too[\s_-]?many[\s_-]?requests|concurrency/i.test(`${code} ${message}`)
+        : codeN === 700429 || /rate[\s_-]?limit|qps|throttl|too[\s_-]?many[\s_-]?requests|concurrency|限流|并发|频率/i.test(combined)
           ? 429
-          : /auth|token|signature|forbidden/i.test(`${code} ${message}`)
+          : /auth|token|signature|forbidden|invalid[\s_-]?api[\s_-]?key|access[\s_-]?denied|unauthorized|鉴权|密钥无效/i.test(combined)
             ? 401
-            : 502;
-      throw new HttpError(`HTTP ${status}: ${message}${code ? ` (${code})` : ""}`, status);
+            : /invalid[\s_-]?param(?:eter)?|missing[\s_-]?param(?:eter)?|bad[\s_-]?request|参数(?:错误|无效|缺失)/i.test(combined)
+              ? 422
+              : 502;
+      throw new HttpError(`HTTP ${status}: ${safeMessage}${code ? ` (${code})` : ""}`, status);
     }
     const result = data.Result as Record<string, unknown> | undefined;
     const rows = result?.WebResults;
-    const preferContent = args.needContent === true;
-    return { items: Array.isArray(rows) ? rows.map((item) => normalizeItem({
-      title: objectValue(item, "Title"),
-      url: objectValue(item, "Url"),
-      text: preferContent
-        ? (objectValue(item, "Content") || objectValue(item, "Summary") || objectValue(item, "Snippet"))
-        : (objectValue(item, "Summary") || objectValue(item, "Content") || objectValue(item, "Snippet")),
-      date: formatDoubaoDate(item),
-    })) : [] };
+    const maxChars = preferContent ? NEED_CONTENT_MAX_CHARS : DEFAULT_ITEM_TEXT_CHARS;
+    return {
+      items: Array.isArray(rows)
+        ? rows.slice(0, limit).map((item) => normalizeItem({
+            title: objectValue(item, "Title"),
+            url: objectValue(item, "Url"),
+            text: preferContent
+              ? (objectValue(item, "Content") || objectValue(item, "Summary") || objectValue(item, "Snippet"))
+              : (objectValue(item, "Summary") || objectValue(item, "Content") || objectValue(item, "Snippet")),
+            date: formatDoubaoDate(item),
+          }, { maxChars }))
+        : [],
+    };
   }
 }
 
 function formatDoubaoDate(item: unknown): string {
   const record = objectRecord(item);
   const raw = record.PublishTime ?? record.PublishDate;
-  if (typeof raw === "number" && Number.isFinite(raw) && raw > 1e8) {
-    const ms = raw > 1e12 ? raw : raw * 1000;
-    return new Date(ms).toISOString().slice(0, 10);
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return formatEpochDate(raw) ?? "";
   }
   if (typeof raw === "string") {
     const trimmed = raw.trim();
-    if (/^\d{10}$/.test(trimmed)) return new Date(Number(trimmed) * 1000).toISOString().slice(0, 10);
-    if (/^\d{13}$/.test(trimmed)) return new Date(Number(trimmed)).toISOString().slice(0, 10);
+    if (/^\d{10,19}$/.test(trimmed)) return formatEpochDate(Number(trimmed)) ?? "";
     return trimmed;
   }
   return "";

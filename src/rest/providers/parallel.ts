@@ -1,12 +1,20 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { TargetPageError } from "../../errors.js";
 import type { ProviderConfig } from "../../types.js";
-import { endpointOf, requestJson, searchTool, type RestAdapter } from "../base.js";
 import {
-  arrayArg, normalizeParallelImage, normalizeParallelItem, objectRecord, stringArg, stringValue,
+  cleanDomains, collectValidatedUrls, endpointOf, formatExtractedLink, formatExtractedPage, READ_ONLY_OPEN,
+  requestJson, searchTool, timeoutOf, type RestAdapter, type RestAdapterContext,
+} from "../base.js";
+import {
+  arrayArg, DEFAULT_ITEM_TEXT_CHARS, normalizeParallelImage, normalizeParallelItem, numberArg, objectRecord,
+  stringArg, stringValue,
 } from "../normalize.js";
 
-const READ_ONLY_OPEN = { readOnlyHint: true, destructiveHint: false, openWorldHint: true } as const;
+function mergeWarnings(upstream: unknown, extra: readonly string[]): unknown {
+  if (!extra.length) return upstream;
+  const list = Array.isArray(upstream) ? [...upstream, ...extra] : [...extra];
+  return list;
+}
 
 export class ParallelAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -102,18 +110,30 @@ export class ParallelAdapter implements RestAdapter {
     return [search, extract, imageSearch];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    if (tool === "parallel_extract") return this.callExtract(args, key, config);
-    if (tool === "parallel_image_search") return this.callImageSearch(args, key, config);
-    return this.callSearch(args, key, config);
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    if (tool === "parallel_extract") return this.callExtract(args, key, config, context);
+    if (tool === "parallel_image_search") return this.callImageSearch(args, key, config, context);
+    return this.callSearch(args, key, config, context);
   }
 
-  private async callSearch(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
+  private async callSearch(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
     const query = stringArg(args, "query");
     const searches = arrayArg(args, "searchQueries");
+    const localWarnings: string[] = [];
     const body: Record<string, unknown> = {
       objective: query,
-      search_queries: searches.length ? searches : [query.slice(0, 200)],
+      search_queries: searches.length ? searches : [Array.from(query).slice(0, 200).join("")],
       mode: stringArg(args, "mode", "fast"),
     };
     for (const [source, target] of [
@@ -126,44 +146,61 @@ export class ParallelAdapter implements RestAdapter {
     }
     const advanced: Record<string, unknown> = {};
     const sourcePolicy: Record<string, unknown> = {};
-    const include = arrayArg(args, "includeDomains");
-    const exclude = arrayArg(args, "excludeDomains");
-    const afterDate = stringArg(args, "afterDate");
+    const include = cleanDomains(arrayArg(args, "includeDomains"));
+    const exclude = cleanDomains(arrayArg(args, "excludeDomains"));
+    const afterDate = stringArg(args, "afterDate").trim();
     // Parallel ignores exclude_domains next to include_domains; an include list already decides.
-    if (include.length) sourcePolicy.include_domains = include;
-    else if (exclude.length) sourcePolicy.exclude_domains = exclude;
+    if (include.length) {
+      sourcePolicy.include_domains = include;
+      if (exclude.length) {
+        localWarnings.push("excludeDomains was ignored because Parallel does not combine exclude_domains with include_domains");
+      }
+    } else if (exclude.length) {
+      sourcePolicy.exclude_domains = exclude;
+    }
     if (afterDate) sourcePolicy.after_date = afterDate;
     if (Object.keys(sourcePolicy).length) advanced.source_policy = sourcePolicy;
-    if (typeof args.maxAgeSeconds === "number") advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
-    const maxResults = typeof args.maxResults === "number"
-      ? args.maxResults
-      : typeof args.limit === "number"
-        ? args.limit
-        : undefined;
-    if (body.max_chars_total === undefined && typeof args.maxCharsPerResult === "number") {
-      // Parallel v1 Search uses top-level max_chars_total instead of advanced_settings.excerpt_settings.
-      body.max_chars_total = Math.max(1, Math.round(args.maxCharsPerResult * (maxResults ?? 6)));
+    if (typeof args.maxAgeSeconds === "number" && Number.isFinite(args.maxAgeSeconds)) {
+      advanced.fetch_policy = { max_age_seconds: Math.max(600, Math.round(args.maxAgeSeconds)) };
     }
-    if (maxResults !== undefined) advanced.max_results = maxResults;
-    if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
+    const maxResults = typeof args.maxResults === "number" && Number.isFinite(args.maxResults)
+      ? Math.min(20, Math.max(1, Math.round(args.maxResults)))
+      : Math.min(20, Math.max(1, Math.round(numberArg(args, "limit", 6))));
+    const maxCharsPerResult = typeof args.maxCharsPerResult === "number" && Number.isFinite(args.maxCharsPerResult)
+      ? args.maxCharsPerResult
+      : undefined;
+    if (body.max_chars_total === undefined && maxCharsPerResult !== undefined) {
+      // Parallel v1 Search uses top-level max_chars_total instead of advanced_settings.excerpt_settings.
+      body.max_chars_total = Math.max(1, Math.round(maxCharsPerResult * maxResults));
+    }
+    advanced.max_results = maxResults;
+    if (stringArg(args, "location").trim()) advanced.location = stringArg(args, "location").trim().toLowerCase();
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
     const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/search"), {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 60_000);
+    }, {
+      timeoutMs: timeoutOf(config, 60_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
+    const itemMaxChars = Math.max(DEFAULT_ITEM_TEXT_CHARS, maxCharsPerResult ? Math.round(maxCharsPerResult) : 0);
     return {
-      items: Array.isArray(data.results) ? data.results.map(normalizeParallelItem) : [],
+      items: Array.isArray(data.results) ? data.results.slice(0, maxResults).map((row) => normalizeParallelItem(row, itemMaxChars)) : [],
       searchId: data.search_id,
       sessionId: data.session_id,
-      warnings: data.warnings,
+      warnings: mergeWarnings(data.warnings, localWarnings),
       usage: data.usage,
     };
   }
 
-  private async callExtract(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
-    const urls = collectUrls(args);
-    if (!urls.length) throw new Error("parallel_extract requires url or urls");
+  private async callExtract(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const urls = collectValidatedUrls(args, "parallel_extract", 20);
     const body: Record<string, unknown> = { urls };
     if (stringArg(args, "objective")) body.objective = stringArg(args, "objective");
     const searches = arrayArg(args, "searchQueries");
@@ -178,14 +215,16 @@ export class ParallelAdapter implements RestAdapter {
     }
     const advanced: Record<string, unknown> = {};
     const fullContent = args.fullContent !== false;
-    const maxCharsPerResult = typeof args.maxCharsPerResult === "number" ? args.maxCharsPerResult : undefined;
+    const maxCharsPerResult = typeof args.maxCharsPerResult === "number" && Number.isFinite(args.maxCharsPerResult)
+      ? args.maxCharsPerResult
+      : undefined;
     if (fullContent) {
       advanced.full_content = maxCharsPerResult !== undefined ? { max_chars_per_result: maxCharsPerResult } : true;
     } else if (maxCharsPerResult !== undefined) {
       advanced.excerpt_settings = { max_chars_per_result: maxCharsPerResult };
     }
-    if (typeof args.maxAgeSeconds === "number") {
-      advanced.fetch_policy = { max_age_seconds: Math.max(600, args.maxAgeSeconds) };
+    if (typeof args.maxAgeSeconds === "number" && Number.isFinite(args.maxAgeSeconds)) {
+      advanced.fetch_policy = { max_age_seconds: Math.max(600, Math.round(args.maxAgeSeconds)) };
     }
     if (args.links === true) advanced.links = true;
     if (Object.keys(advanced).length) body.advanced_settings = advanced;
@@ -193,7 +232,10 @@ export class ParallelAdapter implements RestAdapter {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 60_000);
+    }, {
+      timeoutMs: timeoutOf(config, 60_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     const results = Array.isArray(data.results) ? data.results.map(objectRecord) : [];
     const errors = Array.isArray(data.errors) ? data.errors.map(objectRecord) : [];
     if (results.length === 0 && errors.length > 0) {
@@ -205,17 +247,32 @@ export class ParallelAdapter implements RestAdapter {
         pageStatus,
       );
     }
-    const text = results.map((entry) => {
+    const sections = results.map((entry) => {
       const title = stringValue(entry.title);
-      const url = stringValue(entry.url) ?? "";
+      const url = stringValue(entry.url);
       const date = stringValue(entry.publish_date);
       const full = stringValue(entry.full_content)?.trim();
-      const excerpts = Array.isArray(entry.excerpts) ? entry.excerpts.map(String).filter(Boolean).join("\n\n") : "";
-      const header = [title ? `# ${title}` : "", url ? `URL: ${url}${date ? ` (${date})` : ""}` : ""].filter(Boolean).join("\n");
-      return [header, full || excerpts].filter(Boolean).join("\n\n");
-    }).filter(Boolean).join("\n\n---\n\n");
+      const excerpts = Array.isArray(entry.excerpts)
+        ? entry.excerpts.map((part) => (typeof part === "string" ? part.trim() : "")).filter(Boolean).join("\n\n")
+        : "";
+      const bodyText = full || excerpts;
+      const links = args.links === true && Array.isArray(entry.links)
+        ? entry.links.slice(0, 50).map(formatExtractedLink).filter(Boolean)
+        : [];
+      if (!bodyText && !links.length) return "";
+      return formatExtractedPage({
+        ...(title ? { title } : {}),
+        ...(url ? { url } : {}),
+        ...(date ? { date } : {}),
+        body: bodyText,
+        ...(links.length ? { links } : {}),
+      });
+    }).filter(Boolean);
+    if (!sections.length) {
+      throw new TargetPageError("Parallel extract returned no content for the page");
+    }
     return {
-      text,
+      text: sections.join("\n\n---\n\n"),
       results,
       errors,
       extractId: data.extract_id,
@@ -225,12 +282,18 @@ export class ParallelAdapter implements RestAdapter {
     };
   }
 
-  private async callImageSearch(args: Record<string, unknown>, key: string, config: ProviderConfig): Promise<unknown> {
+  private async callImageSearch(
+    args: Record<string, unknown>,
+    key: string,
+    config: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
     const query = stringArg(args, "query");
     const searches = arrayArg(args, "searchQueries");
+    const limit = Math.min(20, Math.max(1, Math.round(numberArg(args, "limit", 10))));
     const body: Record<string, unknown> = {
       objective: query,
-      search_queries: searches.length ? searches : [query.slice(0, 200)],
+      search_queries: searches.length ? searches : [Array.from(query).slice(0, 200).join("")],
       mode: stringArg(args, "mode", "fast"),
     };
     for (const [source, target] of [
@@ -240,30 +303,23 @@ export class ParallelAdapter implements RestAdapter {
       const value = args[source];
       if (value !== undefined && value !== null && value !== "") body[target] = value;
     }
-    const advanced: Record<string, unknown> = {};
-    if (typeof args.limit === "number") advanced.max_results = args.limit;
-    if (stringArg(args, "location")) advanced.location = stringArg(args, "location").toLowerCase();
-    if (Object.keys(advanced).length) body.advanced_settings = advanced;
+    const advanced: Record<string, unknown> = { max_results: limit };
+    if (stringArg(args, "location").trim()) advanced.location = stringArg(args, "location").trim().toLowerCase();
+    body.advanced_settings = advanced;
     const data = await requestJson(endpointOf(config, "https://api.parallel.ai", "/v1/images/search"), {
       method: "POST",
       headers: { "x-api-key": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 30_000);
+    }, {
+      timeoutMs: timeoutOf(config, 30_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     return {
-      items: Array.isArray(data.results) ? data.results.map(normalizeParallelImage) : [],
+      items: Array.isArray(data.results) ? data.results.slice(0, limit).map(normalizeParallelImage) : [],
       searchId: data.search_id,
       sessionId: data.session_id,
       warnings: data.warnings,
       usage: data.usage,
     };
   }
-}
-
-function collectUrls(args: Record<string, unknown>): string[] {
-  const urls: string[] = [];
-  if (typeof args.url === "string" && args.url.trim()) urls.push(args.url.trim());
-  for (const item of arrayArg(args, "urls")) {
-    if (!urls.includes(item)) urls.push(item);
-  }
-  return urls.slice(0, 20);
 }

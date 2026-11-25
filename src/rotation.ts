@@ -2,13 +2,19 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AutoCapability, KeySelection, KeyStrategy } from "./types.js";
+import type { AutoCapability, KeySelection, KeyStrategy, QuotaUnit } from "./types.js";
+
+export type { QuotaUnit } from "./types.js";
 
 const SCHEMA_VERSION = 2;
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const HEALTH_STEP = 0.4;
 const HEALTH_HALF_LIFE_MS = 15 * MINUTE;
+/** Strikes decay after a quiet 24h window so an isolated fault days later starts fresh. */
+const STRIKE_DECAY_MS = 24 * HOUR;
+/** Half-open single-canary probe lease so concurrent callers do not stampede a recovering key. */
+const PROBE_LEASE_MS = 30_000;
 /** A provider at or above this recent failure score is tried after its healthy peers. */
 export const FLAKY_SCORE = 0.5;
 
@@ -69,6 +75,15 @@ export interface SelectOptions {
   exclude?: ReadonlySet<number>;
   /** Use exactly this slot, healthy or not (probes). */
   pin?: number;
+  /** Permit selecting 402-exhausted slots while still blocking 401/403/429 benched slots ($0 promo tools). */
+  allowExhausted?: boolean;
+}
+
+export interface RecordQuotaOptions {
+  exhaustOnZero?: boolean;
+  /** Keep existing exhausted status even when remaining > 0 (e.g. separate daily free cap). */
+  preserveStatusOnPositive?: boolean;
+  unit?: QuotaUnit;
 }
 
 /** healthy: selectable now. sunk: exhausted, window over, tried only as a last resort. benched: still inside its window. */
@@ -78,6 +93,7 @@ interface StateRow {
   fp: string;
   status: string;
   cooldown_until: number | null;
+  probe_until: number | null;
   strikes: number;
 }
 
@@ -86,6 +102,7 @@ type Statement = ReturnType<DatabaseSync["prepare"]>;
 export class RotationStore {
   private readonly db: DatabaseSync;
   private readonly statements = new Map<string, Statement>();
+  private closed = false;
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
@@ -118,6 +135,8 @@ export class RotationStore {
     this.addColumn("last_error_at", "INTEGER");
     this.addColumn("quota_remaining", "REAL");
     this.addColumn("quota_checked_at", "INTEGER");
+    this.addColumn("quota_unit", "TEXT");
+    this.addColumn("probe_until", "INTEGER");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS provider_health (
         provider TEXT PRIMARY KEY,
@@ -127,7 +146,7 @@ export class RotationStore {
     `);
   }
 
-  /** Shared SQLite connection for co-located state tables such as the result cache. */
+  /** Shared SQLite connection for co-located state tables such as the result cache and tool catalog. */
   database(): DatabaseSync {
     return this.db;
   }
@@ -227,6 +246,8 @@ export class RotationStore {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 
@@ -286,6 +307,7 @@ export class RotationStore {
     if (keys.length === 0) throw new Error(`${provider} has no API keys`);
     const opts: SelectOptions = typeof options === "boolean" ? { strict: options } : options;
     const strategy = opts.strategy ?? "round_robin";
+    const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.statement("SELECT next_slot FROM provider_cursor WHERE provider = ?").get(provider) as
@@ -293,13 +315,17 @@ export class RotationStore {
         | undefined;
       const cursor = (row?.next_slot ?? 0) % keys.length;
       let slot: number;
+      let chosenFp: string | undefined;
       if (opts.pin !== undefined) {
         if (!keys[opts.pin]) throw new Error(`${provider} key slot ${opts.pin} is missing`);
         slot = opts.pin;
       } else if (opts.strict) {
         slot = cursor;
       } else {
-        const states = this.slotStates(provider, keys);
+        const health = this.healthByFingerprint(provider);
+        const fps = keys.map((key) => keyFingerprint(key));
+        const allowExhausted = opts.allowExhausted === true;
+        const states = fps.map((fp) => evaluateSlotState(health.get(fp), now, allowExhausted));
         const allowed = (opts.eligible ?? keys.map((_, index) => index))
           .filter((index) => index >= 0 && index < keys.length && !opts.exclude?.has(index));
         // drain walks the pool in configured order; the others start from the cursor.
@@ -316,11 +342,23 @@ export class RotationStore {
             ?? ordered.find((index) => states[index]?.state === "sunk");
         if (found === undefined) {
           const soonest = Math.min(...allowed.map((index) => states[index]?.until ?? Infinity));
-          const wait = Number.isFinite(soonest) ? ` (next recovery in ${formatDuration(soonest - Date.now())})` : "";
+          const wait = Number.isFinite(soonest) ? ` (next recovery in ${formatDuration(soonest - now)})` : "";
           const scope = opts.eligible && opts.eligible.length < keys.length ? " for this tool" : "";
           throw new Error(`${provider} has no healthy key slots available${scope}${wait}`);
         }
         slot = found;
+        chosenFp = fps[slot];
+        // Half-open canary lease: when a recovering/sunk key is chosen and backup slots exist,
+        // hold a brief probe lease so concurrent callers use backup slots instead of stampeding.
+        // Skip lease when a $0 promo call intentionally runs on an exhausted key.
+        const existing = chosenFp ? health.get(chosenFp) : undefined;
+        const isRecovering = existing !== undefined
+          && !(allowExhausted && existing.status === "exhausted")
+          && (existing.status === "exhausted" || (existing.status !== "healthy" && existing.cooldown_until !== null && existing.cooldown_until <= now));
+        if (isRecovering && allowed.length > 1 && chosenFp) {
+          this.statement("UPDATE key_state SET probe_until = ? WHERE provider = ? AND fp = ?")
+            .run(now + PROBE_LEASE_MS, provider, chosenFp);
+        }
       }
       // sticky keeps pointing at the key in use; round_robin moves past it; drain never moves.
       // A call limited to some slots, or pinned to one, leaves the shared cursor untouched.
@@ -335,7 +373,7 @@ export class RotationStore {
       this.db.exec("COMMIT");
       const key = keys[slot];
       if (!key) throw new Error(`${provider} key slot ${slot} is missing`);
-      return { provider, slot, key, masked: maskKey(key), fingerprint: keyFingerprint(key) };
+      return { provider, slot, key, masked: maskKey(key), fingerprint: chosenFp ?? keyFingerprint(key) };
     } catch (error) {
       this.rollback();
       throw error;
@@ -343,15 +381,29 @@ export class RotationStore {
   }
 
   /** Where each slot stands right now, in key order. */
-  slotStates(provider: string, keys: string[]): Array<{ state: SlotState; until?: number }> {
+  slotStates(provider: string, keys: string[], allowExhausted = false): Array<{ state: SlotState; until?: number }> {
     const health = this.healthByFingerprint(provider);
     const now = Date.now();
-    return keys.map((key) => {
-      const item = health.get(keyFingerprint(key));
-      if (!item) return { state: "healthy" };
-      if (item.cooldown_until !== null && item.cooldown_until > now) return { state: "benched", until: item.cooldown_until };
-      return { state: item.status === "exhausted" ? "sunk" : "healthy" };
-    });
+    return keys.map((key) => evaluateSlotState(health.get(keyFingerprint(key)), now, allowExhausted));
+  }
+
+  /** Partition eligible slots into healthy, sunk, and benched in a single DB query and SHA-256 pass. */
+  slotSummary(provider: string, keys: string[], eligible?: readonly number[], allowExhausted = false): {
+    healthy: number[];
+    sunk: number[];
+    benched: number[];
+  } {
+    const states = this.slotStates(provider, keys, allowExhausted);
+    const healthy: number[] = [];
+    const sunk: number[] = [];
+    const benched: number[] = [];
+    for (const slot of eligible ?? keys.map((_, index) => index)) {
+      const state = states[slot]?.state;
+      if (state === "healthy") healthy.push(slot);
+      else if (state === "sunk") sunk.push(slot);
+      else if (state === "benched") benched.push(slot);
+    }
+    return { healthy, sunk, benched };
   }
 
   record(
@@ -367,28 +419,39 @@ export class RotationStore {
       exhausted?: boolean;
       /** The key's plan does not cover this request: noted, but the key is not benched. */
       planLimit?: boolean;
+      /** Error caused by target page or invalid caller arguments: record diagnostics without inflating key failures. */
+      nonKeyError?: boolean;
+      /** Keep an existing exhausted status intact on success (e.g. a $0 promo call on a 402-exhausted key). */
+      preserveExhausted?: boolean;
     },
   ): void {
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.statement("SELECT status, cooldown_until, strikes FROM key_state WHERE provider = ? AND fp = ?")
-        .get(selection.provider, selection.fingerprint) as { status: string; cooldown_until: number | null; strikes: number } | undefined;
-      const strikes = current?.strikes ?? 0;
-      const penalty = result.ok || result.planLimit
+      const current = this.statement("SELECT status, cooldown_until, strikes, last_error_at FROM key_state WHERE provider = ? AND fp = ?")
+        .get(selection.provider, selection.fingerprint) as {
+          status: string; cooldown_until: number | null; strikes: number; last_error_at: number | null;
+        } | undefined;
+      const rawStrikes = current?.strikes ?? 0;
+      const strikes = current?.last_error_at != null && now - current.last_error_at > STRIKE_DECAY_MS ? 0 : rawStrikes;
+      const keepExhausted = result.ok && result.preserveExhausted === true && current?.status === "exhausted";
+      const skipPenalty = result.ok || result.planLimit || result.nonKeyError;
+      const penalty = skipPenalty
         ? undefined
         : penaltyFor(result.httpStatus, strikes, result.retryAfterMs, result.exhausted === true);
-      const nextStatus = result.ok ? "healthy" : penalty ? penalty.status : (current?.status ?? "healthy");
-      const nextCooldown = result.ok ? null : penalty ? now + penalty.cooldownMs : (current?.cooldown_until ?? null);
-      const nextStrikes = result.ok ? 0 : penalty ? strikes + 1 : strikes;
+      const nextStatus = keepExhausted ? "exhausted" : result.ok ? "healthy" : penalty ? penalty.status : (current?.status ?? "healthy");
+      const nextCooldown = keepExhausted ? (current?.cooldown_until ?? null) : result.ok ? null : penalty ? now + penalty.cooldownMs : (current?.cooldown_until ?? null);
+      const nextStrikes = keepExhausted ? strikes : result.ok ? 0 : penalty ? strikes + 1 : strikes;
+      const failureDelta = result.ok || result.nonKeyError ? 0 : 1;
       this.statement(`
         INSERT INTO key_state(
-          provider, fp, status, cooldown_until, strikes, requests, successes, failures, tool_errors,
+          provider, fp, status, cooldown_until, probe_until, strikes, requests, successes, failures, tool_errors,
           last_http_status, last_latency_ms, last_used_at, last_error, last_error_at
-        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider, fp) DO UPDATE SET
           status = excluded.status,
           cooldown_until = excluded.cooldown_until,
+          probe_until = NULL,
           strikes = excluded.strikes,
           requests = key_state.requests + 1,
           successes = key_state.successes + excluded.successes,
@@ -406,7 +469,7 @@ export class RotationStore {
         nextCooldown,
         nextStrikes,
         result.ok ? 1 : 0,
-        result.ok ? 0 : 1,
+        failureDelta,
         result.toolError ? 1 : 0,
         result.httpStatus ?? null,
         result.latencyMs,
@@ -423,14 +486,12 @@ export class RotationStore {
 
   /** Healthy slots (not benched, not exhausted), in key order, without moving the cursor. */
   usableSlots(provider: string, keys: string[], eligible?: readonly number[]): number[] {
-    const states = this.slotStates(provider, keys);
-    return (eligible ?? keys.map((_, slot) => slot)).filter((slot) => states[slot]?.state === "healthy");
+    return this.slotSummary(provider, keys, eligible).healthy;
   }
 
   /** Exhausted slots whose window has passed: the last resort when nothing healthy is left. */
   sunkSlots(provider: string, keys: string[], eligible?: readonly number[]): number[] {
-    const states = this.slotStates(provider, keys);
-    return (eligible ?? keys.map((_, slot) => slot)).filter((slot) => states[slot]?.state === "sunk");
+    return this.slotSummary(provider, keys, eligible).sunk;
   }
 
   /**
@@ -438,28 +499,92 @@ export class RotationStore {
    * sinks to the back of the pool at once; an exhausted key that has credit
    * again (recharged, or a new billing period) is healthy again. Cool-downs
    * and auth failures are left alone: a balance says nothing about them.
+   * When `remaining` is undefined, any previously cached reading is preserved.
    */
-  recordQuota(provider: string, key: string, remaining: number | undefined, exhaustOnZero = true): void {
+  recordQuota(
+    provider: string,
+    key: string,
+    remaining: number | undefined,
+    options: boolean | RecordQuotaOptions = true,
+  ): void {
+    const opts: RecordQuotaOptions = typeof options === "boolean" ? { exhaustOnZero: options } : options;
+    const exhaustOnZero = opts.exhaustOnZero ?? true;
+    const preserveStatusOnPositive = opts.preserveStatusOnPositive ?? false;
+    const unit = opts.unit ?? null;
+    if (remaining === undefined) {
+      if (unit) {
+        const fp = keyFingerprint(key);
+        this.statement("UPDATE key_state SET quota_unit = COALESCE(?, quota_unit) WHERE provider = ? AND fp = ?")
+          .run(unit, provider, fp);
+      }
+      return;
+    }
     const now = Date.now();
     const fp = keyFingerprint(key);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.statement(`
-        INSERT INTO key_state(provider, fp, quota_remaining, quota_checked_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT(provider, fp) DO UPDATE SET quota_remaining = excluded.quota_remaining, quota_checked_at = excluded.quota_checked_at
-      `).run(provider, fp, remaining ?? null, now);
-      if (remaining !== undefined && remaining <= 0 && exhaustOnZero) {
-        // Confirmed empty: bench it for six hours, then it waits at the back like any exhausted key.
+        INSERT INTO key_state(provider, fp, quota_remaining, quota_checked_at, quota_unit) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(provider, fp) DO UPDATE SET
+          quota_remaining = excluded.quota_remaining,
+          quota_checked_at = excluded.quota_checked_at,
+          quota_unit = COALESCE(excluded.quota_unit, key_state.quota_unit)
+      `).run(provider, fp, remaining, now, unit);
+      if (remaining <= 0 && exhaustOnZero) {
+        // Confirmed empty: bench for 6h and advance strikes >= 1 so a follow-up 402 does not shrink backoff to 30m.
         this.statement(`
-          UPDATE key_state SET status = 'exhausted', cooldown_until = MAX(COALESCE(cooldown_until, 0), ?)
+          UPDATE key_state
+          SET status = 'exhausted',
+              cooldown_until = MAX(COALESCE(cooldown_until, 0), ?),
+              probe_until = NULL,
+              strikes = MAX(strikes, 1)
           WHERE provider = ? AND fp = ? AND status IN ('healthy', 'exhausted', 'cooldown')
         `).run(now + 6 * HOUR, provider, fp);
-      } else if (remaining !== undefined && remaining > 0) {
+      } else if (remaining > 0 && !preserveStatusOnPositive) {
         this.statement(`
-          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
+          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, probe_until = NULL, strikes = 0
           WHERE provider = ? AND fp = ? AND status = 'exhausted'
         `).run(provider, fp);
       }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.rollback();
+      throw error;
+    }
+  }
+
+  /**
+   * Record a confirmed auth or balance fault returned by a provider's billing endpoint.
+   * 401 disables the key and 402 marks it exhausted; other statuses record last_error only.
+   */
+  recordQuotaAuthError(provider: string, key: string, status: number, message: string): void {
+    const now = Date.now();
+    const fp = keyFingerprint(key);
+    const trimmed = message.slice(0, 200);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.statement("SELECT status, cooldown_until, strikes FROM key_state WHERE provider = ? AND fp = ?")
+        .get(provider, fp) as { status: string; cooldown_until: number | null; strikes: number } | undefined;
+      const strikes = current?.strikes ?? 0;
+      const penalty = status === 401 || status === 402 ? penaltyFor(status, strikes, undefined, status === 402) : undefined;
+      const nextStatus = penalty ? penalty.status : (current?.status ?? "healthy");
+      const nextCooldown = penalty
+        ? Math.max(current?.cooldown_until ?? 0, now + penalty.cooldownMs)
+        : (current?.cooldown_until ?? null);
+      const nextStrikes = penalty ? Math.max(strikes + 1, 1) : strikes;
+      this.statement(`
+        INSERT INTO key_state(
+          provider, fp, status, cooldown_until, probe_until, strikes, last_http_status, last_error, last_error_at
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)
+        ON CONFLICT(provider, fp) DO UPDATE SET
+          status = excluded.status,
+          cooldown_until = excluded.cooldown_until,
+          probe_until = NULL,
+          strikes = excluded.strikes,
+          last_http_status = excluded.last_http_status,
+          last_error = excluded.last_error,
+          last_error_at = excluded.last_error_at
+      `).run(provider, fp, nextStatus, nextCooldown, nextStrikes, status, trimmed, now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.rollback();
@@ -475,8 +600,8 @@ export class RotationStore {
     try {
       for (const key of targets) {
         const result = this.statement(`
-          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, strikes = 0
-          WHERE provider = ? AND fp = ? AND (status != 'healthy' OR cooldown_until IS NOT NULL OR strikes > 0)
+          UPDATE key_state SET status = 'healthy', cooldown_until = NULL, probe_until = NULL, strikes = 0
+          WHERE provider = ? AND fp = ? AND (status != 'healthy' OR cooldown_until IS NOT NULL OR probe_until IS NOT NULL OR strikes > 0)
         `).run(provider, keyFingerprint(key));
         cleared += Number(result.changes);
       }
@@ -495,7 +620,7 @@ export class RotationStore {
     const rows = this.statement(`
       SELECT fp, status, cooldown_until, strikes, requests, successes, failures, tool_errors,
              last_http_status, last_latency_ms, last_used_at, last_error, last_error_at,
-             quota_remaining, quota_checked_at
+             quota_remaining, quota_checked_at, quota_unit
       FROM key_state WHERE provider = ?
     `).all(provider) as Array<Record<string, unknown> & { fp: string }>;
     const byFingerprint = new Map(rows.map((item) => [item.fp, item]));
@@ -505,22 +630,37 @@ export class RotationStore {
       keyCount: keys.length,
       nextSlot: (cursor?.next_slot ?? 0) % Math.max(keys.length, 1),
       keys: keys.map((key, slot) => {
-        const { fp: _fp, quota_remaining: remaining, quota_checked_at: checkedAt, ...row } =
-          byFingerprint.get(keyFingerprint(key)) ?? {} as Record<string, unknown>;
-        const coolingDown = typeof row.cooldown_until === "number" && row.cooldown_until > now;
+        const {
+          fp: _fp,
+          quota_remaining: remaining,
+          quota_checked_at: checkedAt,
+          quota_unit: quotaUnit,
+          cooldown_until: cooldownUntil,
+          strikes: rawStrikes,
+          ...row
+        } = byFingerprint.get(keyFingerprint(key)) ?? {} as Record<string, unknown>;
+        const coolingDown = typeof cooldownUntil === "number" && cooldownUntil > now;
         // Exhaustion outlives its window: the key stays at the back until a call succeeds or it is reset.
         const shown = coolingDown || row.status === "exhausted" ? row.status : "healthy";
+        const isHealthy = shown === "healthy";
         return {
           slot,
           masked: maskKey(key),
           status: {
-            requests: 0, successes: 0, failures: 0, tool_errors: 0, strikes: 0,
+            requests: 0, successes: 0, failures: 0, tool_errors: 0,
             ...row,
             status: shown,
-            ...(coolingDown ? { recovers_in: formatDuration(Number(row.cooldown_until) - now) } : {}),
+            ...(!isHealthy && typeof cooldownUntil === "number" && coolingDown ? { cooldown_until: cooldownUntil } : {}),
+            ...(!isHealthy && typeof rawStrikes === "number" && rawStrikes > 0 ? { strikes: rawStrikes } : {}),
+            ...(coolingDown ? { recovers_in: formatDuration(Number(cooldownUntil) - now) } : {}),
             // Last balance read by `search-toolkit quota`, and how long ago.
             ...(typeof checkedAt === "number"
-              ? { quota_remaining: remaining ?? null, quota_checked: `${formatDuration(now - checkedAt)} ago` }
+              ? {
+                  quota_remaining: remaining ?? null,
+                  quota_checked: `${formatDuration(Math.max(0, now - checkedAt))} ago`,
+                  quota_checked_at: checkedAt,
+                  ...(typeof quotaUnit === "string" ? { quota_unit: quotaUnit } : {}),
+                }
               : {}),
           } as Record<string, unknown>,
         };
@@ -530,13 +670,21 @@ export class RotationStore {
 
   private healthByFingerprint(provider: string): Map<string, StateRow> {
     const rows = this.statement(
-      "SELECT fp, status, cooldown_until, strikes FROM key_state WHERE provider = ?",
+      "SELECT fp, status, cooldown_until, probe_until, strikes FROM key_state WHERE provider = ?",
     ).all(provider) as unknown as StateRow[];
     return new Map(rows.map((item) => [item.fp, item]));
   }
 }
 
-function formatDuration(ms: number): string {
+function evaluateSlotState(item: StateRow | undefined, now: number, allowExhausted = false): { state: SlotState; until?: number } {
+  if (!item) return { state: "healthy" };
+  if (allowExhausted && item.status === "exhausted") return { state: "healthy" };
+  if (item.cooldown_until !== null && item.cooldown_until > now) return { state: "benched", until: item.cooldown_until };
+  if (item.probe_until !== null && item.probe_until > now) return { state: "benched", until: item.probe_until };
+  return { state: item.status === "exhausted" ? "sunk" : "healthy" };
+}
+
+export function formatDuration(ms: number): string {
   const minutes = Math.max(1, Math.round(ms / MINUTE));
   if (minutes < 120) return `${minutes}m`;
   return `${Math.round(minutes / 60)}h`;

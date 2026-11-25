@@ -103,7 +103,8 @@ test("a benched key returns after its cool-down, and repeated faults back off fu
     store.record(store.select("brave", keys), { ok: true, latencyMs: 5, httpStatus: 200 });
     const healed = store.status("brave", keys).keys[0]?.status;
     assert.equal(healed?.status, "healthy");
-    assert.equal(healed?.strikes, 0);
+    assert.equal(healed?.strikes, undefined);
+    assert.equal(healed?.cooldown_until, undefined);
   });
 });
 
@@ -201,5 +202,128 @@ test("v1 slot-indexed health is adopted once and re-keyed by fingerprint", () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("strikes decay back to zero after 24 hours without errors", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-02T00:00:00Z") });
+  withStore((store) => {
+    const keys = ["decay-key-123456"];
+    // First 401 strike benches for 60m and sets last_error_at.
+    store.record(store.select("brave", keys, true), {
+      ok: false, latencyMs: 5, httpStatus: 401, error: "HTTP 401: bad key",
+    });
+    assert.equal(store.status("brave", keys).keys[0]?.status.recovers_in, "60m");
+    assert.equal(store.status("brave", keys).keys[0]?.status.strikes, 1);
+
+    // Advance beyond the 24h strike decay window without any intervening success.
+    t.mock.timers.tick(25 * 3_600_000);
+    const recovered = store.select("brave", keys);
+    store.record(recovered, {
+      ok: false, latencyMs: 5, httpStatus: 401, error: "HTTP 401: bad key again",
+    });
+    // Strikes decayed to 0 before penalty calculation, so backoff starts at 60m instead of 6h.
+    const status = store.status("brave", keys).keys[0]?.status;
+    assert.equal(status?.recovers_in, "60m");
+    assert.equal(status?.strikes, 1);
+  });
+});
+
+test("half-open recovery leases a single canary probe under drain and sticky strategies", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-02T00:00:00Z") });
+  withStore((store) => {
+    const keys = ["canary-one-123456", "canary-two-123456"];
+    // Bench slot 0 with a 60s 429 cooldown.
+    const first = store.select("serper", keys, { strategy: "drain" });
+    assert.equal(first.slot, 0);
+    store.record(first, { ok: false, latencyMs: 5, httpStatus: 429 });
+
+    // Once cooldown expires, the first caller probes slot 0 and holds a 30s probe lease.
+    t.mock.timers.tick(61_000);
+    const probe = store.select("serper", keys, { strategy: "drain" });
+    assert.equal(probe.slot, 0);
+
+    // A concurrent caller during the 30s probe lease routes to slot 1 instead of stampeding slot 0.
+    const concurrent = store.select("serper", keys, { strategy: "drain" });
+    assert.equal(concurrent.slot, 1);
+
+    // Recording the probe outcome immediately clears probe_until.
+    store.record(probe, { ok: true, latencyMs: 5, httpStatus: 200 });
+    assert.equal(store.select("serper", keys, { strategy: "drain" }).slot, 0);
+
+    // Also verify probe_until expires automatically after 30s even if a probe never records.
+    store.record(store.select("serper", keys, { strategy: "sticky" }), { ok: false, latencyMs: 5, httpStatus: 429 });
+    t.mock.timers.tick(61_000);
+    const stickyProbe = store.select("serper", keys, { strategy: "sticky" });
+    assert.equal(stickyProbe.slot, 0);
+    assert.equal(store.select("serper", keys, { strategy: "sticky" }).slot, 1);
+    t.mock.timers.tick(31_000);
+    assert.deepEqual(store.slotSummary("serper", keys).healthy, [0, 1]);
+  });
+});
+
+test("nonKeyError records diagnostics without incrementing failures or benching the key", () => {
+  withStore((store) => {
+    const keys = ["page-err-123456"];
+    const sel = store.select("parallel", keys, true);
+    store.record(sel, {
+      ok: false,
+      latencyMs: 12,
+      httpStatus: 422,
+      toolError: true,
+      nonKeyError: true,
+      error: "page answered 403",
+    });
+    const status = store.status("parallel", keys).keys[0]?.status;
+    assert.equal(status?.status, "healthy");
+    assert.equal(status?.requests, 1);
+    assert.equal(status?.failures, 0);
+    assert.equal(status?.tool_errors, 1);
+    assert.equal(status?.last_error, "page answered 403");
+    assert.equal(status?.strikes, undefined);
+    assert.equal(status?.cooldown_until, undefined);
+  });
+});
+
+test("RotationStore.close is idempotent", () => {
+  const dir = mkdtempSync(resolve(tmpdir(), "search-toolkit-close-"));
+  const store = new RotationStore(resolve(dir, "state.db"));
+  try {
+    store.close();
+    assert.doesNotThrow(() => store.close());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("allowExhausted and preserveExhausted let $0 promo calls reuse 402-exhausted slots without clearing exhaustion or bypassing 401/429", () => {
+  withStore((store) => {
+    const keys = ["promo-key-123456", "backup-key-123456"];
+    const first = store.select("vercel", keys, { strategy: "drain" });
+    store.record(first, { ok: false, latencyMs: 5, httpStatus: 402, exhausted: true });
+
+    // Default summary benches slot 0; allowExhausted treats 402-exhausted slot 0 as healthy.
+    assert.deepEqual(store.slotSummary("vercel", keys, undefined, false).healthy, [1]);
+    assert.deepEqual(store.slotSummary("vercel", keys, undefined, true).healthy, [0, 1]);
+
+    // allowExhausted selects slot 0 without setting a half-open probe_until lease (concurrent calls still see slot 0).
+    const promoA = store.select("vercel", keys, { strategy: "drain", allowExhausted: true });
+    const promoB = store.select("vercel", keys, { strategy: "drain", allowExhausted: true });
+    assert.equal(promoA.slot, 0);
+    assert.equal(promoB.slot, 0);
+
+    // preserveExhausted keeps status="exhausted" and cooldown_until intact on success.
+    const beforeCooldown = store.status("vercel", keys).keys[0]?.status.cooldown_until;
+    store.record(promoA, { ok: true, latencyMs: 5, httpStatus: 200, preserveExhausted: true });
+    const afterStatus = store.status("vercel", keys).keys[0]?.status;
+    assert.equal(afterStatus?.status, "exhausted");
+    assert.equal(afterStatus?.cooldown_until, beforeCooldown);
+
+    // 401 disabled and 429 cooldown remain blocked even when allowExhausted is true.
+    const single = ["only-key-123456"];
+    store.record(store.select("p429", single, true), { ok: false, latencyMs: 5, httpStatus: 429 });
+    assert.throws(() => store.select("p429", single, { allowExhausted: true }), /no healthy key slots/);
+    store.record(store.select("p401", single, true), { ok: false, latencyMs: 5, httpStatus: 401 });
+    assert.throws(() => store.select("p401", single, { allowExhausted: true }), /no healthy key slots/);
+  });
 });
 

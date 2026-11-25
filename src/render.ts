@@ -1,13 +1,13 @@
 import { cleanExcerpt, focusExcerpt } from "./excerpt.js";
-import { dedupeItems } from "./merge.js";
+import { canonicalUrl, dedupeItems } from "./merge.js";
 import { objectRecord, stringValue } from "./rest/normalize.js";
 import type { SearchItem } from "./types.js";
 
 export interface RenderOptions {
-  maxCharsPerItem?: number;
-  dedupe?: boolean;
+  maxCharsPerItem?: number | undefined;
+  dedupe?: boolean | undefined;
   /** The search query; long excerpts keep the sentences that mention it. */
-  query?: string;
+  query?: string | undefined;
 }
 
 /**
@@ -22,9 +22,24 @@ export function renderPayload(payload: unknown, options: RenderOptions = {}): st
   else if (record.grounding && typeof record.grounding === "object") parts.push(renderGrounding(record));
   else if (typeof record.text === "string") parts.push(renderAnswer(record));
   else return JSON.stringify(payload);
-  const warnings = Array.isArray(record.warnings) ? record.warnings.map((item) => stringValue(objectRecord(item).message) ?? String(typeof item === "string" ? item : JSON.stringify(item))) : [];
+  const warnings = extractWarnings(record.warnings);
   if (warnings.length) parts.push(`Warnings: ${warnings.join("; ")}`);
   return parts.filter(Boolean).join("\n\n");
+}
+
+function extractWarnings(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const text = typeof item === "string"
+      ? item.trim()
+      : (stringValue(objectRecord(item).message)?.trim() ?? (item !== null && item !== undefined ? JSON.stringify(item) : ""));
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
 }
 
 export function renderItems(items: unknown[], options: RenderOptions = {}): string {
@@ -89,16 +104,26 @@ function renderGrounding(data: Record<string, unknown>): string {
 
 function renderAnswer(data: Record<string, unknown>): string {
   const text = String(data.text ?? "").trim() || "(empty answer)";
-  const seen = new Set<string>();
-  const sources: string[] = [];
+  const seen = new Map<string, { url: string; title?: string }>();
   for (const entry of Array.isArray(data.citations) ? data.citations : []) {
     const citation = typeof entry === "string" ? { url: entry } : objectRecord(entry);
     const url = stringValue(citation.url);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
+    if (!url) continue;
+    const key = canonicalUrl(url);
     const title = stringValue(citation.title);
-    sources.push(`${sources.length + 1}. ${title ? `${title} — ` : ""}${url}`);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, title ? { url, title } : { url });
+      continue;
+    }
+    if (!existing.title && title) existing.title = title;
+    if (/\.md(?:$|[?#])/i.test(existing.url) && !/\.md(?:$|[?#])/i.test(url)) {
+      existing.url = url;
+    }
   }
+  const sources = Array.from(seen.values()).map(
+    (entry, index) => `${index + 1}. ${entry.title ? `${entry.title} — ` : ""}${entry.url}`,
+  );
   return sources.length ? `${text}\n\nSources:\n${sources.join("\n")}` : text;
 }
 

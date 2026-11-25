@@ -1,7 +1,9 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
-import { normalizeItem, numberArg, stringArg } from "../normalize.js";
+import { baseUrlOf, requestJson, searchTool, timeoutOf, type RestAdapter, type RestAdapterContext } from "../base.js";
+import { DEFAULT_ITEM_TEXT_CHARS, normalizeItem, numberArg, stringArg } from "../normalize.js";
+
+const FULL_CONTENT_MAX_CHARS = 32_000;
 
 export class JinaAdapter implements RestAdapter {
   tools(): Tool[] {
@@ -10,19 +12,31 @@ export class JinaAdapter implements RestAdapter {
     })];
   }
 
-  async call(_tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
+  async call(
+    _tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const fullContent = args.fullContent === true;
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
     const headers: Record<string, string> = {
       Authorization: `Bearer ${key}`,
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    if (args.fullContent !== true) headers["X-Respond-With"] = "no-content";
+    if (!fullContent) headers["X-Respond-With"] = "no-content";
     const data = await requestJson(baseUrlOf(config, "https://s.jina.ai/"), {
       method: "POST",
       headers,
-      body: JSON.stringify({ q: stringArg(args, "query") }),
-    }, args.fullContent === true ? 30_000 : 20_000);
+      body: JSON.stringify({ q: stringArg(args, "query"), num: limit }),
+    }, {
+      timeoutMs: timeoutOf(config, fullContent ? 30_000 : 20_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
     const rows = data.data ?? data.results;
-    return { items: Array.isArray(rows) ? rows.slice(0, numberArg(args, "limit", 6)).map((row) => normalizeItem(row)) : [] };
+    const maxChars = fullContent ? FULL_CONTENT_MAX_CHARS : DEFAULT_ITEM_TEXT_CHARS;
+    return { items: Array.isArray(rows) ? rows.slice(0, limit).map((row) => normalizeItem(row, { maxChars })) : [] };
   }
 }

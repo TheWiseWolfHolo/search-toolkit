@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { InvalidRequestError } from "../src/errors.js";
 import { isChineseQuery } from "../src/routes.js";
 import { attachRouteMetadata, autoCandidates, filterBindings, imageCandidates, SearchToolkit } from "../src/toolkit.js";
 import type { ProviderConfig, ToolBinding } from "../src/types.js";
@@ -119,7 +120,8 @@ test("search_pool_status is compact by default and verbose on request", async ()
   }
 });
 
-test("automatic route profiles keep their measured provider order", () => {
+test("automatic route profiles keep their measured provider order", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-15T12:00:00Z") });
   const request = { query: "route contract", limit: 7 };
   const names = (mode: Parameters<typeof autoCandidates>[0], quality: Parameters<typeof autoCandidates>[1] = "balanced", extra = {}) =>
     autoCandidates(mode, quality, { ...request, ...extra }).map((item) => item.name);
@@ -225,7 +227,8 @@ test("Chinese queries lead with Brave and Serper in Chinese-market settings", ()
   });
 });
 
-test("autoCandidates translates domain filters, freshness, and maxCharsPerResult across providers", () => {
+test("autoCandidates translates domain filters, freshness, and maxCharsPerResult across providers", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-15T12:00:00Z") });
   const filtered = autoCandidates("general", "balanced", {
     query: "mcp transport",
     limit: 5,
@@ -289,4 +292,353 @@ test("autoCandidates translates domain filters, freshness, and maxCharsPerResult
     contextMaxCharacters: 4800,
     type: "auto",
   });
+});
+
+test("capSearchOutput caps both content and structuredContent to limit, preserves warnings, and caps context item fallbacks", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-cap-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      parallel: { enabled: true, auto: ["search"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "parallel" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    search_id: "s1",
+    warnings: ["upstream note"],
+    results: Array.from({ length: 6 }, (_, i) => ({
+      url: `https://cap.example/${i + 1}`,
+      title: `Result ${i + 1}`,
+      excerpts: [`Excerpt ${i + 1}`],
+    })),
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    const general = await toolkit.callTool("search_auto", { query: "cap test", limit: 2 }) as {
+      content: Array<{ text: string }>;
+      structuredContent: { result: { data: { items: unknown[] } } };
+    };
+    assert.equal(general.structuredContent.result.data.items.length, 2);
+    assert.match(general.content[1]?.text ?? "", /1\. Result 1/);
+    assert.match(general.content[1]?.text ?? "", /2\. Result 2/);
+    assert.doesNotMatch(general.content[1]?.text ?? "", /3\. Result 3/);
+    assert.match(general.content[1]?.text ?? "", /Warnings: upstream note/);
+
+    // Context mode falling back to item-based parallel_search also respects limit.
+    const context = await toolkit.callTool("search_auto", { query: "cap context", mode: "context", limit: 3 }) as {
+      structuredContent: { result: { data: { items: unknown[] } } };
+    };
+    assert.equal(context.structuredContent.result.data.items.length, 3);
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("singleflight coalesces concurrent identical search_auto and fetch_auto requests", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-sf-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      brave: { enabled: true, auto: ["search"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "brave" } },
+      you: { enabled: true, auto: ["fetch"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "you" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  let searchHits = 0;
+  let fetchHits = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    if (url.includes("api.search.brave.com")) {
+      searchHits += 1;
+      return Response.json({ web: { results: [{ url: "https://sf.example/", title: "SF", description: "singleflight hit" }] } });
+    }
+    fetchHits += 1;
+    return Response.json({
+      url: "https://sf.example/doc",
+      title: "SF Doc",
+      contents: { markdown: "Readable page body for singleflight deduplication test. ".repeat(10) },
+    });
+  };
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    const [s1, s2] = await Promise.all([
+      toolkit.callTool("search_auto", { query: "same concurrent query" }),
+      toolkit.callTool("search_auto", { query: "same concurrent query" }),
+    ]);
+    assert.equal(searchHits, 1);
+    assert.deepEqual((s1 as { content: unknown }).content, (s2 as { content: unknown }).content);
+
+    const [f1, f2] = await Promise.all([
+      toolkit.callTool("fetch_auto", { url: "https://sf.example/doc", maxChars: 1000 }),
+      toolkit.callTool("fetch_auto", { url: "https://sf.example/doc", maxChars: 1000 }),
+    ]);
+    assert.equal(fetchHits, 1);
+    assert.deepEqual((f1 as { content: unknown }).content, (f2 as { content: unknown }).content);
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("cooling providers are excluded from crossCheck and local no-healthy-slots errors do not penalize EWMA", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-cooling-"));
+  const configPath = join(directory, "providers.json");
+  const rest = (adapter: string) => ({ enabled: true, auto: ["search"], keys: ["k1-123456"], integration: { kind: "rest", adapter } });
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: { parallel: rest("parallel"), serper: rest("serper"), brave: rest("brave") },
+  }));
+  const original = globalThis.fetch;
+  const hosts: string[] = [];
+  globalThis.fetch = async (input) => {
+    const host = new URL(String(input)).hostname;
+    hosts.push(host);
+    if (host === "google.serper.dev") return Response.json({ organic: [{ title: "S", link: "https://shared.example/", snippet: "s" }] });
+    if (host === "api.search.brave.com") return Response.json({ web: { results: [{ title: "B", url: "https://shared.example/", description: "b" }] } });
+    throw new Error(`unexpected host ${host}`);
+  };
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    // Bench parallel's only key so it is cooling.
+    toolkit.rotation.record(toolkit.rotation.select("parallel", ["k1-123456"], true), { ok: false, latencyMs: 5, httpStatus: 429 });
+
+    // crossCheck picks active serper + brave and skips cooling parallel.
+    const checked = await toolkit.callTool("search_auto", { query: "cooling test", crossCheck: true }) as {
+      structuredContent: { searchAuto: { crossCheck: { status: string; routes: Array<{ provider: string }> } } };
+    };
+    assert.equal(checked.structuredContent.searchAuto.crossCheck.status, "complete");
+    assert.deepEqual(checked.structuredContent.searchAuto.crossCheck.routes.map((r) => r.provider), ["serper", "brave"]);
+    assert.equal(hosts.includes("api.parallel.ai"), false);
+
+    // Bench serper & brave too so every provider is cooling; local slot exhaustion must NOT poison recentFailure EWMA.
+    toolkit.rotation.record(toolkit.rotation.select("serper", ["k1-123456"], true), { ok: false, latencyMs: 5, httpStatus: 429 });
+    toolkit.rotation.record(toolkit.rotation.select("brave", ["k1-123456"], true), { ok: false, latencyMs: 5, httpStatus: 429 });
+    await assert.rejects(toolkit.callTool("search_auto", { query: "all cooling" }), /no healthy key slots available/);
+    const status = toolkit.status() as { providers: Array<{ name: string; recentFailure?: number }> };
+    for (const provider of status.providers) {
+      assert.equal(provider.recentFailure, undefined, `${provider.name} should not be EWMA-penalized for local cooldown`);
+    }
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("vercel_gateway 5xx on vercel_deepseek_search skips sibling vercel_parallel_fast in runChain", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-vercel-sibling-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      vercel: { enabled: true, auto: ["search"], keys: ["v-key-123456"], integration: { kind: "rest", adapter: "vercel_gateway" } },
+      you: { enabled: true, auto: ["search"], keys: ["y-key-123456"], integration: { kind: "rest", adapter: "you" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  let vercelHits = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("ai-gateway.vercel.sh")) {
+      vercelHits += 1;
+      return new Response("gateway overloaded", { status: 503 });
+    }
+    return new Response("you unavailable", { status: 503 });
+  };
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    // Chinese general route orders vercel_deepseek_search -> you_search -> vercel_parallel_fast.
+    await assert.rejects(
+      toolkit.callTool("search_auto", { query: "深圳地铁16号线" }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /vercel\/vercel_deepseek_search\[503\] -> you\/you_search\[503\]/);
+        assert.doesNotMatch(err.message, /vercel_parallel_fast/);
+        return true;
+      },
+    );
+    assert.equal(vercelHits, 1, "sibling vercel_parallel_fast must be skipped after 5xx on vercel_deepseek_search");
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("vercel_deepseek_search 402 on a 1-key pool still allows $0 vercel_parallel_fast while keeping key exhausted for paid tools, whereas 401/429 blocks both", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-vercel-promo-"));
+  const configPath = join(directory, "providers.json");
+  const keys = ["v-promo-key-123456"];
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      vercel: { enabled: true, auto: ["search"], keys, integration: { kind: "rest", adapter: "vercel_gateway" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  let deepseekCalls = 0;
+  let parallelCalls = 0;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { tools?: Array<{ name?: string }> };
+    const toolName = body.tools?.[0]?.name;
+    if (toolName === "deepseek_search") {
+      deepseekCalls += 1;
+      return new Response(JSON.stringify({ error: { code: "insufficient_credits", message: "Out of credits" } }), {
+        status: 402,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    parallelCalls += 1;
+    return Response.json({
+      content: [{
+        type: "tool-result",
+        toolName: "parallel_search",
+        result: { results: [{ title: "Promo Result", url: "https://promo.example/1", excerpts: ["$0 parallel fast"] }] },
+      }],
+    });
+  };
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    // 1. First search_auto hits 402 on vercel_deepseek_search, then immediately succeeds via $0 vercel_parallel_fast.
+    const first = await toolkit.callTool("search_auto", { query: "promo fallback one" }) as {
+      structuredContent: {
+        route: { tool: string };
+        searchAuto: { attempts: Array<{ tool: string; outcome: string; status?: number }> };
+      };
+    };
+    assert.equal(first.structuredContent.route.tool, "vercel_parallel_fast");
+    assert.deepEqual(
+      first.structuredContent.searchAuto.attempts.map((a) => `${a.tool}:${a.status ?? a.outcome}`),
+      ["vercel_deepseek_search:402", "vercel_parallel_fast:success"],
+    );
+    assert.equal(deepseekCalls, 1);
+    assert.equal(parallelCalls, 1);
+    // Exhausted status must remain preserved on the key for paid tools even though $0 promo succeeded.
+    assert.equal(toolkit.rotation.status("vercel", keys).keys[0]?.status.status, "exhausted");
+
+    // 2. Subsequent search_auto skips exhausted vercel_deepseek_search and goes directly to $0 vercel_parallel_fast.
+    const second = await toolkit.callTool("search_auto", { query: "promo fallback two" }) as {
+      structuredContent: { route: { tool: string } };
+    };
+    assert.equal(second.structuredContent.route.tool, "vercel_parallel_fast");
+    assert.equal(deepseekCalls, 1, "paid vercel_deepseek_search stays bypassed while exhausted");
+    assert.equal(parallelCalls, 2);
+    assert.equal(toolkit.rotation.status("vercel", keys).keys[0]?.status.status, "exhausted");
+
+    // Direct paid call is still blocked; direct $0 promo call still succeeds and preserves exhausted status.
+    await assert.rejects(toolkit.callTool("vercel_deepseek_search", { query: "paid direct" }), /no healthy key slots/);
+    const directPromo = await toolkit.callTool("vercel_parallel_fast", { query: "promo direct" }) as {
+      structuredContent: { tool: string };
+    };
+    assert.equal(directPromo.structuredContent.tool, "vercel_parallel_fast");
+    assert.equal(toolkit.rotation.status("vercel", keys).keys[0]?.status.status, "exhausted");
+
+    // 3. 429 cooldown and 401 disabled still block BOTH paid and $0 promo tools.
+    toolkit.rotation.reset("vercel", keys);
+    toolkit.rotation.record(toolkit.rotation.select("vercel", keys, true), { ok: false, latencyMs: 5, httpStatus: 429 });
+    await assert.rejects(toolkit.callTool("vercel_parallel_fast", { query: "blocked 429" }), /no healthy key slots/);
+    await assert.rejects(toolkit.callTool("search_auto", { query: "blocked 429 auto" }), /no healthy key slots/);
+
+    toolkit.rotation.reset("vercel", keys);
+    toolkit.rotation.record(toolkit.rotation.select("vercel", keys, true), { ok: false, latencyMs: 5, httpStatus: 401 });
+    await assert.rejects(toolkit.callTool("vercel_parallel_fast", { query: "blocked 401" }), /no healthy key slots/);
+    await assert.rejects(toolkit.callTool("search_auto", { query: "blocked 401 auto" }), /no healthy key slots/);
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("allowTool is enforced inside SearchToolkit.callTool for provider_call and search_rotation_probe", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-allow-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      brave: { enabled: true, auto: ["search"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "brave" } },
+    },
+  }));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ web: { results: [{ url: "https://ok.example/", title: "OK", description: "d" }] } });
+  const toolkit = new SearchToolkit(configPath, { profile: "lean" });
+  try {
+    await toolkit.initialize();
+    const denyBraveWeb = (tool: { name: string }) => tool.name !== "brave_web_search";
+
+    await assert.rejects(
+      toolkit.callTool("provider_call", { name: "brave_web_search", arguments: { query: "q" } }, { allowTool: denyBraveWeb }),
+      /not available for this token/,
+    );
+    await assert.rejects(
+      toolkit.callTool("search_rotation_probe", { provider: "brave", query: "probe", tool: "brave_web_search" }, { allowTool: denyBraveWeb }),
+      /not available for this token/,
+    );
+    // Omitted args.tool auto-selects brave_web_search and must also be blocked by allowTool.
+    await assert.rejects(
+      toolkit.callTool("search_rotation_probe", { provider: "brave", query: "probe" }, { allowTool: denyBraveWeb }),
+      /not available for this token/,
+    );
+    // Explicitly allowed tool succeeds.
+    const allowedProbe = await toolkit.callTool(
+      "search_rotation_probe",
+      { provider: "brave", query: "probe", tool: "brave_news_search", calls: 1 },
+      { allowTool: denyBraveWeb },
+    ) as { structuredContent: { tool: string } };
+    assert.equal(allowedProbe.structuredContent.tool, "brave_news_search");
+  } finally {
+    globalThis.fetch = original;
+    await toolkit.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("search_images rejects contradictory or invalid arguments with InvalidRequestError and SearchToolkit.close is idempotent", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "search-toolkit-images-close-"));
+  const configPath = join(directory, "providers.json");
+  writeFileSync(configPath, JSON.stringify({
+    version: 2,
+    statePath: join(directory, "state.db"),
+    providers: {
+      brave: { enabled: true, auto: ["images"], keys: ["k1-123456"], integration: { kind: "rest", adapter: "brave" } },
+    },
+  }));
+  const toolkit = new SearchToolkit(configPath);
+  try {
+    await toolkit.initialize();
+    for (const badArgs of [
+      { query: "cat", imageUrl: "https://example.com/cat.jpg" },
+      {},
+      { imageUrl: "file:///etc/passwd" },
+      { imageUrl: "https://user:pass@example.com/cat.jpg" },
+    ]) {
+      await assert.rejects(
+        toolkit.callTool("search_images", badArgs),
+        (err: unknown) => err instanceof InvalidRequestError,
+        JSON.stringify(badArgs),
+      );
+    }
+    // Calling close() concurrently and sequentially must resolve cleanly without ERR_INVALID_STATE.
+    await Promise.all([toolkit.close(), toolkit.close()]);
+    await toolkit.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

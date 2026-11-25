@@ -62,6 +62,17 @@ export class CapabilityGateError extends Error {
   }
 }
 
+/** Caller passed invalid or contradictory arguments; never retry keys or fail over providers. */
+export class InvalidRequestError extends Error {
+  readonly status = 422;
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidRequestError";
+  }
+}
+
+export type ToolIntent = "search" | "fetch" | "other";
+
 // Octen answers 403 "Payment method required" on endpoints a credit-only (gift) account may not use: a plan limit.
 // Out of credit or quota, in the words providers use: Parallel and Firecrawl 402, Octen 403
 // "Insufficient balance in account", You.com 429 spend_cap_exceeded, Tavily "exceeds your plan's set usage limit",
@@ -76,7 +87,7 @@ function errorText(error: unknown): string {
 
 /** The key has run out of credit or quota. Recharging or a new billing period fixes it; waiting a minute does not. */
 export function isQuotaExhausted(error: unknown): boolean {
-  if (error instanceof TargetPageError || error instanceof PlanLimitError || error instanceof CapabilityGateError) return false;
+  if (error instanceof TargetPageError || error instanceof PlanLimitError || error instanceof CapabilityGateError || error instanceof InvalidRequestError) return false;
   const status = statusFromError(error);
   // Tavily answers 432 (plan limit reached) and 433 (pay-as-you-go limit reached).
   if (status === 402 || status === 432 || status === 433) return true;
@@ -87,7 +98,7 @@ export function isQuotaExhausted(error: unknown): boolean {
 /** The request needs a plan this key does not have. */
 export function isPlanLimit(error: unknown): boolean {
   if (error instanceof PlanLimitError) return true;
-  if (error instanceof TargetPageError || error instanceof CapabilityGateError || isQuotaExhausted(error)) return false;
+  if (error instanceof TargetPageError || error instanceof CapabilityGateError || error instanceof InvalidRequestError || isQuotaExhausted(error)) return false;
   const status = statusFromError(error);
   if (status !== undefined && ![400, 401, 403, 422].includes(status)) return false;
   return PLAN_LIMIT_PATTERN.test(errorText(error));
@@ -99,6 +110,7 @@ const REQUEST_SHAPE_PATTERN = /validation error|unexpected keyword argument|inva
 const REQUEST_SHAPE_RPC_CODES = new Set([-32_601, -32_602]);
 
 export function statusFromError(error: unknown): number | undefined {
+  if (error instanceof InvalidRequestError) return error.status;
   if (error instanceof HttpError) return error.status;
   if (error instanceof ToolResultError) return error.status;
   if (error instanceof TargetPageError || error instanceof CapabilityGateError) return undefined;
@@ -116,19 +128,30 @@ export function statusFromError(error: unknown): number | undefined {
       return keyFaultStatusFromToolText(text) ?? (REQUEST_SHAPE_PATTERN.test(text) ? 422 : undefined);
     }
   }
-  const match = text.match(/(?:HTTP|status)\s*(\d{3})/i);
+  const match = text.match(/(?:HTTP|status)\s*:?\s*([45]\d{2})\b/i);
   if (match?.[1]) return Number(match[1]);
   if (REQUEST_SHAPE_PATTERN.test(text)) return 422;
   return undefined;
 }
 
+const EXPLICIT_KEY_AUTH_FAULT = /(?:invalid|missing|incorrect|expired|revoked|unknown|bad)\s+(?:api[\s_-]?key|access[\s_-]?token|credentials?)|api[\s_-]?key\s+(?:is\s+)?(?:invalid|missing|not\s+(?:valid|found))/i;
+const QUALIFIED_PROVIDER_AUTH_FAULT = /(?:exa|tavily|firecrawl|linkup|anysearch|parallel|you\.com|octen|tinyfish|deepseek|vercel|ai[\s_-]?gateway|api[\s_-]?key|api|account|subscription|plan|token)[\s\S]{0,60}(?:unauthori[sz]ed|authentication\s+(?:failed|required))|(?:unauthori[sz]ed|authentication\s+(?:failed|required))[\s\S]{0,60}(?:api[\s_-]?key|account|subscription|token|exa|tavily|firecrawl|linkup|anysearch)/i;
+const QUALIFIED_PROVIDER_RATE_FAULT = /(?:exa|tavily|firecrawl|linkup|anysearch|parallel|you\.com|octen|tinyfish|deepseek|vercel|ai[\s_-]?gateway|api[\s_-]?key|api|account|subscription|plan|quota)[\s\S]{0,60}(?:rate[\s_-]?limit(?:ed)?|too\s+many\s+requests)|(?:rate[\s_-]?limit(?:ed)?|too\s+many\s+requests)[\s\S]{0,60}(?:api[\s_-]?key|account|subscription|plan|quota|exa|tavily|firecrawl|linkup|anysearch)/i;
+
 /**
  * Recognise key-attributable failures in the text of an upstream tool error.
- * Deliberately narrow: a scraped page answering "403 Forbidden" must not
- * disable the API key that fetched it.
+ * Deliberately narrow: a scraped page answering "403 Forbidden" (or 401/429 on
+ * a fetch/scrape tool) must not disable the API key that fetched it.
  */
-export function keyFaultStatusFromToolText(text: string): number | undefined {
-  if (/(?:invalid|missing|incorrect|expired|revoked|unknown|bad)\s+(?:api[\s_-]?key|access[\s_-]?token|credentials?)|api[\s_-]?key\s+(?:is\s+)?(?:invalid|missing|not\s+(?:valid|found))|unauthori[sz]ed|authentication\s+(?:failed|required)/i.test(text)) return 401;
+export function keyFaultStatusFromToolText(text: string, intent: ToolIntent = "search"): number | undefined {
+  if (EXPLICIT_KEY_AUTH_FAULT.test(text)) return 401;
+  if (intent === "fetch") {
+    if (QUALIFIED_PROVIDER_AUTH_FAULT.test(text)) return 401;
+    if (QUOTA_PATTERN.test(text)) return 402;
+    if (QUALIFIED_PROVIDER_RATE_FAULT.test(text)) return 429;
+    return undefined;
+  }
+  if (/unauthori[sz]ed|authentication\s+(?:failed|required)/i.test(text)) return 401;
   if (QUOTA_PATTERN.test(text)) return 402;
   if (/rate[\s_-]?limit(?:ed)?|too\s+many\s+requests/i.test(text)) return 429;
   return undefined;
@@ -174,7 +197,7 @@ export function shouldFailoverProvider(error: unknown): boolean {
     if ([400, 404, 405, 409, 415, 422, 451].includes(status)) return false;
     if (status === 403) {
       if (/policy|safety|legal|robots|content block|blocked by|restricted content/i.test(text)) return false;
-      return /api[\s_-]?key|credential|auth(?:entication|orization)?|subscription|plan|feature|permission|access denied/i.test(text);
+      return true;
     }
     return status === 401 || status === 402 || status === 408 || status === 425 || status === 429 || status === 434 || status >= 500;
   }
@@ -193,14 +216,14 @@ export function isPageFailure(error: unknown): boolean {
   const text = error.message;
   // Reader error codes join words with underscores (Exa CRAWL_HTTP_403), so no \b around the digits.
   if (/status(?:\s+code)?:?\s*(?:404|410|451)(?!\d)|crawl_http_(?:404|410|451)(?!\d)|page_not_found|not found/i.test(text)) return false;
-  return /status(?:\s+code)?:?\s*(?:403|429|5\d\d)(?!\d)|forbidden|access denied|blocked|captcha|cloudflare|timed?\s?out/i.test(text)
+  return /status(?:\s+code)?:?\s*(?:401|403|429|5\d\d)(?!\d)|unauthori[sz]ed|forbidden|access denied|blocked|captcha|cloudflare|timed?\s?out/i.test(text)
     // Exa CRAWL_*, Firecrawl SCRAPE_* and unsupported_site, TinyFish per-URL codes.
     || /(?:crawl|scrape)_[a-z0-9_]+|unsupported[\s_]site|empty[\s_]content|login_required|target_unreachable|target_http_error/i.test(text);
 }
 
 /** Transport-level failures where the cached upstream client should be rebuilt. */
 export function isConnectionFailure(error: unknown): boolean {
-  if (error instanceof ToolResultError || error instanceof HttpError || error instanceof TargetPageError) return false;
+  if (error instanceof ToolResultError || error instanceof HttpError || error instanceof TargetPageError || error instanceof InvalidRequestError) return false;
   if (error && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
     if (code === -32_000) return true; // MCP ConnectionClosed

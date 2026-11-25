@@ -1,6 +1,9 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { ProviderConfig } from "../../types.js";
-import { baseUrlOf, requestJson, searchTool, type RestAdapter } from "../base.js";
+import {
+  endpointOf, READ_ONLY_OPEN, requestJson, searchTool, timeoutOf, validateFetchTargetUrl,
+  type RestAdapter, type RestAdapterContext,
+} from "../base.js";
 import { normalizeItem, normalizeSerperImage, numberArg, stringArg } from "../normalize.js";
 
 const LENS_TOOL: Tool = {
@@ -18,7 +21,7 @@ const LENS_TOOL: Tool = {
     required: ["url"],
     additionalProperties: false,
   },
-  annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  annotations: READ_ONLY_OPEN,
 };
 
 export const LENS_NO_MATCHES = "Google Lens found no matches. Some image hosts, Wikimedia originals among them, do not serve Google's fetcher; a smaller or re-hosted copy of the same image usually works.";
@@ -43,35 +46,55 @@ export class SerperAdapter implements RestAdapter {
     )), LENS_TOOL];
   }
 
-  async call(tool: string, args: Record<string, unknown>, key: string, config?: ProviderConfig): Promise<unknown> {
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
     const kind = tool.replace("serper_", "");
-    const root = baseUrlOf(config, "https://google.serper.dev").replace(/\/+$/, "");
-    if (kind === "lens") return this.lens(args, key, root);
-    const body: Record<string, unknown> = { q: stringArg(args, "query"), num: numberArg(args, "limit", 6) };
+    if (kind === "lens") return this.lens(args, key, config, context);
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 6)));
+    const body: Record<string, unknown> = { q: stringArg(args, "query"), num: limit };
     // Scholar has no web time filter; a tbs there narrows nothing and can empty the results.
     for (const name of kind === "scholar" ? ["gl", "hl"] : ["gl", "hl", "tbs"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
-    if (typeof args.page === "number") body.page = args.page;
+    if (typeof args.page === "number" && Number.isFinite(args.page)) body.page = args.page;
     if (typeof args.autocorrect === "boolean") body.autocorrect = args.autocorrect;
-    const data = await requestJson(`${root}/${kind}`, {
+    const data = await requestJson(endpointOf(config, "https://google.serper.dev", `/${kind}`), {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }, {
+      timeoutMs: timeoutOf(config, 15_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
     });
     const source = kind === "search" || kind === "scholar" ? data.organic : data[kind];
     const dateKeys = kind === "scholar" ? ["year", "date"] : ["date"];
     const normalize = kind === "images" ? normalizeSerperImage : (row: unknown) => normalizeItem(row, { dateKeys });
-    return { items: Array.isArray(source) ? source.slice(0, numberArg(args, "limit", 6)).map(normalize) : [] };
+    return { items: Array.isArray(source) ? source.slice(0, limit).map(normalize) : [] };
   }
 
-  private async lens(args: Record<string, unknown>, key: string, root: string): Promise<unknown> {
-    const body: Record<string, unknown> = { url: stringArg(args, "url") };
+  private async lens(
+    args: Record<string, unknown>,
+    key: string,
+    config?: ProviderConfig,
+    context?: RestAdapterContext,
+  ): Promise<unknown> {
+    const rawUrl = stringArg(args, "url").trim();
+    validateFetchTargetUrl(rawUrl, "serper_lens");
+    const limit = Math.max(1, Math.round(numberArg(args, "limit", 10)));
+    const body: Record<string, unknown> = { url: rawUrl };
     for (const name of ["gl", "hl"]) if (stringArg(args, name)) body[name] = stringArg(args, name);
-    const data = await requestJson(`${root}/lens`, {
+    const data = await requestJson(endpointOf(config, "https://google.serper.dev", "/lens"), {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 30_000);
-    const rows = Array.isArray(data.organic) ? data.organic.slice(0, numberArg(args, "limit", 10)) : [];
+    }, {
+      timeoutMs: timeoutOf(config, 30_000),
+      ...(context?.signal ? { signal: context.signal } : {}),
+    });
+    const rows = Array.isArray(data.organic) ? data.organic.slice(0, limit) : [];
     // Lens sometimes names the matched image with an internal x-raw-image:// reference; the thumbnail is the usable copy.
     const items = rows.map((row) => {
       const item = normalizeSerperImage(row);
